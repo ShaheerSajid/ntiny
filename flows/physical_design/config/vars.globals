@@ -1,0 +1,17 @@
+# Set MMMCLib path
+set MMMCLib ../../65GP_TT/lib
+# Set cap_table path
+set CAPLib ../../65GP_TT/qrc
+# Set .lib file
+set TimeLibTyp "$MMMCLib/tcbn65gplustc.lib $MMMCLib/tphn65gpgv2od3_sltc.lib $MMMCLib/arm_imem_nldm_tt_1p00v_1p00v_25c_syn.lib $MMMCLib/arm_dmem_nldm_tt_1p00v_1p00v_25c_syn.lib $MMMCLib/arm_boot_nldm_tt_1p00v_1p00v_25c_syn.lib"
+set TimeLibBest "$MMMCLib/tcbn65gpluslt.lib $MMMCLib/tphn65gpgv2od3_sllt.lib $MMMCLib/arm_imem_nldm_ff_1p10v_1p10v_m40c_syn.lib $MMMCLib/arm_dmem_nldm_ff_1p10v_1p10v_m40c_syn.lib $MMMCLib/arm_boot_nldm_ff_1p10v_1p10v_m40c_syn.lib"
+set TimeLibWorst "$MMMCLib/tcbn65gpluswc.lib $MMMCLib/tphn65gpgv2od3_slwc.lib $MMMCLib/arm_imem_nldm_ss_0p90v_0p90v_125c_syn.lib $MMMCLib/arm_dmem_nldm_ss_0p90v_0p90v_125c_syn.lib $MMMCLib/arm_boot_nldm_ss_0p90v_0p90v_125c_syn.lib"
+# Set qrcTechFile (Cap Table is obsolete)
+set qrcFileTyp   "$CAPLib/qrcTechFile_typ"
+set qrcFileCbest  "$CAPLib/qrcTechFile_cbest"
+set qrcFileCworst  "$CAPLib/qrcTechFile_cworst"
+set qrcFileRCbest "$CAPLib/qrcTechFile_rcbest"
+set qrcFileRCworst "$CAPLib/qrcTechFile_rcworst"
+set TempTT {25}
+set TempFF {-40}
+set TempSS {125}

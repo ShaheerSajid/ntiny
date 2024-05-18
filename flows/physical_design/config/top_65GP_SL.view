@@ -1,0 +1,35 @@
+# Version: 1.0 MMMC View Definition File
+source ../config/vars.globals
+# Create library set
+create_library_set -name lib_tt -timing "$TimeLibTyp"
+create_library_set -name lib_ff -timing "$TimeLibBest"
+create_library_set -name lib_ss -timing "$TimeLibWorst"
+# Create RC corner
+create_rc_corner -name rc_typ   -T "$TempTT" -qx_tech_file "$qrcFileTyp"
+create_rc_corner -name rc_cbest  -T "$TempFF" -qx_tech_file "$qrcFileCbest"
+create_rc_corner -name rc_cworst  -T "$TempSS" -qx_tech_file "$qrcFileCworst"
+create_rc_corner -name rc_rcbest -T "$TempFF" -qx_tech_file "$qrcFileRCbest"
+create_rc_corner -name rc_rcworst -T "$TempSS" -qx_tech_file "$qrcFileRCworst"
+# Create delay corner
+create_delay_corner -name delay_typ   -library_set {lib_tt} -rc_corner {rc_typ}
+create_delay_corner -name delay_cbest  -library_set {lib_ff} -rc_corner {rc_cbest}
+create_delay_corner -name delay_cworst  -library_set {lib_ss} -rc_corner {rc_cworst}
+create_delay_corner -name delay_rcbest -library_set {lib_ff} -rc_corner {rc_rcbest}
+create_delay_corner -name delay_rcworst -library_set {lib_ss} -rc_corner {rc_rcworst}
+
+
+# Create constraint mode
+create_constraint_mode -name cons_typ -sdc_files {../../synthesis/genus/work/output/top_m_typ.sdc}
+create_constraint_mode -name cons_cworst -sdc_files {../../synthesis/genus/work/output/top_m_cworst.sdc}
+create_constraint_mode -name cons_cbest -sdc_files {../../synthesis/genus/work/output/top_m_cbest.sdc}
+create_constraint_mode -name cons_rcworst -sdc_files {../../synthesis/genus/work/output/top_m_rcworst.sdc}
+create_constraint_mode -name cons_rcbest -sdc_files {../../synthesis/genus/work/output/top_m_rcbest.sdc}
+# Create analysis view
+create_analysis_view -name func_typ   -constraint_mode {cons_typ} -delay_corner {delay_typ}
+create_analysis_view -name func_cbest  -constraint_mode {cons_cbest} -delay_corner {delay_cbest}
+create_analysis_view -name func_cworst  -constraint_mode {cons_cworst} -delay_corner {delay_cworst}
+create_analysis_view -name func_rcbest -constraint_mode {cons_rcbest} -delay_corner {delay_rcbest}
+create_analysis_view -name func_rcworst -constraint_mode {cons_rcworst} -delay_corner {delay_rcworst}
+
+# Set analysis view
+set_analysis_view -setup {func_rcworst func_cbest func_typ} -hold {func_rcworst func_cbest func_typ}
