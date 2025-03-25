@@ -21,6 +21,7 @@ typedef enum logic [`OPCODE_LENGTH-1:0] {
 	FNMSUB	= 7'b1001011,
 	FNMADD	= 7'b1001111,
 	F_OP	= 7'b1010011,
+	AMO     = 7'b0101111,
 	NO_INS	= 7'b0000000
 } rv32_opcodes_e;
 
@@ -59,7 +60,21 @@ typedef enum logic[3:0] {
 	PASS,
 	NO_ALU_OP
 } alu_op_e;
-
+//atomic
+typedef enum logic [3:0] {
+  AMO_ADD   = 4'b0000,
+  AMO_SWAP  = 4'b0001,
+  AMO_LR    = 4'b0010,
+  AMO_SC    = 4'b0011,
+  AMO_XOR   = 4'b0100,
+  AMO_OR    = 4'b0101,
+  AMO_AND   = 4'b0110,
+  AMO_MIN   = 4'b1000,
+  AMO_MAX   = 4'b1001,
+  AMO_MINU  = 4'b1100,
+  AMO_MAXU  = 4'b1101,
+  NO_AMO_OP = 4'b1111
+} amo_op_e;
 //bit
 typedef enum logic[4:0] {
 	SH1ADD,
@@ -225,6 +240,7 @@ typedef enum logic[2:0] {
 typedef enum logic[1:0] {
 	READ,
 	WRITE,
+	READ_WRITE,
 	NO_MEM_OP
 } mem_op_e;
 

@@ -87,7 +87,6 @@ verilator_sim:
 	--timescale-override 1ns/10ps \
 	-O3 \
 	-DVERILATOR_SIM \
-	-DBOOT \
 	--trace \
 	-sv --top-module tb_soc_top \
 	--cc \

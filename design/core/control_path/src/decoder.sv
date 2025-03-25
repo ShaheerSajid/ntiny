@@ -18,6 +18,7 @@ operand_e operand_a;
 operand_e operand_b;
 operand_e operand_c;
 alu_op_e alu_op;
+amo_op_e amo_op;
 csr_op_e csr_op;
 onebit_sig_e csr_use_immediate;
 csr_reg_e csr_addr;
@@ -56,6 +57,7 @@ begin
     operand_b = NO_OPERAND;
     operand_c = NO_OPERAND;
     alu_op = NO_ALU_OP;
+    amo_op = NO_AMO_OP;
     csr_op = NO_CSR_OP;
     csr_use_immediate = FALSE;
     csr_addr = NO_CSR_REG;
@@ -212,6 +214,31 @@ begin
                         rd_int = reg_add_e'(instruction_i[11:7]);
                         wb_sel = EXEC;
                     end
+        AMO     :   begin // AMO Operations (7'b0101111)
+                        load_store_width = load_store_width_e'(instruction_i[13:12]);
+                        mem_unsigned = onebit_sig_e'(instruction_i[14]);
+                        mem_op = READ_WRITE;
+                        rs1_int = reg_add_e'(instruction_i[19:15]);
+                        rs2_int = reg_add_e'(instruction_i[24:20]);
+                        rd_int = reg_add_e'(instruction_i[11:7]);
+                        // Decode funct5 (bits 31:27) for specific AMO operations
+                        case (instruction_i[31:27])
+                            5'b00000: amo_op = AMO_ADD;
+                            5'b00001: amo_op = AMO_SWAP;
+                            5'b00010: amo_op = AMO_LR;
+                            5'b00011: amo_op = AMO_SC;
+                            5'b00100: amo_op = AMO_XOR;
+                            5'b00101: amo_op = AMO_OR;
+                            5'b00110: amo_op = AMO_AND;
+                            5'b01000: amo_op = AMO_MIN;
+                            5'b01001: amo_op = AMO_MAX;
+                            5'b01100: amo_op = AMO_MINU;
+                            5'b01101: amo_op = AMO_MAXU;
+                            default: begin
+                                amo_op = AMO_ADD; // Safe default
+                            end
+                        endcase
+                    end
         CSR     :   begin
                         imm_sel = CSR_imm;
                         csr_op = csr_op_e'({1'b0,instruction_i[13:12]});
@@ -222,6 +249,7 @@ begin
                         rd_int = reg_add_e'(instruction_i[11:7]);
                         wb_sel = EXEC;
                     end
+    `ifdef FPU
         FLOAD   :   begin
                         load_store_width = load_store_width_e'(instruction_i[13:12]);
                         mem_unsigned = onebit_sig_e'(instruction_i[14]);
@@ -234,7 +262,6 @@ begin
                         rd_float = reg_add_e'(instruction_i[11:7]);
                         wb_sel = MEMORY;
                     end
-    `ifdef FPU
         FSTORE  :   begin
                         load_store_width = load_store_width_e'(instruction_i[13:12]);
                         imm_sel = S_imm;

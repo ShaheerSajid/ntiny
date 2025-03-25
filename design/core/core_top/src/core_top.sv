@@ -57,6 +57,7 @@ assign ctrl_bus_reset.operand_a = NO_OPERAND;
 assign ctrl_bus_reset.operand_b = NO_OPERAND;
 assign ctrl_bus_reset.operand_c = NO_OPERAND;
 assign ctrl_bus_reset.alu_op = NO_ALU_OP;
+assign ctrl_bus_reset.amo_op = NO_AMO_OP;
 assign ctrl_bus_reset.csr_op = NO_CSR_OP;
 assign ctrl_bus_reset.csr_use_immediate = FALSE;
 assign ctrl_bus_reset.csr_addr = NO_CSR_REG;
