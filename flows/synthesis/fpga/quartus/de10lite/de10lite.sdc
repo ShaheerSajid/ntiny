@@ -7,7 +7,7 @@
 # Create Clock
 #**************************************************************
 create_clock -name {CLOCK_50} -period 20.000ns -waveform { 0.000 10.000 } [get_ports {MAX10_CLK1_50}]
-create_clock -name {GPIO_0[0]} -period 40.000ns -waveform { 0.000 20.000 } [get_ports {GPIO_0[0]}]
+create_clock -name {CLOCK_JTAG} -period 40.000ns -waveform { 0.000 20.000 } [get_ports {GPIO[8]}]
 
 # VGA : 640x480@60Hz
 #create_clock -period "25.18 MHz" -name clk_vga [get_ports VGA_CLK]
@@ -21,7 +21,7 @@ create_clock -name {GPIO_0[0]} -period 40.000ns -waveform { 0.000 20.000 } [get_
 #**************************************************************
 # Create Generated Clock
 #**************************************************************
-derive_pll_clocks
+create_generated_clock -name {CLOCK_25} -source [get_pins {pll_25_inst|altpll_component|auto_generated|pll1|inclk[0]}] -duty_cycle 50/1 -multiply_by 1 -divide_by 2 -master_clock {CLOCK_50} [get_pins {pll_25_inst|altpll_component|auto_generated|pll1|clk[0]}] 
 
 
 
@@ -41,13 +41,13 @@ derive_clock_uncertainty
 #**************************************************************
 # Set Input Delay
 #**************************************************************
-
+set_input_delay -clock CLOCK_25 0.1 [all_inputs]
 
 
 #**************************************************************
 # Set Output Delay
 #**************************************************************
-
+set_output_delay -clock CLOCK_25 0.1 [all_outputs]
 
 
 #**************************************************************
