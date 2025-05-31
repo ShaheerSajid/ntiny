@@ -9,7 +9,6 @@ questa_sim:
 	vlog -sv -work work ../../verification/dv/src/tracer_pkg.sv
 	vlog -sv -work work ../../verification/dv/src/tracer.sv
 	vlog -sv -work work \
-	+define+BOOT \
 	+incdir+../../design/uncore/i2c/src/ \
 	+incdir+../../design/uncore/timer/src/ \
 	+incdir+../../design/uncore/pwm/src/ \
@@ -26,7 +25,7 @@ questa_sim:
 	vlog -sv -work work testbench/arm_dmem_dummy.v
 	vlog -sv -work work testbench/mem.v
 	if [ $# -eq 0 ]; then vlog -sv -work work testbench/tb_soc_top.v; else vlog -sv -work work +define+$(DPI) testbench/tb_soc_top.v; fi
-	vsim -c -t 1ps -L work -voptargs="+acc" tb_soc_top  -do "run -all; exit"
+	vsim -t 1ps -L work -voptargs="+acc" tb_soc_top  -do "run -all; exit"
 
 incisive_sim:
 	irun \

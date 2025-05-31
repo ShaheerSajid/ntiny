@@ -52,7 +52,7 @@ void delay_ms(uint32_t ms_delay_value)
 {				for (int i=0; i<ms_delay_value; i++)
 				{
 					timer_set_prescaler(1); // set value by which you want to divide the clock frequency
-	                timer_set_compare(50000);
+	                timer_set_compare(25000);
 	                timer_set_count(0);
 	                timer_start();
 	                while (timer_read_status() == 0)
@@ -65,7 +65,7 @@ void delay_us(uint32_t us_delay_value)
 {				for (int i=0; i<us_delay_value; i++)
 				{
 					timer_set_prescaler(1); // set value by which you want to divide the clock frequency
-	                timer_set_compare(50);
+	                timer_set_compare(25);
 	                timer_set_count(0);
 	                timer_start();
 	                while (timer_read_status() == 0)

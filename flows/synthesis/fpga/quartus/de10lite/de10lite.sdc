@@ -7,7 +7,7 @@
 # Create Clock
 #**************************************************************
 create_clock -name {CLOCK_50} -period 20.000ns -waveform { 0.000 10.000 } [get_ports {MAX10_CLK1_50}]
-create_clock -name {CLOCK_JTAG} -period 40.000ns -waveform { 0.000 20.000 } [get_ports {GPIO[8]}]
+create_clock -name {CLOCK_JTAG} -period 40.000ns -waveform { 0.000 20.000 } [get_ports {GPIO[0]}]
 
 # VGA : 640x480@60Hz
 #create_clock -period "25.18 MHz" -name clk_vga [get_ports VGA_CLK]

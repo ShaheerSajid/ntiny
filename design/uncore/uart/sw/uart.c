@@ -23,7 +23,7 @@ void uart_init(uint32_t buadrate)
 
    //m_uart[U_CONTROL/4]  = cfg;
     m_uart[U_CONTROL/4]  = cfg;
-    m_uart[U_baudrate/4] = (50000000/buadrate) -1;
+    m_uart[U_baudrate/4] = (25000000/buadrate) -1;
 }
 
 /**

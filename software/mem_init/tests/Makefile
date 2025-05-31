@@ -91,6 +91,7 @@ generate_hex:
 		$(COMMON_DIR)/bin2hex_2 $(COMMON_DIR)/boot.bin boot.hex
 		$(COMMON_DIR)/hex_text sys_onchip_memory2_0.bin mem.text
 		$(COMMON_DIR)/hex_text $(COMMON_DIR)/boot.bin boot.text
+		$(COMMON_DIR)/rv32_metrics sys_onchip_memory2_0.bin
 		sed -i 's/0x//' mem.text
 		sed -i 's/0x//' boot.text
 

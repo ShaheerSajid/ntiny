@@ -65,15 +65,12 @@ module de10lite(
 //=======================================================
 //  REG/WIRE declarations
 //=======================================================
-	
 	wire scl_pad_i;
 	wire scl_pad_o;
 	wire scl_padoen_o;
 	wire sda_pad_i;
 	wire sda_pad_o;
 	wire sda_padoen_o;
-
-
 
 	wire [31:0]num;
 	hex_out h5(.data(num[23:20]) ,.out(HEX5));
@@ -82,8 +79,6 @@ module de10lite(
 	hex_out h2(.data(num[11:8])  ,.out(HEX2));
 	hex_out h1(.data(num[7:4]) ,.out(HEX1));
 	hex_out h0(.data(num[3:0]) ,.out(HEX0));
-
-
 
 	wire [14:0] address_a_sig;
 	wire [14:0] address_b_sig;
@@ -99,36 +94,35 @@ module de10lite(
 	wire  wren_b_sig;
 	wire [31:0] q_a_sig;
 	wire [31:0] q_b_sig;
-  wire	[31:0]  q_boot_sig;
-	
+	wire	[31:0]  q_boot_sig;
 //=======================================================
 //  Structural coding
 //=======================================================
- wire CLOCK_25;
+	wire CLOCK_25;
 
-pll_25	pll_25_inst (
-	.areset ( ~KEY[0] ),
-	.inclk0 ( MAX10_CLK1_50 ),
-	.c0 ( CLOCK_25 ),
-	.locked ( )
-	);
+	pll_25	pll_25_inst (
+		.areset ( 1'b0 ),
+		.inclk0 ( MAX10_CLK1_50 ),
+		.c0 ( CLOCK_25 ),
+		.locked ( )
+		);
 
 
-  //make boot memory and keep feeding it address_a_sig
-  //if boot memory select boot memory readdata
-reg [31:0] cnt = 0;
-wire rst;
-always@(posedge CLOCK_25)
-begin
-  if(cnt < 32'd25000000)
-    cnt <= cnt+1;
-end
-assign rst = cnt < 32'd25000000;
+	//make boot memory and keep feeding it address_a_sig
+	//if boot memory select boot memory readdata
+	reg [31:0] cnt = 0;
+	wire rst;
+	always@(posedge CLOCK_25)
+	begin
+	if(cnt < 32'd25000000)
+		cnt <= cnt+1;
+	end
+	assign rst = cnt < 32'd25000000;
 
 	mem mem_inst
 	(
 		.address_a(address_a_sig) ,	// input [14:0] address_a_sig
-		.address_b({3'b100,address_b_sig[11:0]}) ,	// input [14:0] address_b_sig
+		.address_b({4'b1000,address_b_sig[10:0]}) ,	// input [14:0] address_b_sig
 		.byteena_a(byteena_a_sig) ,	// input [3:0] byteena_a_sig
 		.byteena_b(byteena_b_sig) ,	// input [3:0] byteena_b_sig
 		.clock_a(clock_a_sig) ,	// input  clock_a_sig
@@ -143,13 +137,12 @@ assign rst = cnt < 32'd25000000;
 		.q_b(q_b_sig) 	// output [31:0] q_b_sig
 	);
 
-  bootmem	bootmem_inst (
-    .address ( address_a_sig ),
-    .clken ( enable_a_sig ),
-    .clock ( clock_a_sig ),
-    .q ( q_boot_sig )
-  );
-
+	bootmem	bootmem_inst (
+		.address ( address_a_sig ),
+		.clken ( enable_a_sig ),
+		.clock ( clock_a_sig ),
+		.q ( q_boot_sig )
+	);
 
 /*
 	vga_adapter VGA(
@@ -173,67 +166,66 @@ assign rst = cnt < 32'd25000000;
 		defparam VGA.BACKGROUND_IMAGE = "image.colour.mif";
 */	
 		
-		soc_top soc_top_inst
+	soc_top soc_top_inst
 	(
-		.clk_i(CLOCK_25) ,	// input  clk_i_sig
+		.clk_i	(CLOCK_25) ,	// input  clk_i_sig
 		.reset_i(~KEY[0] | rst) ,	// input  reset_i_sig
 		//imem
 		.address_a_o(address_a_sig) ,	// output [14:0] address_a_sig
 		.address_b_o(address_b_sig) ,	// output [14:0] address_b_sig
 		.byteena_a_o(byteena_a_sig) ,	// output [3:0] byteena_a_sig
 		.byteena_b_o(byteena_b_sig) ,	// output [3:0] byteena_b_sig
-		.clock_a_o(clock_a_sig) ,	// output  clock_a_sig
-		.clock_b_o(clock_b_sig) ,	// output  clock_b_sig
-		.data_a_o(data_a_sig) ,	// output [31:0] data_a_sig
-		.data_b_o(data_b_sig) ,	// output [31:0] data_b_sig
-		.enable_a_o(enable_a_sig) ,	// output  enable_a_sig
-		.enable_b_o(enable_b_sig) ,	// output  enable_b_sig
-		.wren_a_o(wren_a_sig) ,	// output  wren_a_sig
-		.wren_b_o(wren_b_sig) ,	// output  wren_b_sig
-		.q_a_i(q_a_sig) ,	// input [31:0] q_a_sig
-		.q_b_i(q_b_sig) ,	// input [31:0] q_b_sig
-    .q_boot_i(q_boot_sig),
+		.clock_a_o	(clock_a_sig) ,	// output  clock_a_sig
+		.clock_b_o	(clock_b_sig) ,	// output  clock_b_sig
+		.data_a_o	(data_a_sig) ,	// output [31:0] data_a_sig
+		.data_b_o	(data_b_sig) ,	// output [31:0] data_b_sig
+		.enable_a_o	(enable_a_sig) ,	// output  enable_a_sig
+		.enable_b_o	(enable_b_sig) ,	// output  enable_b_sig
+		.wren_a_o	(wren_a_sig) ,	// output  wren_a_sig
+		.wren_b_o	(wren_b_sig) ,	// output  wren_b_sig
+		.q_a_i		(q_a_sig) ,	// input [31:0] q_a_sig
+		.q_b_i		(q_b_sig) ,	// input [31:0] q_b_sig
+    	.q_boot_i	(q_boot_sig),
 
 		//uart
-		.tx_o(GPIO[5]) ,	// output  tx_sig
-		.rx_i(GPIO[4]) ,	// input  rx_sig
+		.tx_o	(GPIO[1]) ,	// output  tx_sig
+		.rx_i	(GPIO[2]) ,	// input  rx_sig
 		// spi
-		.mosi_o        (GPIO[0]),
-		.miso_i        (GPIO[1]),
-		.SCK_o         (GPIO[2]),
-		.slave_select_o(GPIO[3]),
+		.mosi_o        (GPIO[3]),
+		.miso_i        (GPIO[4]),
+		.SCK_o         (GPIO[5]),
+		.slave_select_o(GPIO[6]),
 		//i2c
 
-		.scl_pad_i(scl_pad_i),
-		.scl_pad_o(scl_pad_o),
-		.scl_padoen_o(scl_padoen_o),
-		.sda_pad_i(sda_pad_i),
-		.sda_pad_o(sda_pad_o),
-		.sda_padoen_o(sda_padoen_o),
+		.scl_pad_i		(scl_pad_i),
+		.scl_pad_o		(scl_pad_o),
+		.scl_padoen_o	(scl_padoen_o),
+		.sda_pad_i		(sda_pad_i),
+		.sda_pad_o		(sda_pad_o),
+		.sda_padoen_o	(sda_padoen_o),
 		
 		//gpio
-		.gpio_oen(),
-		.gpio_o({GPIO[7:6],LEDR}),
-		.gpio_i(SW[3:0]),
+		.gpio_oen	(),
+		.gpio_o		({GPIO[8:7],LEDR}),
+		.gpio_i		(SW[3:0]),
 		//pwm
-		.pwm1_h_o      (GPIO[23]),
-		.pwm1_l_o      (GPIO[24]),
-		.pwm2_h_o		(GPIO[25]),
-		.pwm2_l_o		(GPIO[26]),
+		.pwm1_h_o   (GPIO[9]),
+		.pwm1_l_o   (GPIO[10]),
+		.pwm2_h_o	(GPIO[11]),
+		.pwm2_l_o	(GPIO[12]),
 		
 		// jtag
-		.tck_i(GPIO[8]) ,	// input  TCK_sig
-		.tms_i(GPIO[9]) ,	// input  TMS_sig
-		.tdi_i(GPIO[10]) ,	// input  TDI_sig
-		.tdo_o(GPIO[11])	// output  TDO_sig
+		.tck_i(GPIO[0]),	// input  TCK_sig
+		.tms_i(GPIO[13]),	// input  TMS_sig
+		.tdi_i(GPIO[14]),	// input  TDI_sig
+		.tdo_o(GPIO[15])	// output TDO_sig
 	);
-	//
+
+	assign GPIO[16] = scl_padoen_o?1'bz:scl_pad_o;
+	assign scl_pad_i = GPIO[16];
 	
-	assign GPIO[20] = scl_padoen_o?1'bz:scl_pad_o;
-	assign scl_pad_i = GPIO[20];
-	
-	assign GPIO[21] = sda_padoen_o?1'bz:sda_pad_o;
-	assign sda_pad_i = GPIO[21];
+	assign GPIO[17] = sda_padoen_o?1'bz:sda_pad_o;
+	assign sda_pad_i = GPIO[17];
 
 endmodule
 
