@@ -7,7 +7,7 @@ static volatile uint32_t *m_I2C;
 ///////////////////////////////////////////////////
 void I2C_init ( uint32_t i2c_freq)
 { 
-	  uint32_t clock_prescaler = (50000000/(5*i2c_freq)) - 1 ;
+	  uint32_t clock_prescaler = (25000000/(5*i2c_freq)) - 1 ;
 	  uint32_t ctrl_reg = 0;
 	 m_I2C =	(volatile uint32_t *)BASE_ADDR;
 	 // Reset
