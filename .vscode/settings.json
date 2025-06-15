@@ -1,5 +1,9 @@
 {
     "files.associations": {
-        "csr.h": "c"
+        "csr.h": "c",
+        "init.h": "c",
+        "ee_printf.h": "c",
+        "math.h": "c",
+        "i2c.h": "c"
     }
 }

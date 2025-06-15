@@ -188,13 +188,13 @@ module de10lite(
     	.q_boot_i	(q_boot_sig),
 
 		//uart
-		.tx_o	(GPIO[1]) ,	// output  tx_sig
-		.rx_i	(GPIO[2]) ,	// input  rx_sig
+		.tx_o	(GPIO[4]) ,	// output  tx_sig
+		.rx_i	(GPIO[5]) ,	// input  rx_sig
 		// spi
-		.mosi_o        (GPIO[3]),
-		.miso_i        (GPIO[4]),
-		.SCK_o         (GPIO[5]),
-		.slave_select_o(GPIO[6]),
+		.mosi_o        (GPIO[6]),
+		.miso_i        (GPIO[7]),
+		.SCK_o         (GPIO[8]),
+		.slave_select_o(GPIO[9]),
 		//i2c
 
 		.scl_pad_i		(scl_pad_i),
@@ -206,19 +206,19 @@ module de10lite(
 		
 		//gpio
 		.gpio_oen	(),
-		.gpio_o		({GPIO[8:7],LEDR}),
+		.gpio_o		({GPIO[11:10],LEDR}),
 		.gpio_i		(SW[3:0]),
 		//pwm
-		.pwm1_h_o   (GPIO[9]),
-		.pwm1_l_o   (GPIO[10]),
-		.pwm2_h_o	(GPIO[11]),
-		.pwm2_l_o	(GPIO[12]),
+		.pwm1_h_o   (GPIO[12]),
+		.pwm1_l_o   (GPIO[13]),
+		.pwm2_h_o	(GPIO[14]),
+		.pwm2_l_o	(GPIO[15]),
 		
 		// jtag
 		.tck_i(GPIO[0]),	// input  TCK_sig
-		.tms_i(GPIO[13]),	// input  TMS_sig
-		.tdi_i(GPIO[14]),	// input  TDI_sig
-		.tdo_o(GPIO[15])	// output TDO_sig
+		.tms_i(GPIO[1]),	// input  TMS_sig
+		.tdi_i(GPIO[2]),	// input  TDI_sig
+		.tdo_o(GPIO[3])	// output TDO_sig
 	);
 
 	assign GSENSOR_SCLK = scl_padoen_o?1'bz:scl_pad_o;

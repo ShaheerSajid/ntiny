@@ -25,7 +25,7 @@ CFLAGS =	-I$(UART_SW) \
 		-I$(PLIC_SW) \
 		-I$(COMMON_DIR) \
 		-I$(TEST_DIR) \
-		-Ofast -ffunction-sections -fdata-sections -mabi=ilp32 -march=rv32imc_zba_zbb
+		-Os -ffunction-sections -fdata-sections -mabi=ilp32 -march=rv32imc_zba_zbb
 		
 LDFLAGS =	-T $(COMMON_DIR)/link.ld \
 		-Wl,-gc-sections \
@@ -40,6 +40,7 @@ SRCS_COMMON =		$(COMMON_DIR)/init.c \
 			$(GPIO_SW)/gpio.c \
 			$(SPI_SW)/spi.c \
 			$(I2C_SW)/i2c.c \
+			$(COMMON_DIR)/clock.c \
 			$(PWM_SW)/pwm.c \
 			$(PLIC_SW)/plic.c
 
