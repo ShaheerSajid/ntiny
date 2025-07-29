@@ -221,14 +221,14 @@ module de10lite(
 		.tdo_o(GPIO[3])	// output TDO_sig
 	);
 
-	assign GSENSOR_SCLK = scl_padoen_o?1'bz:scl_pad_o;
-	assign scl_pad_i = GSENSOR_SCLK;
+	assign GPIO[18] = scl_padoen_o?1'bz:scl_pad_o;
+	assign scl_pad_i = GPIO[18];
 	
-	assign GSENSOR_SDI = sda_padoen_o?1'bz:sda_pad_o;
-	assign sda_pad_i = GSENSOR_SDI;
+	assign GPIO[19] = sda_padoen_o?1'bz:sda_pad_o;
+	assign sda_pad_i = GPIO[19];
 
-	assign GSENSOR_CS_N = 1'b1;
-	assign GSENSOR_SDO = 1'b0;
+	// assign GSENSOR_CS_N = 1'b1;
+	// assign GSENSOR_SDO = 1'b0;
 
 endmodule
 

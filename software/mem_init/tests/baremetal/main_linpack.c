@@ -894,6 +894,6 @@ REAL second(void)
 
     {
 	uint64_t cycles = (((uint64_t)csr_read(mcycleh) << 32) + csr_read(mcycle));
-    return ((REAL)((REAL)cycles/(REAL)50000000.0));
+    return ((REAL)((REAL)cycles/(REAL)25000000.0));
     }
 

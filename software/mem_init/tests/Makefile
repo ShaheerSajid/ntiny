@@ -1,4 +1,4 @@
-TOOLCHAIN = /opt/riscv64_new/bin
+TOOLCHAIN = /opt/riscv/bin
 CC = $(TOOLCHAIN)/riscv64-unknown-elf-gcc
 ELFSIZE = $(TOOLCHAIN)/riscv64-unknown-elf-size
 OBJCOPY = $(TOOLCHAIN)/riscv64-unknown-elf-objcopy
@@ -25,7 +25,7 @@ CFLAGS =	-I$(UART_SW) \
 		-I$(PLIC_SW) \
 		-I$(COMMON_DIR) \
 		-I$(TEST_DIR) \
-		-Os -ffunction-sections -fdata-sections -mabi=ilp32 -march=rv32imc_zba_zbb
+		-O3 -ffunction-sections -fdata-sections -mabi=ilp32 -march=rv32imc_zicsr_zbb_zba
 		
 LDFLAGS =	-T $(COMMON_DIR)/link.ld \
 		-Wl,-gc-sections \
@@ -65,8 +65,8 @@ coremark_compile:
 	-fno-code-hoisting \
 	-mbranch-cost=0 \
 	-funroll-all-loops \
-	-DITERATIONS=1 \
-	-DCLOCKS_PER_SEC=50000000 \
+	-DITERATIONS=10 \
+	-DCLOCKS_PER_SEC=25000000 \
 	$(LDFLAGS)
 	
 dhrystone_compile:
@@ -77,11 +77,10 @@ dhrystone_compile:
 	$(SRCS_COMMON) $(CFLAGS) \
 	-DMSC_CLOCK \
 	-DNOENUM \
-	-DCLK_TCK=50000000 \
+	-DCLK_TCK=25000000 \
 	-DDHRY_ITERS=1000 \
 	-Wno-implicit \
 	-fno-common \
-	-DVERILATOR \
 	-I$(DHRYSTONE_DIR) \
 	$(LDFLAGS)
 	

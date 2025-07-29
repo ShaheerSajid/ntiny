@@ -147,7 +147,7 @@ soc_top soc_top_inst
 
   uartdpi #(
     .BAUD(115200), 
-    .FREQ(50000000)
+    .FREQ(25000000)
   )
   u_uart(
     .clk(clk),
