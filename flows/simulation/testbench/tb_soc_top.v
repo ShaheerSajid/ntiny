@@ -9,16 +9,16 @@ module tb_soc_top(
 reg clk,reset,trst;
 `endif	
 
-	  initial begin
-		 $display("==============");
-		 $display("SoC Terminal");
-		 $display("==============");
-		 `ifndef VERILATOR_SIM 
-		 clk = 0;
-		 trst = 0;
-		 reset = 1'b1; #100 reset = 1'b0; trst = 1'b1;
-		 `endif
-	  end
+initial begin
+	$display("==============");
+	$display("SoC Terminal");
+	$display("==============");
+	`ifndef VERILATOR_SIM 
+	clk = 0;
+	trst = 0;
+	reset = 1'b1; #100 reset = 1'b0; trst = 1'b1;
+	`endif
+end
 	  
 	 
 wire [14:0] address_a_sig;
@@ -88,7 +88,8 @@ arm_boot arm_boot_inst (
 );
 
 
- wire  tx, rx;
+wire  tx, rx;
+wire spi_cs, spi_mosi, spi_miso, spi_sck;
 soc_top soc_top_inst
 	(
 		.clk_i(clk) ,	// input  clk_i_sig
@@ -114,10 +115,10 @@ soc_top soc_top_inst
 		.tx_o(tx) ,	// output  tx_sig
 		.rx_i(rx) ,	// input  rx_sig
 		// spi
-		.mosi_o        (),
-		.miso_i        (),
-		.SCK_o         (),
-		.slave_select_o(),
+		.mosi_o        (spi_mosi),
+		.miso_i        (spi_miso),
+		.SCK_o         (spi_sck),
+		.slave_select_o(spi_cs),
 		//i2c
 		.scl_pad_i(),
 		.scl_pad_o(),
@@ -144,21 +145,29 @@ soc_top soc_top_inst
 		
 	);
 
+	qspi qspi_inst (
+        .clk    (clk),
+        .rst_n  (~reset),
+        .sclk   (spi_sck),
+        .ss_n   (spi_cs),
+        .mosi   (spi_mosi),
+        .miso   (spi_miso)
+    );
 
-  uartdpi #(
-    .BAUD(115200), 
-    .FREQ(25000000)
-  )
-  u_uart(
-    .clk(clk),
-    .rst(reset),
-    .rx(tx),
-    .tx(rx)
-  );
+	uartdpi #(
+		.BAUD(115200), 
+    	.FREQ(25000000)
+	)
+	uartdpi_inst(
+		.clk(clk),
+		.rst(reset),
+		.rx(tx),
+		.tx(rx)
+	);
 
 `ifndef VERILATOR_SIM 
 	always begin 
-		 #10 clk = !clk;
+		#10 clk = !clk;
 	end 
 `endif
 	  

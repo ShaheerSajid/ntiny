@@ -97,6 +97,8 @@ verilator_sim:
 	-f src.args \
 	testbench/uartdpi.c \
 	testbench/uartdpi.sv \
+	testbench/spi_slave.sv \
+	testbench/qspi.sv \
 	testbench/arm_boot_dummy.v \
 	testbench/arm_imem_dummy.v \
 	testbench/arm_dmem_dummy.v \
