@@ -19,10 +19,11 @@ module csr_unit (
 	output roundmode_e roundmode_o,
 	input float_status_e float_status_i,
 
-///////Interrupt Signals
-  input interrupt_valid_i,
+///////Trap Signals (interrupts + exceptions)
+  input trap_valid_i,
   input [31:0]ecause_i,
   input [31:0]epc_i,
+  input [31:0]mtval_i,
   input [31:0]interrupt_src_i,
   input ret_i,
 
@@ -41,19 +42,23 @@ module csr_unit (
 	logic [31:0] _MTVEC;
 	logic [31:0] _MEPC;
 	logic [31:0] _MCAUSE;
+	logic [31:0] _MTVAL;
+	logic [31:0] _MSCRATCH;
 	logic [31:0] _MIP;
 	logic [31:0] _MCYCLE;
 	logic [31:0] _MINSTRET;
 	logic [31:0] _MCYCLEH;
 	logic [31:0] _MINSTRETH;
 	logic [31:0] _MCOUNTINHIBIT;
-	
+
 
 	logic MSTATUS_sel;
 	logic MIE_sel;
 	logic MTVEC_sel;
 	logic MEPC_sel;
 	logic MCAUSE_sel;
+	logic MTVAL_sel;
+	logic MSCRATCH_sel;
 	logic MIP_sel;
 	logic MCYCLE_sel;
 	logic MINSTRET_sel;
@@ -64,7 +69,6 @@ module csr_unit (
 	logic [31:0]csr_data;
 	logic [63:0]csr_cycle_update;
 	logic [63:0]csr_instret_update;
-  logic mie_bit;
 
 	// CSR select logic
 	assign MSTATUS_sel 			= csr_addr_i == MSTATUS;
@@ -72,6 +76,8 @@ module csr_unit (
 	assign MTVEC_sel 			  = csr_addr_i == MTVEC;
 	assign MEPC_sel 			  = csr_addr_i == MEPC;
 	assign MCAUSE_sel 			= csr_addr_i == MCAUSE;
+	assign MTVAL_sel			  = csr_addr_i == MTVAL;
+	assign MSCRATCH_sel		  = csr_addr_i == MSCRATCH;
 	assign MIP_sel				  = csr_addr_i == MIP;
 	assign MCYCLE_sel 			= csr_addr_i == MCYCLE;
 	assign MINSTRET_sel 		= csr_addr_i == MINSTRET;
@@ -83,34 +89,43 @@ module csr_unit (
 	assign csr_data = (csr_use_immediate_i == TRUE)?imm_i : reg_i;
 	assign csr_cycle_update = (!_MCOUNTINHIBIT[0] && !stop_counters_i)? {_MCYCLEH,_MCYCLE} + 1 : {_MCYCLEH,_MCYCLE};
 	assign csr_instret_update = (!_MCOUNTINHIBIT[2] && csr_instret_trigger_i && !stop_counters_i)? {_MINSTRETH,_MINSTRET} + 1 : {_MINSTRETH,_MINSTRET};
-  assign mie_bit = interrupt_valid_i? 1'b0 : ret_i | _MSTATUS[3];
+
+	// MSTATUS update: trap entry saves MIE->MPIE, clears MIE, sets MPP=11;
+	//                 MRET restores MIE<-MPIE, sets MPIE=1, keeps MPP=11
+	wire [31:0] mstatus_trap = {_MSTATUS[31:13], 2'b11, _MSTATUS[10:8], _MSTATUS[3], _MSTATUS[6:4], 1'b0, _MSTATUS[2:0]};
+	wire [31:0] mstatus_ret  = {_MSTATUS[31:13], 2'b11, _MSTATUS[10:8], 1'b1, _MSTATUS[6:4], _MSTATUS[7], _MSTATUS[2:0]};
+	wire [31:0] mstatus_update = trap_valid_i ? mstatus_trap : ret_i ? mstatus_ret : _MSTATUS;
+
 	// CSR registers
-	csr_register_32 #(32'h0)		csr_mcycle			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MCYCLE_sel),	
+	csr_register_32 #(32'h0)		csr_mcycle			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MCYCLE_sel),
 															.wdata(csr_data),.update(csr_cycle_update[31:0]), .csr(_MCYCLE));
-	csr_register_32 #(32'h0)		csr_minstret		(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MINSTRET_sel),	
+	csr_register_32 #(32'h0)		csr_minstret		(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MINSTRET_sel),
 															.wdata(csr_data),.update(csr_instret_update[31:0]), .csr(_MINSTRET));
-	csr_register_32 #(32'h0)		csr_mcycleh			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MCYCLEH_sel),	
+	csr_register_32 #(32'h0)		csr_mcycleh			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MCYCLEH_sel),
 															.wdata(csr_data),.update(csr_cycle_update[63:32]), .csr(_MCYCLEH));
-	csr_register_32 #(32'h0)		csr_minstreth		(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MINSTRETH_sel),	
+	csr_register_32 #(32'h0)		csr_minstreth		(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MINSTRETH_sel),
 															.wdata(csr_data),.update(csr_instret_update[63:32]), .csr(_MINSTRETH));
-	csr_register_32 #(32'h0)		csr_mcounterinhibit	(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MCOUNTINHIBIT_sel),	
+	csr_register_32 #(32'h0)		csr_mcounterinhibit	(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MCOUNTINHIBIT_sel),
 															.wdata(csr_data),.update(_MCOUNTINHIBIT), .csr(_MCOUNTINHIBIT));
-	csr_register_32 #(32'h0)		csr_mstatus			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MSTATUS_sel),	
-															.wdata(csr_data),.update({_MSTATUS[31:4], mie_bit,_MSTATUS[2:0]}), .csr(_MSTATUS));
-	csr_register_32 #(32'h0)		csr_mie				(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MIE_sel),	
-															.wdata(csr_data),.update(_MIE), .csr(_MIE));														
-	csr_register_32 #(32'h0)		csr_mip				(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MIP_sel),	
+	csr_register_32 #(32'h0)		csr_mstatus			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MSTATUS_sel),
+															.wdata(csr_data),.update(mstatus_update), .csr(_MSTATUS));
+	csr_register_32 #(32'h0)		csr_mie				(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MIE_sel),
+															.wdata(csr_data),.update(_MIE), .csr(_MIE));
+	csr_register_32 #(32'h0)		csr_mip				(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MIP_sel),
 															.wdata(csr_data),.update(interrupt_src_i), .csr(_MIP));
-	csr_register_32 #(32'h0)		csr_mtvec			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MTVEC_sel),	
-															.wdata(csr_data),.update(_MTVEC), .csr(_MTVEC)); 
-	csr_register_32 #(32'h0)		csr_mepc			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MEPC_sel),	
-															.wdata(csr_data),.update(interrupt_valid_i? epc_i : _MEPC), .csr(_MEPC));
-	csr_register_32 #(32'h0)		csr_mcause			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MCAUSE_sel),	
-															.wdata(csr_data),.update(interrupt_valid_i? ecause_i : _MCAUSE), .csr(_MCAUSE));
-	
+	csr_register_32 #(32'h0)		csr_mtvec			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MTVEC_sel),
+															.wdata(csr_data),.update(_MTVEC), .csr(_MTVEC));
+	csr_register_32 #(32'h0)		csr_mepc			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MEPC_sel),
+															.wdata(csr_data),.update(trap_valid_i? epc_i : _MEPC), .csr(_MEPC));
+	csr_register_32 #(32'h0)		csr_mcause			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MCAUSE_sel),
+															.wdata(csr_data),.update(trap_valid_i? ecause_i : _MCAUSE), .csr(_MCAUSE));
+	csr_register_32 #(32'h0)		csr_mtval			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MTVAL_sel),
+															.wdata(csr_data),.update(trap_valid_i? mtval_i : _MTVAL), .csr(_MTVAL));
+	csr_register_32 #(32'h0)		csr_mscratch		(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MSCRATCH_sel),
+															.wdata(csr_data),.update(_MSCRATCH), .csr(_MSCRATCH));
 
 	always_comb
-    begin 
+    begin
 		case (csr_addr_i)
 			CYCLE:			  csr_value_o = _MCYCLE;
 			TIME:			    csr_value_o = 0;
@@ -122,8 +137,10 @@ module csr_unit (
 			MISA:			    csr_value_o = 32'h40001106; // RV32IMC hardcoded
 			MIE:			    csr_value_o = _MIE;
 			MTVEC:			  csr_value_o = _MTVEC;
+			MSCRATCH:		  csr_value_o = _MSCRATCH;
 			MEPC:			    csr_value_o = _MEPC;
 			MCAUSE:			  csr_value_o = _MCAUSE;
+			MTVAL:			  csr_value_o = _MTVAL;
 			MIP:			    csr_value_o = _MIP;
 			MCYCLE:			  csr_value_o = _MCYCLE;
 			MINSTRET:		  csr_value_o = _MINSTRET;
@@ -143,30 +160,30 @@ assign epc_o    = _MEPC;
 
 endmodule
 
-module csr_register_32 
+module csr_register_32
  #(
 		parameter DEFAULT = 32'b0
 	)
 	(
 		input   clk_i,
         input   reset_i,
-        input 	csr_op_e csr_cmd_i,  
+        input 	csr_op_e csr_cmd_i,
 		input 	bit	enable,
-		input	[31:0] 	wdata,      
-		input	[31:0]  update,     
-		output	logic[31:0]  csr        
+		input	[31:0] 	wdata,
+		input	[31:0]  update,
+		output	logic[31:0]  csr
 	);
-	always_ff @ (posedge clk_i or posedge reset_i) begin: CSR 
+	always_ff @ (posedge clk_i or posedge reset_i) begin: CSR
 				if (reset_i) begin
 					csr <= DEFAULT;
-		end else if ((csr_cmd_i == WRITE_CSR) && enable) begin 
+		end else if ((csr_cmd_i == WRITE_CSR) && enable) begin
 					csr <= wdata;
-		end else if ((csr_cmd_i == SET_CSR) && enable) begin 
-					csr <= csr | wdata;			
-		end else if ((csr_cmd_i == CLEAR_CSR) && enable) begin 
+		end else if ((csr_cmd_i == SET_CSR) && enable) begin
+					csr <= csr | wdata;
+		end else if ((csr_cmd_i == CLEAR_CSR) && enable) begin
 					csr <= csr & ~wdata;
-		end else begin 
+		end else begin
 					csr <= update;
 		end
-	end	
-endmodule 
+	end
+endmodule

@@ -163,7 +163,7 @@ onebit_sig_e c_stall;
 onebit_sig_e c_valid;
 onebit_sig_e c_valid_ie;
 
-logic interrupt_true;
+logic trap_true;
 logic [31:0]ip_csr;
 logic [31:0]ie_csr;
 logic [31:0]vec_csr;
@@ -171,8 +171,14 @@ logic [31:0]status_csr;
 logic [31:0]handler_addr;
 logic [31:0]ecause_csr;
 logic [31:0]epc_csr;
+logic [31:0]mtval_csr;
 logic [31:0]interrupt_src;
 logic [31:0]epc;
+
+// Misaligned access detection (IE stage)
+logic misalign_load_ie;
+logic misalign_store_ie;
+logic exception_from_ie;
 ////////////////////////////////debug logic//////////////////////////
 logic [31:0] dpc;
 logic [31:0] dcsr;
@@ -273,16 +279,33 @@ assign iwb_stall   = onebit_sig_e'(1'b0);
 //flushes
 always_comb begin
   case({if_id_stall | resumeack_o | interrupt_valid, ie_stall, imem_stall, iwb_stall})
-    4'b1000: {ie_flush,imem_flush,iwb_flush} = 3'b100; 
-    4'b1100: {ie_flush,imem_flush,iwb_flush} = 3'b010; 
-    4'b1110: {ie_flush,imem_flush,iwb_flush} = 3'b001; 
-    default: {ie_flush,imem_flush,iwb_flush} = 3'b000; 
+    4'b1000: begin
+      ie_flush = TRUE;
+      // IE-stage exceptions (misalign) also flush IMEM to discard faulting instruction
+      imem_flush = onebit_sig_e'(exception_from_ie);
+      iwb_flush = FALSE;
+    end
+    4'b1100: {ie_flush,imem_flush,iwb_flush} = 3'b010;
+    4'b1110: {ie_flush,imem_flush,iwb_flush} = 3'b001;
+    default: {ie_flush,imem_flush,iwb_flush} = 3'b000;
   endcase
 end
 
-assign interrupt_valid = onebit_sig_e'(interrupt_true);//FALSE;
+assign interrupt_valid = onebit_sig_e'(trap_true);//FALSE;
 assign ret_valid = ctrl_bus_if_id.mret;//FALSE;
 assign debug_valid =  onebit_sig_e'(resumeack_o);
+
+// Misaligned access detection in IE stage
+wire [1:0] mem_addr_lsb = alu_result[1:0];
+assign misalign_load_ie = (ctrl_bus_ie.mem_op == READ) && (
+    (ctrl_bus_ie.load_store_width == HALF && mem_addr_lsb[0]) ||
+    (ctrl_bus_ie.load_store_width == WORD && |mem_addr_lsb)
+);
+assign misalign_store_ie = (ctrl_bus_ie.mem_op == WRITE) && (
+    (ctrl_bus_ie.load_store_width == HALF && mem_addr_lsb[0]) ||
+    (ctrl_bus_ie.load_store_width == WORD && |mem_addr_lsb)
+);
+assign exception_from_ie = misalign_load_ie | misalign_store_ie;
 
 //plic drive logic
 logic from_plic;
@@ -297,7 +320,7 @@ begin
 end
 
 assign plic_complete_o = from_plic & ret_valid;
-assign plic_claim_o = ext_itr_i & interrupt_true;
+assign plic_claim_o = ext_itr_i & trap_true;
 
 always_comb
 begin
@@ -534,11 +557,19 @@ interrupt_ctrl interrupt_ctrl_inst
   .vec_i            (vec_csr),
   .status_i         (status_csr),
   .pc_i             (pc_id),
+  // synchronous exceptions
+  .ecall_i          (ctrl_bus_if_id.ecall),
+  .ebreak_i         (ctrl_bus_if_id.ebreak & ~dcsr[15]),
+  .misalign_load_i  (misalign_load_ie),
+  .misalign_store_i (misalign_store_ie),
+  .pc_ie_i          (pc_ie),
+  .fault_addr_i     (alu_result),
   //to csr and core
-  .interrupt_valid_o(interrupt_true),
+  .trap_valid_o     (trap_true),
   .handler_addr_o   (handler_addr),
   .ecause_o         (ecause_csr),
   .epc_o            (epc_csr),
+  .mtval_o          (mtval_csr),
   .interrupt_src_o  (interrupt_src)
 );
 
@@ -658,10 +689,11 @@ csr_unit csr_unit_inst
 	.reg_i					      (opA_forwarded_data),
 	.csr_value_o			    (csr_result),
 
-  //interrupt signals
-  .interrupt_valid_i    (interrupt_valid),
+  //trap signals (interrupts + exceptions)
+  .trap_valid_i         (interrupt_valid),
   .ecause_i             (ecause_csr),
   .epc_i                (epc_csr),
+  .mtval_i              (mtval_csr),
   .interrupt_src_i      (interrupt_src),
   .ret_i                (ctrl_bus_ie.mret),
 
@@ -729,7 +761,8 @@ core2avl core2avl_inst
 	.stall_i			    (FALSE),
 	.load_store_width	(((pstate==HALTED) & am_en_i)? load_store_width_e'(am_st_i) :  ctrl_bus_ie.load_store_width),
 	.mem_unsigned	  	(((pstate==HALTED) & am_en_i)? FALSE : ctrl_bus_ie.mem_unsigned),
-	.mem_op				    (((pstate==HALTED) & am_en_i)? mem_op_e'({1'b0,am_wr_i}) :  ctrl_bus_ie.mem_op),
+	.mem_op				    (((pstate==HALTED) & am_en_i)? mem_op_e'({1'b0,am_wr_i}) :
+	                     exception_from_ie ? NO_MEM_OP : ctrl_bus_ie.mem_op),
 	.addr_i			    	(((pstate==HALTED) & am_en_i)? am_ad_i :  alu_result),
 	.data2write_i		  (((pstate==HALTED) & am_en_i)? am_di_i :  opB_forwarded_data),
 	.data2read_o		  (readdata_imem),
@@ -780,9 +813,6 @@ end
 
 //tracer
 `ifdef DV_TRACER
-always_comb 
-if (ctrl_bus_if_id.ecall == TRUE) $stop();
-
 logic [31:0] i1,i2,i3;
 logic [31:0] pc1;
 logic [31:0] pc2;
