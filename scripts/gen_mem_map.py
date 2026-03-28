@@ -4,7 +4,7 @@
 Outputs:
   design/common/mem_map.svh          — SystemVerilog `define header
   design/common/mem_map.h            — C header (NTINY_ prefixed)
-  software/mem_init/tests/common/link.ld   — linker script (default profile)
+  software/common/link.ld                  — linker script (default profile)
   verification/riscof/ntiny/env/link.ld    — linker script (riscof profile)
 
 Usage:
@@ -294,7 +294,7 @@ def main():
             gen_svh(data),
         "design/common/mem_map.h":
             gen_c_header(data),
-        "software/mem_init/tests/common/link.ld":
+        "software/common/link.ld":
             gen_linker_script(data, "default"),
         "verification/riscof/ntiny/env/link.ld":
             gen_linker_script(data, "riscof"),

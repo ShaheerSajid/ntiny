@@ -28,10 +28,7 @@ flows/simulation/*.text
 flows/simulation/*.X
 
 # Software build outputs
-software/mem_init/tests/*.elf
-software/mem_init/tests/*.hex
-software/mem_init/tests/*.text
-software/mem_init/tests/*.bin
+software/build/
 
 # RISCOF third-party and generated
 verification/riscof/riscv-arch-test/

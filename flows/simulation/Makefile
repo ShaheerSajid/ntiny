@@ -73,8 +73,8 @@ VERILATOR_RISCOF_DEFINES = \
 
 # --- Init ---
 mem_init:
-	./split ../../software/mem_init/tests/mem.text imem.text dmem.text
-	cp ../../software/mem_init/tests/boot.text ./
+	python3 ../../software/tools/split.py ../../software/build/baremetal.mem.text imem.text dmem.text
+	python3 ../../software/tools/hex_text.py ../../software/common/boot.bin boot.text
 
 # --- Questa targets ---
 questa_sim:

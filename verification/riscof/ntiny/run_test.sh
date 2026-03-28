@@ -20,10 +20,8 @@ ${OBJCOPY} -O binary -j .text.init -j .text "$ELF" imem.bin
 ${OBJCOPY} -O binary -j .data -j .sdata "$ELF" dmem.bin
 
 # Convert each region to hex text for $readmemh
-${HEX_TEXT} imem.bin imem_raw.text
-sed 's/0x//' imem_raw.text > imem.text
-${HEX_TEXT} dmem.bin dmem_raw.text
-sed 's/0x//' dmem_raw.text > dmem.text
+python3 ${HEX_TEXT} imem.bin imem.text
+python3 ${HEX_TEXT} dmem.bin dmem.text
 touch boot.text
 
 # Extract signature addresses from ELF
