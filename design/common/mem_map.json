@@ -1,0 +1,40 @@
+{
+    "_comment": "ntiny unified memory map — single source of truth. Run: python3 scripts/gen_mem_map.py",
+
+    "profiles": {
+        "default": {
+            "_comment": "Taped-out SoC defaults (TSMC 65nm)",
+            "IMEM_BASE":       "0x00000000",
+            "IMEM_SIZE_BYTES": "0x00008000",
+            "DMEM_BASE":       "0x00010000",
+            "DMEM_SIZE_BYTES": "0x00002000",
+            "BOOT_BASE":       "0x80000000",
+            "BOOT_SIZE_BYTES": "0x00000200"
+        },
+        "riscof": {
+            "_comment": "RISCOF compliance testing — large memories, no boot ROM",
+            "IMEM_BASE":       "0x00000000",
+            "IMEM_SIZE_BYTES": "0x00200000",
+            "DMEM_BASE":       "0x10000000",
+            "DMEM_SIZE_BYTES": "0x02000000",
+            "BOOT_BASE":       "0x80000000",
+            "BOOT_SIZE_BYTES": "0x00000200"
+        }
+    },
+
+    "peripherals": {
+        "CRC":      { "base": "0x00080000", "end": "0x0008001F" },
+        "UART":     { "base": "0x00100000", "end": "0x00100010" },
+        "TIMER":    { "base": "0x00200000", "end": "0x00200010" },
+        "GPIO":     { "base": "0x00400000", "end": "0x0040000F" },
+        "PLIC":     { "base": "0x00800000", "end": "0x0080000F" },
+        "SPI":      { "base": "0x01000000", "end": "0x010000FF" },
+        "I2C":      { "base": "0x02000000", "end": "0x020000FF" },
+        "PWM":      { "base": "0x02001000", "end": "0x02001FFF" }
+    },
+
+    "special": {
+        "SOFT_INT_ADDR": "0x04000000",
+        "TOHOST_ADDR":   "0x0F000000"
+    }
+}

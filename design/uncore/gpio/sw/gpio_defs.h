@@ -1,7 +1,7 @@
 #ifndef GPIO_DEFS_H_
 #define GPIO_DEFS_H_
 
-#define GPIO_BASE_ADDR 0x400000
+#include "mem_map.h"
 
 #define DDR 0x0000
 #define Dout 0x0001

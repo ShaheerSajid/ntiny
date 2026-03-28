@@ -3,8 +3,7 @@
 #ifndef __UART__DEFS_H__
 #define __UART__DEFS_H__
 
-
-#define UART_BASE_ADDR  0x00100000
+#include "mem_map.h"
 
 
 #define U_RX          0x0

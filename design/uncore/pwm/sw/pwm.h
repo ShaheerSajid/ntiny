@@ -8,7 +8,7 @@
 // Memory Mapped Addressing:
 //-----------------------------------------------------------------
 
-#define pwm_base_addr 0x2001000
+#include "mem_map.h"
 #define PRESCALER_REG  0x00
 
 //	control register for controlling PWM modules

@@ -171,114 +171,113 @@ module alu
 	logic fpu_stall;
 
 `ifdef FPU
-  
-	typedef enum logic [3:0] {
-	FMADD, FNMSUB, FADD, FMUL,     // ADDMUL operation group
-	FDIV, FSQRT,                   // DIVSQRT operation group
-	FSGNJ, FMINMAX, FCMP, FCLASSIFY, // NONCOMP operation group
-	F2F, F2I, I2F, CPKAB, CPKCD  // CONV operation group
-	} operation_e;
 
-	logic [2:0][31:0] fpu_operands;
+	// FMVXW/FMVWX are raw bit moves — bypass the FPU entirely
+	logic fpu_bypass;
+	assign fpu_bypass = (float_op_i == FMVXW) || (float_op_i == FMVWX);
 
-	operation_e fp_op;
-	logic fp_op_mod;
+	// Map core_pkg::float_op_e → fp_pkg::float_op_e + op_modify[1:0]
+	fp_pkg::float_op_e fp_op;
+	logic [1:0] fp_op_modify;
+
+	always_comb begin
+		case (float_op_i)
+			FMADDS:   begin fp_op = fp_pkg::FMADD; fp_op_modify = 2'b00; end
+			FMSUBS:   begin fp_op = fp_pkg::FMADD; fp_op_modify = 2'b01; end
+			FNMSUBS:  begin fp_op = fp_pkg::FMADD; fp_op_modify = 2'b10; end
+			FNMADDS:  begin fp_op = fp_pkg::FMADD; fp_op_modify = 2'b11; end
+			FADDS:    begin fp_op = fp_pkg::FADD;  fp_op_modify = 2'b00; end
+			FSUBS:    begin fp_op = fp_pkg::FADD;  fp_op_modify = 2'b01; end
+			FMULS:    begin fp_op = fp_pkg::FMUL;  fp_op_modify = 2'b00; end
+			FDIVS:    begin fp_op = fp_pkg::FDIV;  fp_op_modify = 2'b00; end
+			FSQRTS:   begin fp_op = fp_pkg::FDIV;  fp_op_modify = 2'b01; end
+			FSGNJS:   begin fp_op = fp_pkg::FSGNJ; fp_op_modify = 2'b00; end
+			FSGNJNS:  begin fp_op = fp_pkg::FSGNJ; fp_op_modify = 2'b01; end
+			FSGNJXS:  begin fp_op = fp_pkg::FSGNJ; fp_op_modify = 2'b10; end
+			FMINS:    begin fp_op = fp_pkg::FMIN;  fp_op_modify = 2'b00; end
+			FMAXS:    begin fp_op = fp_pkg::FMAX;  fp_op_modify = 2'b00; end
+			FCVTWS:   begin fp_op = fp_pkg::F2I;   fp_op_modify = 2'b01; end // signed
+			FCVTWUS:  begin fp_op = fp_pkg::F2I;   fp_op_modify = 2'b00; end // unsigned
+			FEQS:     begin fp_op = fp_pkg::FCMP;  fp_op_modify = 2'b01; end // eq
+			FLTS:     begin fp_op = fp_pkg::FCMP;  fp_op_modify = 2'b10; end // lt
+			FLES:     begin fp_op = fp_pkg::FCMP;  fp_op_modify = 2'b00; end // le
+			FCLASSS:  begin fp_op = fp_pkg::FCLASS;fp_op_modify = 2'b00; end
+			FCVTSW:   begin fp_op = fp_pkg::I2F;   fp_op_modify = 2'b01; end // signed
+			FCVTSWU:  begin fp_op = fp_pkg::I2F;   fp_op_modify = 2'b00; end // unsigned
+			default:  begin fp_op = fp_pkg::NO_FP_OP; fp_op_modify = 2'b00; end
+		endcase
+	end
+
+	// NaN-box 32-bit operands to 64-bit (RISC-V ISA §11.2)
+	wire [63:0] fpu_a = {32'hFFFF_FFFF, a_i};
+	wire [63:0] fpu_b = {32'hFFFF_FFFF, b_i};
+	wire [63:0] fpu_c = {32'hFFFF_FFFF, c_i};
+
+	// Handshake FSM: start pulse, stall until valid, flush-safe drain
 	logic fpu_valid;
-	logic in_valid;
-	logic in_ready;
+	logic fpu_ready;
+	logic fpu_start;
 
+	enum logic [1:0] {FP_IDLE, FP_BUSY, FP_DRAIN} fp_state, fp_next;
 
-	always_comb
-	begin
-		case(float_op_i)
-			FMADDS, FMSUBS:				fp_op = FMADD;
-			FNMSUBS, FNMADDS:			fp_op = FNMSUB;
-			FADDS, FSUBS:				fp_op = FADD;
-			FMULS:						fp_op = FMUL;
-			FDIVS:						fp_op = FDIV;
-			FSQRTS:						fp_op = FSQRT;
-			FSGNJS, FSGNJNS, 
-			FSGNJXS, FMVXW, FMVWX:		fp_op = FSGNJ;
-			FMINS, FMAXS:				fp_op = FMINMAX;
-			FCVTWS, FCVTWUS:			fp_op = F2I;
-			FEQS, FLTS,FLES:			fp_op = FCMP;
-			FCLASSS:					fp_op = FCLASSIFY;
-			FCVTSW,FCVTSWU:				fp_op = I2F;
-			default:					fp_op = FADD;
-		endcase
-
-		case(float_op_i)
-			FMSUBS, FNMADDS, FSUBS,
-			FCVTWUS, FCVTSWU:	fp_op_mod = 1'b1;
-			default: 			fp_op_mod = 1'b0;
-		endcase
-
-		case(float_op_i)
-			FADDS,FSUBS:begin
-							fpu_operands[0] = 0;
-							fpu_operands[1] = a_i;
-							fpu_operands[2] = b_i;
-						end
-			default:	begin
-							fpu_operands[0] = a_i;
-							fpu_operands[1] = b_i;
-							fpu_operands[2] = c_i;
-						end
-		endcase
-	end
-//control fsm
-//1. assert valid
-//2. check ready
-//3. deassert valid
-//4. wait for out ready
-//5. go to 1
-
-	enum logic {FP_IDLE, FP_ACCESS} p_state, n_state;
-	always_ff@(posedge clk_i or posedge reset_i)
-	begin
-		if(reset_i)
-			p_state <= FP_IDLE;
+	always_ff @(posedge clk_i or posedge reset_i) begin
+		if (reset_i)
+			fp_state <= FP_IDLE;
 		else
-			p_state <= n_state;
+			fp_state <= fp_next;
 	end
-	always_comb
-	begin
-		case(p_state)
-			FP_IDLE: n_state = (float_op_i != NO_FP_OP)? FP_ACCESS : FP_IDLE;
-			FP_ACCESS: n_state = fpu_valid? FP_IDLE : FP_ACCESS;
+
+	always_comb begin
+		case (fp_state)
+			FP_IDLE:  fp_next = fpu_start ? FP_BUSY : FP_IDLE;
+			FP_BUSY:  fp_next = fpu_valid ? FP_IDLE :
+			                    flush_i   ? FP_DRAIN : FP_BUSY;
+			FP_DRAIN: fp_next = fpu_valid ? FP_IDLE : FP_DRAIN;
+			default:  fp_next = FP_IDLE;
 		endcase
 	end
-	assign in_valid = (p_state == FP_IDLE) && (n_state == FP_ACCESS);
-	assign fpu_stall = (float_op_i != NO_FP_OP) & (~fpu_valid);
 
-	fpnew_top fpu_inst
-	(
-		.clk_i(clk_i),
-		.rst_ni(~reset_i),
-		//  signals
-		.operands_i(fpu_operands),
-		.rnd_mode_i((float_op_i == FMVXW || float_op_i == FMVWX)? RUP : roundmode_i),
-		.op_i(fp_op),
-		.op_mod_i(fp_op_mod),
-		.src_fmt_i(3'd0),
-		.dst_fmt_i(3'd0),
-		.int_fmt_i(2'd2),
-		.vectorial_op_i(1'b0),
-		.tag_i(1'b0),
-		//  Handshake
-		.in_valid_i(in_valid),
-		.in_ready_o(in_ready),
-		.flush_i(1'b0),
-		//  signals
-		.result_o(fpu_result),
-		.status_o(float_status_o),
-		.tag_o(),
-		//  handshake
-		.out_valid_o(fpu_valid),
-		.out_ready_i(1'b1),
-		// Indication of valid data in flight
-		.busy_o()
+	assign fpu_start = (fp_state == FP_IDLE) && (float_op_i != NO_FP_OP)
+	                   && !fpu_bypass && fpu_ready && !flush_i;
+	assign fpu_stall = (float_op_i != NO_FP_OP) && !fpu_bypass
+	                   && !(fp_state == FP_BUSY && fpu_valid);
+
+	// PakFPU instance
+	logic [63:0] fpu_result_64;
+	fp_pkg::status_t fpu_flags;
+
+	fp_top #(
+		.FP_FORMAT  (fp_pkg::FP32),
+		.INT_FORMAT (fp_pkg::INT32),
+		.RISCV_MODE (1'b1)
+	) fpu_inst (
+		.clk_i      (clk_i),
+		.rst_i      (~reset_i),      // PakFPU uses active-low reset
+		.start_i    (fpu_start),
+		.ready_o    (fpu_ready),
+		.a_i        (fpu_a),
+		.b_i        (fpu_b),
+		.c_i        (fpu_c),
+		.rnd_i      (fp_pkg::roundmode_e'(roundmode_i)),
+		.op_i       (fp_op),
+		.op_modify_i(fp_op_modify),
+		.result_o   (fpu_result_64),
+		.valid_o    (fpu_valid),
+		.flags_o    (fpu_flags)
 	);
+
+	// Result: bypass for FMVXW/FMVWX, lower 32 bits for FPU results
+	assign fpu_result = fpu_bypass ? a_i : fpu_result_64[31:0];
+
+	// Convert fp_pkg::status_t → core_pkg::float_status_e
+	assign float_status_o = fpu_bypass ? '0 : '{
+		NV: onebit_sig_e'(fpu_flags.NV),
+		DZ: onebit_sig_e'(fpu_flags.DZ),
+		OF: onebit_sig_e'(fpu_flags.OF),
+		UF: onebit_sig_e'(fpu_flags.UF),
+		NX: onebit_sig_e'(fpu_flags.NX)
+	};
+
 `else
   assign fpu_stall = 1'b0;
   assign fpu_result = 32'd0;

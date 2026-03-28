@@ -678,7 +678,7 @@ csr_unit csr_unit_inst
 	.clk_i					      (clk_i),
   .reset_i				      (reset_i),
 	.stop_counters_i	  	(onebit_sig_e'(dcsr[10] & (pstate==HALTED))),
-	.float_valid_i			  (onebit_sig_e'(ctrl_bus_ie.float_op != NO_FP_OP)),
+	.float_valid_i			  (onebit_sig_e'(ctrl_bus_ie.float_op != NO_FP_OP && alu_stall == FALSE)),
 	.roundmode_o			    (frm),
 	.float_status_i			  (float_status),
   .csr_instret_trigger_i(onebit_sig_e'(ctrl_bus_ie.inst_type != NO_INS)),

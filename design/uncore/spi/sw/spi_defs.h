@@ -3,7 +3,7 @@
 #ifndef __SPI_DEFS_H__
 #define __SPI_DEFS_H__
 
-#define SPI_BASE_ADDR     0x1000000
+#include "mem_map.h"
 
 #define SPI_DGIER         0x1c
     #define SPI_DGIER_GIE                        31

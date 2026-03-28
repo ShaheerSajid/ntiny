@@ -13,7 +13,7 @@
 #define PRE_1024 7
 */
 
-#define TIMER_BASE_ADDR  0x200000
+#include "mem_map.h"
 
 #define CLOCK_Prescaler			0x00
 #define Count_Register			0x01

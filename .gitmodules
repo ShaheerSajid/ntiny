@@ -1,0 +1,3 @@
+[submodule "design/core/fpu/PakFPU"]
+	path = design/core/fpu/PakFPU
+	url = https://github.com/ShaheerSajid/PakFPU.git

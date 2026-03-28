@@ -2,10 +2,11 @@
 #define TOHOST_H
 
 #include <stdint.h>
+#include "mem_map.h"
 
 // Tohost address — monitored by the testbench for test completion.
 // Write 1 for PASS, any other non-zero value for FAIL.
-#define TOHOST (*(volatile uint32_t *)0x0F000000)
+#define TOHOST (*(volatile uint32_t *)NTINY_TOHOST_ADDR)
 
 static inline void tohost_pass(void) {
     TOHOST = 1;

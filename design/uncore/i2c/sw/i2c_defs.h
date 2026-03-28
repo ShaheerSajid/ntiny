@@ -2,7 +2,7 @@
 #define __I2C__DEFS_H__
 
 
-#define BASE_ADDR						0x2000000
+#include "mem_map.h"
 
 
 #define REG_CLK_PRESCALER 				0x00 // word addressable

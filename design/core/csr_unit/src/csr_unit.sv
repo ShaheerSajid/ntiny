@@ -50,6 +50,8 @@ module csr_unit (
 	logic [31:0] _MCYCLEH;
 	logic [31:0] _MINSTRETH;
 	logic [31:0] _MCOUNTINHIBIT;
+	logic [31:0] _FFLAGS;
+	logic [31:0] _FRM;
 
 
 	logic MSTATUS_sel;
@@ -65,6 +67,9 @@ module csr_unit (
 	logic MCYCLEH_sel;
 	logic MINSTRETH_sel;
 	logic MCOUNTINHIBIT_sel;
+	logic FFLAGS_sel;
+	logic FRM_sel;
+	logic FCSR_sel;
 
 	logic [31:0]csr_data;
 	logic [63:0]csr_cycle_update;
@@ -84,6 +89,9 @@ module csr_unit (
 	assign MCYCLEH_sel 			= csr_addr_i == MCYCLEH;
 	assign MINSTRETH_sel 		= csr_addr_i == MINSTRETH;
 	assign MCOUNTINHIBIT_sel= csr_addr_i == MCOUNTINHIBIT;
+	assign FFLAGS_sel       = csr_addr_i == FFLAGS;
+	assign FRM_sel          = csr_addr_i == FRM;
+	assign FCSR_sel         = csr_addr_i == FCSR;
 
 
 	assign csr_data = (csr_use_immediate_i == TRUE)?imm_i : reg_i;
@@ -124,9 +132,26 @@ module csr_unit (
 	csr_register_32 #(32'h0)		csr_mscratch		(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MSCRATCH_sel),
 															.wdata(csr_data),.update(_MSCRATCH), .csr(_MSCRATCH));
 
+	// FPU CSRs: FFLAGS (accumulated exception flags), FRM (rounding mode)
+	// FCSR writes update both FFLAGS and FRM simultaneously
+	wire [4:0] new_fflags = {float_status_i.NV, float_status_i.DZ, float_status_i.OF, float_status_i.UF, float_status_i.NX};
+	wire [31:0] fflags_accumulate = (float_valid_i == TRUE) ? (_FFLAGS | {27'b0, new_fflags}) : _FFLAGS;
+	wire [31:0] fflags_wdata = FCSR_sel ? {27'b0, csr_data[4:0]} : csr_data;
+	wire [31:0] frm_wdata   = FCSR_sel ? {29'b0, csr_data[7:5]} : csr_data;
+
+	csr_register_32 #(32'h0)		csr_fflags			(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(FFLAGS_sel | FCSR_sel),
+														.wdata(fflags_wdata),.update(fflags_accumulate), .csr(_FFLAGS));
+	csr_register_32 #(32'h0)		csr_frm				(.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(FRM_sel | FCSR_sel),
+														.wdata(frm_wdata),.update(_FRM), .csr(_FRM));
+
+	assign roundmode_o = roundmode_e'(_FRM[2:0]);
+
 	always_comb
     begin
 		case (csr_addr_i)
+			FFLAGS:			  csr_value_o = {27'b0, _FFLAGS[4:0]};
+			FRM:			    csr_value_o = {29'b0, _FRM[2:0]};
+			FCSR:			    csr_value_o = {24'b0, _FRM[2:0], _FFLAGS[4:0]};
 			CYCLE:			  csr_value_o = _MCYCLE;
 			TIME:			    csr_value_o = 0;
 			INSTRET:		  csr_value_o = _MINSTRET;
@@ -134,7 +159,11 @@ module csr_unit (
 			TIMEH:			  csr_value_o = 0;
 			INSTRETH:		  csr_value_o = _MINSTRETH;
 			MSTATUS:		  csr_value_o = _MSTATUS;
-			MISA:			    csr_value_o = 32'h40001106; // RV32IMC hardcoded
+`ifdef FPU
+			MISA:			    csr_value_o = 32'h40001126; // RV32IMFC
+`else
+			MISA:			    csr_value_o = 32'h40001106; // RV32IMC
+`endif
 			MIE:			    csr_value_o = _MIE;
 			MTVEC:			  csr_value_o = _MTVEC;
 			MSCRATCH:		  csr_value_o = _MSCRATCH;

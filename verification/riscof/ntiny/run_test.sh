@@ -10,22 +10,14 @@ HEX_TEXT=$5
 SPLIT=$6
 WORK_DIR=$(dirname "$ELF")
 
-# RISCOF memory layout (must match linker script and Verilator build defines)
-IMEM_SIZE_BYTES=2097152   # 2MB
-DMEM_BASE=3145728         # 0x300000
-DMEM_SIZE_BYTES=16384     # 16KB
-
 NM="${TOOLCHAIN}/riscv64-unknown-elf-nm"
 OBJCOPY="${TOOLCHAIN}/riscv64-unknown-elf-objcopy"
 
 cd "$WORK_DIR"
 
-# Convert ELF to flat binary (gap-filled with zeros)
-${OBJCOPY} -O binary --gap-fill 0 "$ELF" test.bin
-
-# Extract IMEM and DMEM regions using dd (skips gap between them)
-dd if=test.bin of=imem.bin bs=1 count=${IMEM_SIZE_BYTES} 2>/dev/null
-dd if=test.bin of=dmem.bin bs=1 skip=${DMEM_BASE} count=${DMEM_SIZE_BYTES} 2>/dev/null
+# Extract IMEM and DMEM directly from ELF sections (avoids huge flat binary)
+${OBJCOPY} -O binary -j .text.init -j .text "$ELF" imem.bin
+${OBJCOPY} -O binary -j .data -j .sdata "$ELF" dmem.bin
 
 # Convert each region to hex text for $readmemh
 ${HEX_TEXT} imem.bin imem_raw.text
