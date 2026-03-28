@@ -45,14 +45,10 @@ begin
 		default:   apc_in = apc_out + 4;
 	endcase
 end
-`ifdef DV_TRACER
+`ifdef BOOT
 program_counter #(.DEFAULT(32'h80000000)) c_program_counter_inst
 `else
-	`ifdef BOOT
-		program_counter #(.DEFAULT(32'h80000000)) c_program_counter_inst
-	`else
-		program_counter #(.DEFAULT(32'h00000000)) c_program_counter_inst
-	`endif
+program_counter #(.DEFAULT(32'h00000000)) c_program_counter_inst
 `endif
 (
 	.clk_i		(clk_i),

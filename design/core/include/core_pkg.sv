@@ -262,37 +262,39 @@ typedef enum logic[2:0] {
 	BRANCH_DPC
 } pc_sel_e;
 
+// Control bus — decoded instruction fields, propagated through pipeline stages.
+// Groups: instruction type, branch, memory, ALU/MUL/FPU/BIT ops, CSR, register addresses, writeback.
 typedef struct {
-	rv32_opcodes_e inst_type;
-	br_cond_e br_cond;
-	load_store_width_e load_store_width;
-	onebit_sig_e mem_unsigned;
-	imm_sel_e imm_sel;
-	mem_op_e mem_op;
-	operand_e operand_a;
-	operand_e operand_b;
-	operand_e operand_c;
-	alu_op_e alu_op;
-	csr_op_e csr_op;
-	onebit_sig_e csr_use_immediate;
-	csr_reg_e csr_addr;
-	mul_op_e mul_op;
-	float_op_e float_op;
-	roundmode_e roundmode;
-	bit_op_e bit_op;
-	exec_result_e exec_result;
-	reg_add_e rs1_int;
-	reg_add_e rs2_int;
-	reg_add_e rs3_int;
-	reg_add_e rd_int;
-	reg_add_e rs1_float;
-	reg_add_e rs2_float;
-	reg_add_e rs3_float;
-	reg_add_e rd_float;
-	wb_sel_e wb_sel;
-	onebit_sig_e ebreak;
-	onebit_sig_e ecall;
-  onebit_sig_e mret;
+	rv32_opcodes_e inst_type;       // opcode category
+	br_cond_e br_cond;              // branch condition (BEQ, BNE, etc.)
+	load_store_width_e load_store_width; // BYTE/HALF/WORD
+	onebit_sig_e mem_unsigned;      // unsigned load (LBU, LHU)
+	imm_sel_e imm_sel;              // immediate format (I/S/B/U/J/CSR)
+	mem_op_e mem_op;                // READ/WRITE/NO_MEM_OP
+	operand_e operand_a;            // ALU source A select
+	operand_e operand_b;            // ALU source B select
+	operand_e operand_c;            // ALU source C (FMA third operand)
+	alu_op_e alu_op;                // base ALU operation
+	csr_op_e csr_op;                // CSR read/write/set/clear
+	onebit_sig_e csr_use_immediate; // CSR immediate vs register source
+	csr_reg_e csr_addr;             // CSR address
+	mul_op_e mul_op;                // M-ext multiply/divide operation
+	float_op_e float_op;            // F-ext floating-point operation
+	roundmode_e roundmode;          // FP rounding mode
+	bit_op_e bit_op;                // Zba/Zbb bit manipulation operation
+	exec_result_e exec_result;      // execution result source select
+	reg_add_e rs1_int;              // integer source register 1
+	reg_add_e rs2_int;              // integer source register 2
+	reg_add_e rs3_int;              // integer source register 3
+	reg_add_e rd_int;               // integer destination register
+	reg_add_e rs1_float;            // float source register 1
+	reg_add_e rs2_float;            // float source register 2
+	reg_add_e rs3_float;            // float source register 3
+	reg_add_e rd_float;             // float destination register
+	wb_sel_e wb_sel;                // writeback source (EXEC/MEMORY/PC)
+	onebit_sig_e ebreak;            // EBREAK instruction
+	onebit_sig_e ecall;             // ECALL instruction
+  onebit_sig_e mret;              // MRET instruction
 } ctrl_bus_e;
 
 endpackage

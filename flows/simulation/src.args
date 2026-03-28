@@ -4,10 +4,10 @@
 ../../design/debug/src/dm.sv
 ../../design/debug/src/dtm.sv
 ../../design/buses/src/buses.sv
-../../design/core/c_ext/c_dec.sv
+../../design/core/c_ext/src/c_dec.sv
 ../../design/soc_top/src/soc_top.sv
 ../../design/debug/src/debug_top.sv
-../../design/core/c_ext/c_controller.sv
+../../design/core/c_ext/src/c_controller.sv
 ../../design/interconnect/src/avalon_interconnect.sv
 ../../design/core/alu/src/alu.sv
 ../../design/core/fpu/src/fpnew_top_gate.v
@@ -32,7 +32,7 @@
 ../../design/uncore/i2c/src/i2c_master_bit_ctrl.sv
 ../../design/uncore/i2c/src/i2c_master_byte_ctrl.sv
 ../../design/core/branch/src/branch_target_address.sv
-../../design/core/interrupt/interrupt_ctrl.sv
+../../design/core/interrupt/src/interrupt_ctrl.sv
 ../../design/uncore/plic/src/plic.v
 ../../design/uncore/plic/src/PLIC_TOP.v
 ../../design/uncore/plic/src/IP_Handling.v

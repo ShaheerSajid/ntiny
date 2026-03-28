@@ -1,28 +1,29 @@
 `timescale 1ns/10ps
+`include "mem_map.svh"
 module tb_soc_top(
-`ifdef VERILATOR_SIM 
+`ifdef VERILATOR_SIM
     	input clk,reset,trst
 
 );
 `else
 );
 reg clk,reset,trst;
-`endif	
+`endif
 
 	  initial begin
 		 $display("==============");
 		 $display("SoC Terminal");
 		 $display("==============");
-		 `ifndef VERILATOR_SIM 
+		 `ifndef VERILATOR_SIM
 		 clk = 0;
 		 trst = 0;
 		 reset = 1'b1; #100 reset = 1'b0; trst = 1'b1;
 		 `endif
 	  end
-	  
-	 
-wire [14:0] address_a_sig;
-wire [14:0] address_b_sig;
+
+
+wire [`IMEM_ADDR_WIDTH-1:0] address_a_sig;
+wire [`DMEM_ADDR_WIDTH-1:0] address_b_sig;
 wire [3:0] byteena_a_sig;
 wire [3:0] byteena_b_sig;
 wire  clock_a_sig;
@@ -130,7 +131,7 @@ soc_top soc_top_inst
 		.gpio_o(),
 		.gpio_i(),
 		//pwm
-		
+
 		.pwm1_h_o       ( ),
 		.pwm1_l_o       ( ),
 		.pwm2_h_o		( ),
@@ -141,12 +142,12 @@ soc_top soc_top_inst
 		.tms_i(tms) ,	// input  TMS_sig
 		.tdi_i(tdi) ,	// input  TDI_sig
 		.tdo_o(tdo)	// output  TDO_sig
-		
+
 	);
 
 
   uartdpi #(
-    .BAUD(115200), 
+    .BAUD(115200),
     .FREQ(50000000)
   )
   u_uart(
@@ -156,10 +157,71 @@ soc_top soc_top_inst
     .tx(rx)
   );
 
-`ifndef VERILATOR_SIM 
-	always begin 
+// ============================================================
+// Tohost monitor — detects test completion via write to TOHOST_ADDR
+// Software writes 1 for PASS, any other non-zero value for FAIL.
+// ============================================================
+
+// Signature extraction for RISCOF: plusargs +sig_file, +sig_begin, +sig_end
+string sig_file_str;
+reg [31:0] sig_begin_addr, sig_end_addr;
+reg sig_enabled;
+integer sig_fd;
+integer sig_idx;
+reg [31:0] sig_word;
+
+initial begin
+	if ($value$plusargs("sig_file=%s", sig_file_str))
+		sig_enabled = 1;
+	else
+		sig_enabled = 0;
+	if (!$value$plusargs("sig_begin=%h", sig_begin_addr))
+		sig_begin_addr = 32'h0;
+	if (!$value$plusargs("sig_end=%h", sig_end_addr))
+		sig_end_addr = 32'h0;
+end
+
+task dump_signature;
+	integer word_begin, word_end;
+	begin
+		if (sig_enabled && sig_end_addr > sig_begin_addr) begin
+			sig_fd = $fopen(sig_file_str, "w");
+			if (sig_fd == 0) begin
+				$display("ERROR: Cannot open signature file: %s", sig_file_str);
+			end else begin
+				// Signature is in DMEM: convert absolute address to DMEM word index
+				word_begin = (sig_begin_addr - `DMEM_BASE) / 4;
+				word_end   = (sig_end_addr - `DMEM_BASE) / 4;
+				for (sig_idx = word_begin; sig_idx < word_end; sig_idx = sig_idx + 1) begin
+					sig_word = mem_inst.m2.mem[sig_idx];
+					$fwrite(sig_fd, "%08x\n", sig_word);
+				end
+				$fclose(sig_fd);
+				$display("SIGNATURE: dumped %0d words to %s", word_end - word_begin, sig_file_str);
+			end
+		end
+	end
+endtask
+
+always @(posedge clk) begin
+	if (!reset &&
+	    soc_top_inst.dbus.write &&
+	    soc_top_inst.dbus.address == `TOHOST_ADDR) begin
+		dump_signature;
+		if (soc_top_inst.dbus.writedata == 32'h1) begin
+			$display("TEST PASSED");
+			$finish;
+		end else begin
+			$display("TEST FAILED (tohost = 0x%08h)", soc_top_inst.dbus.writedata);
+			$finish;
+		end
+	end
+end
+
+`ifndef VERILATOR_SIM
+	always begin
 		 #10 clk = !clk;
-	end 
+	end
 `endif
-	  
-endmodule 
+
+endmodule

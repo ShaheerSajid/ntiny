@@ -75,6 +75,7 @@ begin
     wb_sel = NO_WB;
 
     case(opcode)
+        // --- RV32I Base Integer ---
         LUI     :   begin  
                         imm_sel = U_imm; 
                         operand_b = IMM; 
@@ -131,6 +132,7 @@ begin
                         rs1_int = reg_add_e'(instruction_i[19:15]);
                         rs2_int = reg_add_e'(instruction_i[24:20]);
                     end
+        // --- RV32I/Zba/Zbb Immediate & Register ALU ---
         OP_I    :   begin
                         imm_sel = I_imm;
                         operand_a = REGISTER;
@@ -165,6 +167,7 @@ begin
                         rd_int = reg_add_e'(instruction_i[11:7]);
                         wb_sel = EXEC;
                     end
+        // --- RV32I/M/Zba/Zbb Register-Register ALU ---
         OP_R    :   begin
                         operand_a = REGISTER;
                         operand_b = REGISTER;
@@ -212,6 +215,7 @@ begin
                         rd_int = reg_add_e'(instruction_i[11:7]);
                         wb_sel = EXEC;
                     end
+        // --- Zicsr: CSR Access ---
         CSR     :   begin
                         imm_sel = CSR_imm;
                         csr_op = csr_op_e'({1'b0,instruction_i[13:12]});
@@ -222,6 +226,8 @@ begin
                         rd_int = reg_add_e'(instruction_i[11:7]);
                         wb_sel = EXEC;
                     end
+    `ifdef FPU
+        // --- RV32F: Single-Precision Floating-Point ---
         FLOAD   :   begin
                         load_store_width = load_store_width_e'(instruction_i[13:12]);
                         mem_unsigned = onebit_sig_e'(instruction_i[14]);
@@ -234,7 +240,6 @@ begin
                         rd_float = reg_add_e'(instruction_i[11:7]);
                         wb_sel = MEMORY;
                     end
-    `ifdef FPU
         FSTORE  :   begin
                         load_store_width = load_store_width_e'(instruction_i[13:12]);
                         imm_sel = S_imm;

@@ -10,6 +10,7 @@ questa_sim:
 	vlog -sv -work work ../../verification/dv/src/tracer.sv
 	vlog -sv -work work \
 	+define+BOOT \
+	+incdir+../../design/common/ \
 	+incdir+../../design/uncore/i2c/src/ \
 	+incdir+../../design/uncore/timer/src/ \
 	+incdir+../../design/uncore/pwm/src/ \
@@ -35,6 +36,7 @@ incisive_sim:
 	-sv \
 	+linedebug \
 	+access+rwc \
+	+incdir+../../design/common/ \
 	+incdir+../../design/uncore/i2c/src/ \
 	+incdir+../../design/uncore/timer/src/ \
 	+incdir+../../design/uncore/pwm/src/ \
@@ -69,7 +71,10 @@ incisive_sim_gate:
 	-timescale 1ns/10ps \
 	-top tb_top
 
-verilator_sim:
+# --- Verilator targets ---
+
+# Build the Verilator model (no simulation)
+verilator_build:
 	verilator \
 	-Wno-UNOPTFLAT \
 	-Wno-INITIALDLY \
@@ -88,15 +93,20 @@ verilator_sim:
 	-O3 \
 	-DVERILATOR_SIM \
 	-DBOOT \
+	-DDV_TRACER \
 	--trace \
 	-sv --top-module tb_soc_top \
 	--cc \
+	+incdir+../../design/common/ \
 	+incdir+../../design/uncore/i2c/src/ \
 	+incdir+../../design/uncore/timer/src/ \
 	+incdir+../../design/uncore/pwm/src/ \
 	+incdir+../../design/uncore/spi/src/ \
 	+incdir+../../design/uncore/uart/src/ \
 	-f src.args \
+	../../verification/dv/src/pkg.sv \
+	../../verification/dv/src/tracer_pkg.sv \
+	../../verification/dv/src/tracer.sv \
 	testbench/uartdpi.c \
 	testbench/uartdpi.sv \
 	testbench/arm_boot_dummy.v \
@@ -108,9 +118,21 @@ verilator_sim:
 	--exe testbench/main.cpp
 	make -j -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
 	mv obj_dir/Vtb_soc_top ./
+
+# Run simulation (no waveform by default)
+verilator_run:
 	./Vtb_soc_top
+
+# Run simulation with VCD waveform tracing
+verilator_run_trace:
+	./Vtb_soc_top --trace
+
+# Open waveform viewer (after verilator_run_trace)
+verilator_wave:
 	gtkwave --dump waveform.vcd
-			
+
+# --- Convenience compound targets ---
+
 .PHONY: questa
 questa: clean mem_init questa_sim
 
@@ -120,8 +142,96 @@ incisive: clean mem_init incisive_sim
 .PHONY: incisive_gate
 incisive_gate: clean mem_init incisive_sim_gate
 
+# Build and run (no trace, fast)
 .PHONY: verilator
-verilator: clean mem_init verilator_sim
+verilator: clean mem_init verilator_build verilator_run
+
+# Build and run with waveform
+.PHONY: verilator_trace
+verilator_trace: clean mem_init verilator_build verilator_run_trace
+
+# Regression test target — returns exit code for CI
+.PHONY: verilator_test
+verilator_test: clean mem_init verilator_build
+	@echo "--- Running Verilator regression test ---"
+	@./Vtb_soc_top --timeout 5000000; \
+	EXIT_CODE=$$?; \
+	if [ $$EXIT_CODE -eq 0 ]; then \
+		echo "RESULT: PASS"; \
+	elif [ $$EXIT_CODE -eq 2 ]; then \
+		echo "RESULT: TIMEOUT"; \
+	else \
+		echo "RESULT: FAIL (exit code $$EXIT_CODE)"; \
+	fi; \
+	exit $$EXIT_CODE
+
+# --- RISCOF targets ---
+RISCOF_DIR = ../../verification/riscof
+RISCOF_SUITE = $(RISCOF_DIR)/riscv-arch-test/riscv-test-suite/
+RISCOF_ENV = $(RISCOF_DIR)/riscv-arch-test/riscv-test-suite/env
+RISCOF_VENV = $(HOME)/Software/riscof_env/bin/activate
+
+# Build Verilator model for RISCOF (no BOOT — PC starts at 0x00000000)
+verilator_build_riscof:
+	verilator \
+	-Wno-UNOPTFLAT \
+	-Wno-INITIALDLY \
+	-Wno-UNUSED \
+	-Wno-WIDTH \
+	-Wno-CASEINCOMPLETE \
+	-Wno-PINMISSING \
+	-Wno-MULTIDRIVEN \
+	-Wno-STMTDLY \
+	-Wno-UNPACKED \
+	-Wno-UNSIGNED \
+	-Wno-LITENDIAN \
+	-Wno-MODDUP \
+	--no-timing \
+	--timescale-override 1ns/10ps \
+	-O3 \
+	-DVERILATOR_SIM \
+	+define+IMEM_SIZE_BYTES=2097152 \
+	+define+DMEM_BASE=3145728 \
+	+define+DMEM_SIZE_BYTES=16384 \
+	--trace \
+	-sv --top-module tb_soc_top \
+	--cc \
+	+incdir+../../design/common/ \
+	+incdir+../../design/uncore/i2c/src/ \
+	+incdir+../../design/uncore/timer/src/ \
+	+incdir+../../design/uncore/pwm/src/ \
+	+incdir+../../design/uncore/spi/src/ \
+	+incdir+../../design/uncore/uart/src/ \
+	-f src.args \
+	../../verification/dv/src/pkg.sv \
+	../../verification/dv/src/tracer_pkg.sv \
+	../../verification/dv/src/tracer.sv \
+	testbench/uartdpi.c \
+	testbench/uartdpi.sv \
+	testbench/arm_boot_dummy.v \
+	testbench/arm_imem_dummy.v \
+	testbench/arm_dmem_dummy.v \
+	testbench/mem.v \
+	testbench/bootmem.v \
+	testbench/tb_soc_top.v \
+	--exe testbench/main.cpp
+	make -j -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
+	mv obj_dir/Vtb_soc_top ./
+
+.PHONY: riscof
+riscof: verilator_build_riscof
+	@echo "--- Running RISCOF compliance tests ---"
+	cd $(RISCOF_DIR) && source $(RISCOF_VENV) && \
+	riscof run --config=config.ini \
+		--suite=$(realpath $(RISCOF_SUITE)) \
+		--env=$(realpath $(RISCOF_ENV))
+
+.PHONY: riscof_testlist
+riscof_testlist:
+	cd $(RISCOF_DIR) && source $(RISCOF_VENV) && \
+	riscof testlist --config=config.ini \
+		--suite=$(realpath $(RISCOF_SUITE)) \
+		--env=$(realpath $(RISCOF_ENV))
 
 .PHONY: clean
 clean:

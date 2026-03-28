@@ -1,20 +1,24 @@
+`include "mem_map.svh"
+
 module arm_dmem (Q, CLK, CEN, WEN, A, D, EMA, GWEN, RETN);
 
+  parameter DEPTH = `DMEM_DEPTH;
+  parameter AW = `DMEM_ADDR_WIDTH;
 
   output reg[31:0] Q;
   input  CLK;
   input  CEN;
   input [3:0] WEN;
-  input [10:0] A;
+  input [AW-1:0] A;
   input [31:0] D;
   input [2:0] EMA;
   input  GWEN;
   input  RETN;
 
-reg [31:0] mem[0:2047];
+reg [31:0] mem[0:DEPTH-1];
 integer i;
 initial begin
-for(i = 0; i < 2048; i=i+1)
+for(i = 0; i < DEPTH; i=i+1)
 	mem[i] = 0;
 $readmemh("dmem.text", mem);
 end
@@ -28,7 +32,7 @@ begin
 			if(~WEN[1]) mem[A][15:8] <=  D[15:8];
 			if(~WEN[2]) mem[A][23:16] <= D[23:16];
 			if(~WEN[3]) mem[A][31:24] <= D[31:24];
-		end			
+		end
 	end
 end
 endmodule

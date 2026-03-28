@@ -20,11 +20,9 @@ logic c2_imem;
 logic c3_imem;
 logic c4_imem;
 
-logic f2_ie;
 logic f3_ie;
 logic f4_ie;
 logic f5_ie;
-logic f2_imem;
 logic f3_imem;
 logic f4_imem;
 logic f5_imem;
@@ -37,7 +35,6 @@ assign c1_ie = ctrl_bus_ie_i.wb_sel != NO_WB;
 assign c2_ie = ctrl_bus_ie_i.rd_int != 0;
 assign c3_ie = (ctrl_bus_ie_i.rd_int == ctrl_bus_if_id_i.rs1_int) && ctrl_bus_if_id_i.rs1_int != NO_REG;
 assign c4_ie = (ctrl_bus_ie_i.rd_int == ctrl_bus_if_id_i.rs2_int) && ctrl_bus_if_id_i.rs2_int != NO_REG;
-//assign f2_ie = ctrl_bus_ie_i.rd_float != 0;
 `ifdef FPU
 assign f3_ie = (ctrl_bus_ie_i.rd_float == ctrl_bus_if_id_i.rs1_float) && ctrl_bus_if_id_i.rs1_float != NO_REG;
 assign f4_ie = (ctrl_bus_ie_i.rd_float == ctrl_bus_if_id_i.rs2_float) && ctrl_bus_if_id_i.rs2_float != NO_REG;
@@ -52,7 +49,6 @@ assign c1_imem = ctrl_bus_imem_i.wb_sel != NO_WB;
 assign c2_imem = ctrl_bus_imem_i.rd_int != 0;
 assign c3_imem = (ctrl_bus_imem_i.rd_int == ctrl_bus_if_id_i.rs1_int) && ctrl_bus_if_id_i.rs1_int != NO_REG;
 assign c4_imem = (ctrl_bus_imem_i.rd_int == ctrl_bus_if_id_i.rs2_int) && ctrl_bus_if_id_i.rs2_int != NO_REG;
-//assign f2_imem = ctrl_bus_imem_i.rd_float != 0;
 `ifdef FPU
 assign f3_imem = (ctrl_bus_imem_i.rd_float == ctrl_bus_if_id_i.rs1_float) && ctrl_bus_if_id_i.rs1_float != NO_REG;
 assign f4_imem = (ctrl_bus_imem_i.rd_float == ctrl_bus_if_id_i.rs2_float) && ctrl_bus_if_id_i.rs2_float != NO_REG;
@@ -63,8 +59,8 @@ assign f4_imem = 1'b0;
 assign f5_imem = 1'b0;
 `endif
 
-assign stall_condition_ie = c1_ie && ((c2_ie && (c3_ie || c4_ie)) || (/*f2_ie && */(f3_ie || f4_ie || f5_ie)));
-assign stall_condition_imem = c1_imem && ((c2_imem && (c3_imem || c4_imem)) || (/*f2_imem && */(f3_imem || f4_imem || f5_imem)));
+assign stall_condition_ie = c1_ie && ((c2_ie && (c3_ie || c4_ie)) || (f3_ie || f4_ie || f5_ie));
+assign stall_condition_imem = c1_imem && ((c2_imem && (c3_imem || c4_imem)) || (f3_imem || f4_imem || f5_imem));
 
 assign br_true = ctrl_bus_if_id_i.inst_type == JUMP_R || ctrl_bus_if_id_i.inst_type == BRANCH;
 assign lu_ie = ctrl_bus_ie_i.mem_op == READ;

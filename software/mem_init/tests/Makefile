@@ -25,7 +25,7 @@ CFLAGS =	-I$(UART_SW) \
 		-I$(PLIC_SW) \
 		-I$(COMMON_DIR) \
 		-I$(TEST_DIR) \
-		-Ofast -ffunction-sections -fdata-sections -mabi=ilp32 -march=rv32imc_zba_zbb
+		-Ofast -ffunction-sections -fdata-sections -mabi=ilp32 -march=rv32imc_zicsr_zba_zbb
 		
 LDFLAGS =	-T $(COMMON_DIR)/link.ld \
 		-Wl,-gc-sections \

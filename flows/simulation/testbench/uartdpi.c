@@ -37,7 +37,11 @@ typedef struct {
   char tmp_read;
 } uartdpi_t;
 
-extern void* uartdpi_create(const char *name) {
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void* uartdpi_create(const char *name) {
   uartdpi_t *obj = (uartdpi_t*)malloc(sizeof(uartdpi_t));
 
   struct termios tty;
@@ -53,24 +57,28 @@ extern void* uartdpi_create(const char *name) {
   return (void*) obj;
 }
 
-extern int uartdpi_can_read(void* obj) {
+int uartdpi_can_read(void* obj) {
   uartdpi_t *dpi = (uartdpi_t*) obj;
 
   int rv = read(dpi->master, &dpi->tmp_read, 1);
   return (rv == 1);
 }
 
-extern char uartdpi_read(void* obj) {
+char uartdpi_read(void* obj) {
   uartdpi_t *dpi = (uartdpi_t*) obj;
 
   return dpi->tmp_read;
 }
 
-extern void uartdpi_write(void *obj, int data)
+void uartdpi_write(void *obj, int data)
 {
    uartdpi_t *dpi = (uartdpi_t*) obj;
 
   int rv = write(dpi->master, &data, 1);
   (void) rv;
 }
+
+#ifdef __cplusplus
+}
+#endif
 

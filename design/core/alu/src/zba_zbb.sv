@@ -1,3 +1,6 @@
+// Zba (address generation) and Zbb (basic bit manipulation) extension unit.
+// Combinational — all outputs computed in parallel from in1_i, in2_i.
+// CLZ/CTZ use priority-encoder chains; CPOP uses an adder tree.
 module zba_zbb (
 	
 	input[31:0] in1_i,

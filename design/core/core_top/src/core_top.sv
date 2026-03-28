@@ -236,21 +236,28 @@ begin
 		dpc <= next_instruction_addr;
 end
 //abstract register read logic
-always_ff@(posedge clk_i)
+always_ff@(posedge clk_i or posedge reset_i)
 begin
-	if(ar_ad_i < 32'h1000)
-		case(ar_ad_i)
-			16'h07b0: ar_do_o <= {4'd4, 12'd0, dcsr[15], 1'b0, dcsr[13:9], debug_cause, 1'b0, dcsr[4], 1'b0, dcsr[2], 2'd3};
-			16'h07b1: ar_do_o <= dpc;
-			default:  ar_do_o <= csr_result;
-		endcase
-	else if(ar_ad_i >= 32'h1000 && ar_ad_i <= 32'h101f)
-		ar_do_o <= rs1_int;
-	else if(ar_ad_i >= 32'h1020 && ar_ad_i <= 32'h103f)
-		ar_do_o <= rs1_float;
+	if(reset_i) begin
+		ar_do_o <= 0;
+		ar_done_r <= FALSE;
+		am_done_r <= FALSE;
+	end
+	else begin
+		if(ar_ad_i < 32'h1000)
+			case(ar_ad_i)
+				16'h07b0: ar_do_o <= {4'd4, 12'd0, dcsr[15], 1'b0, dcsr[13:9], debug_cause, 1'b0, dcsr[4], 1'b0, dcsr[2], 2'd3};
+				16'h07b1: ar_do_o <= dpc;
+				default:  ar_do_o <= csr_result;
+			endcase
+		else if(ar_ad_i >= 32'h1000 && ar_ad_i <= 32'h101f)
+			ar_do_o <= rs1_int;
+		else if(ar_ad_i >= 32'h1020 && ar_ad_i <= 32'h103f)
+			ar_do_o <= rs1_float;
 
-	ar_done_r <= ar_en_i;
-	am_done_r <= onebit_sig_e'(am_en_i & (~dbus.stall));
+		ar_done_r <= ar_en_i;
+		am_done_r <= onebit_sig_e'(am_en_i & (~dbus.stall));
+	end
 end
 assign am_do_o = readdata_imem;
 assign ar_done_o = ar_done_r;
@@ -314,14 +321,13 @@ begin
 		default: pc_in = pc_out + 4;
 	endcase
 end
-`ifdef DV_TRACER
+// ============================================================
+// FETCH STAGE
+// ============================================================
+`ifdef BOOT
 program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 `else
-	`ifdef BOOT
-		program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
-	`else
-		program_counter #(.DEFAULT(32'h00000000)) program_counter_inst
-	`endif
+program_counter #(.DEFAULT(32'h00000000)) program_counter_inst
 `endif
 (
 	.clk_i		(clk_i),
@@ -378,6 +384,9 @@ c_controller c_controller_inst
 );
 
 //instruction decode stage
+// ============================================================
+// DECODE STAGE (ID)
+// ============================================================
 decoder decoder_inst
 (
   .instruction_i	(instruction_pipe),
@@ -399,7 +408,7 @@ reg_file regfile_inst
 	.rddatac_o	()
 );
 `ifdef FPU
-	reg_file_float regfile_float_inst
+	reg_file #(.ZERO_REG(0)) regfile_float_inst
 	(
 		.clk_i		  (clk_i) ,	
 		.reset_i	  (reset_i),
@@ -533,6 +542,9 @@ interrupt_ctrl interrupt_ctrl_inst
   .interrupt_src_o  (interrupt_src)
 );
 
+// ============================================================
+// EXECUTE STAGE (IE)
+// ============================================================
 //reg wall ID/IE
 always_ff@(posedge clk_i or posedge reset_i)
 	begin
@@ -706,7 +718,9 @@ always_ff@(posedge clk_i or posedge reset_i)
 		end
 	end
 
-//mem stage
+// ============================================================
+// MEMORY STAGE (IMEM)
+// ============================================================
 core2avl core2avl_inst
 (
 	// core side signals
@@ -749,7 +763,9 @@ always_ff@(posedge clk_i or posedge reset_i)
 			readdata_iwb <= readdata_imem;
 		end
 	end
-//write back stage
+// ============================================================
+// WRITEBACK STAGE (IWB)
+// ============================================================
 always_comb
 begin
 	case(ctrl_bus_iwb.wb_sel)
@@ -780,33 +796,44 @@ logic a2;
 logic fstat_imem;
 logic fstat_iwb;
 
-always_ff@(posedge clk_i)
-begin	
-	stall_ie_reg <= ie_stall;
+always_ff@(posedge clk_i or posedge reset_i)
+begin
+	if(reset_i) begin
+		stall_ie_reg <= 0;
+		pc1 <= 0; pc2 <= 0; pc3 <= 0;
+		i1 <= 0; i2 <= 0; i3 <= 0;
+		a1 <= 0; a2 <= 0;
+		fstat_imem <= 0; fstat_iwb <= 0;
+		srcA_imem <= 0; srcB_imem <= 0; srcC_imem <= 0;
+		srcA_iwb <= 0; srcB_iwb <= 0; srcC_iwb <= 0;
+	end
+	else begin
+		stall_ie_reg <= ie_stall;
 
-	if(!ie_stall) begin
-		pc1 <= next_instruction_addr;
-		i1 <= instruction_pipe;
-	end
-	if(!imem_stall) begin
-		pc2 <= pc1;
-		i2 <= i1;
-		a1 <= c_valid_ie;
-		fstat_imem <= float_status.NV | float_status.DZ | float_status.OF | float_status.UF | float_status.NX;
-		if(!stall_ie_reg) begin
-			srcA_imem <= opA_forwarded_data;
-			srcB_imem <= opB_forwarded_data;
-			srcC_imem <= opC_forwarded_data;
+		if(!ie_stall) begin
+			pc1 <= next_instruction_addr;
+			i1 <= instruction_pipe;
 		end
-	end
-	if(!iwb_stall) begin
-		pc3 <= pc2;
-		i3 <= i2;
-		a2 <= a1;
-		srcA_iwb <= srcA_imem;
-		srcB_iwb <= srcB_imem;
-		srcC_iwb <= srcC_imem;
-		fstat_iwb <= fstat_imem;
+		if(!imem_stall) begin
+			pc2 <= pc1;
+			i2 <= i1;
+			a1 <= c_valid_ie;
+			fstat_imem <= float_status.NV | float_status.DZ | float_status.OF | float_status.UF | float_status.NX;
+			if(!stall_ie_reg) begin
+				srcA_imem <= opA_forwarded_data;
+				srcB_imem <= opB_forwarded_data;
+				srcC_imem <= opC_forwarded_data;
+			end
+		end
+		if(!iwb_stall) begin
+			pc3 <= pc2;
+			i3 <= i2;
+			a2 <= a1;
+			srcA_iwb <= srcA_imem;
+			srcB_iwb <= srcB_imem;
+			srcC_iwb <= srcC_imem;
+			fstat_iwb <= fstat_imem;
+		end
 	end
 end
 tracer tracer_ip (
@@ -835,11 +862,11 @@ tracer tracer_ip (
 	.rvfi_rd_wdata_t(write_back_data),
 	.rvfi_pc_rdata_t(a2? pc_iwb - 2 :pc_iwb - 4 ),
 	.rvfi_pc_wdata_t(pc3),
-	.rvfi_mem_addr(0),
-	.rvfi_mem_rmask(0),
-	.rvfi_mem_wmask(0),
-	.rvfi_mem_rdata(0),
-	.rvfi_mem_wdata(0)
+	.rvfi_mem_addr(ctrl_bus_iwb.mem_op != NO_MEM_OP ? exec_result_iwb : 32'h0),
+	.rvfi_mem_rmask(ctrl_bus_iwb.mem_op == READ ? 4'hF : 4'h0),
+	.rvfi_mem_wmask(ctrl_bus_iwb.mem_op == WRITE ? 4'hF : 4'h0),
+	.rvfi_mem_rdata(readdata_iwb),
+	.rvfi_mem_wdata(srcB_iwb)
 );
 `endif
 

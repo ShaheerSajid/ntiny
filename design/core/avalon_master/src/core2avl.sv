@@ -80,6 +80,8 @@ module core2avl
 						0:be = 4'b0011;
 						1:be = 4'b0110;
 						2:be = 4'b1100;
+						// NOTE: byt==3 is a misaligned half-word crossing a word boundary.
+						// be=0 makes this a no-op. TODO: generate misalignment trap in Phase 3.
 						3:be = 4'b0000;
 					endcase
 			WORD:	be = 4'b1111;

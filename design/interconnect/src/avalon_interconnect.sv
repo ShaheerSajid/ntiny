@@ -1,25 +1,26 @@
 `timescale 1ns/10ps
+`include "mem_map.svh"
+
 module avalon_interconnect(
 	input clk_i,
 	input stall_i,
-	input [31:0] avalon_addr_i, 
+	input [31:0] avalon_addr_i,
 	input [31:0] mem_readdata_i,
-	input [31:0] imem_readdata_i,	
+	input [31:0] imem_readdata_i,
 	input [31:0] timer_readdata_i,
 	input [31:0] gpio_readdata_i,
-	input [31:0] uart_readdata_i,	
-	input [31:0] spi_readdata_i,	
+	input [31:0] uart_readdata_i,
+	input [31:0] spi_readdata_i,
 	input [31:0] i2c_readdata_i,
 	input [31:0] pwm_readdata_i,
   input [31:0] plic_readdata_i,
   input [31:0] crc_readdata_i,
 
-	output [11:0] mem_addr_o,
-	output [13:0] imem_addr_o,
+	output [`DMEM_ADDR_WIDTH-1:0] mem_addr_o,
+	output [`IMEM_ADDR_WIDTH-1:0] imem_addr_o,
 	output [2:0] gpio_addr_o,
-	//output [1:0] uart_addr_o,
-	output [2:0] timer_addr_o, 
-	output [7:0] spi_addr_o, 
+	output [2:0] timer_addr_o,
+	output [7:0] spi_addr_o,
 	output [7:0] i2c_addr_o,
 	output [7:0] pwm_addr_o,
   output [1:0] plic_addr_o,
@@ -51,28 +52,28 @@ module avalon_interconnect(
   var logic crc_chipsel_reg;
 
 	assign timer_addr_o = avalon_addr_i[4:0]>>2;
-	//assign uart_addr_o = avalon_addr_i[3:0]>>2;
 	assign gpio_addr_o	= avalon_addr_i[3:0]>>2;
-	assign mem_addr_o 	= avalon_addr_i[13:0]>>2;
-	assign imem_addr_o 	= avalon_addr_i[15:0]>>2;
+	assign mem_addr_o 	= avalon_addr_i[`DMEM_ADDR_WIDTH+1:2];
+	assign imem_addr_o 	= avalon_addr_i[`IMEM_ADDR_WIDTH+1:2];
 	assign spi_addr_o 	= avalon_addr_i[7:0];
 	assign i2c_addr_o 	= avalon_addr_i[7:0];
 	assign pwm_addr_o 	= avalon_addr_i[7:0]>>2;
   assign plic_addr_o  = avalon_addr_i[3:0]>>2;
   assign crc_addr_o   = avalon_addr_i[4:0]>>2;
 
-  assign soft_chipsel_o  = (avalon_addr_i == 32'h4000000);
-  assign crc_chipsel_o   = (avalon_addr_i >= 32'h80000   && avalon_addr_i <= 32'h8001F);
-	assign timer_chipsel_o = (avalon_addr_i >= 32'h200000  && avalon_addr_i <= 32'h200010);
-	assign uart_chipsel_o  = (avalon_addr_i >= 32'h100000  && avalon_addr_i <= 32'h100010);
-	assign gpio_chipsel_o  = (avalon_addr_i >= 32'h400000  && avalon_addr_i <= 32'h40000F);
-  assign plic_chipsel_o  = (avalon_addr_i >= 32'h800000  && avalon_addr_i <= 32'h80000F);
-	assign spi_chipsel_o   = (avalon_addr_i >= 32'h1000000 && avalon_addr_i <= 32'h10000ff);
-	assign i2c_chipsel_o   = (avalon_addr_i >= 32'h2000000 && avalon_addr_i <= 32'h20000ff);
-	assign pwm_chipsel_o   = (avalon_addr_i >= 32'h2001000 && avalon_addr_i <= 32'h2001fff);
-	assign mem_chipsel_o   = (avalon_addr_i >= 32'h00010000   && avalon_addr_i <= 32'h00012000);
-	assign imem_chipsel_o  = (avalon_addr_i >= 32'h00000000   && avalon_addr_i <= 32'h00008000) || //sel imem
-                           (avalon_addr_i >= 32'h80000000   && avalon_addr_i <= 32'h80000200); //sel boot
+	// Address decoder — uses defines from mem_map.svh
+  assign soft_chipsel_o  = (avalon_addr_i == `SOFT_INT_ADDR);
+  assign crc_chipsel_o   = (avalon_addr_i >= `CRC_BASE   && avalon_addr_i <= `CRC_END);
+	assign timer_chipsel_o = (avalon_addr_i >= `TIMER_BASE && avalon_addr_i <= `TIMER_END);
+	assign uart_chipsel_o  = (avalon_addr_i >= `UART_BASE  && avalon_addr_i <= `UART_END);
+	assign gpio_chipsel_o  = (avalon_addr_i >= `GPIO_BASE  && avalon_addr_i <= `GPIO_END);
+  assign plic_chipsel_o  = (avalon_addr_i >= `PLIC_BASE  && avalon_addr_i <= `PLIC_END);
+	assign spi_chipsel_o   = (avalon_addr_i >= `SPI_BASE   && avalon_addr_i <= `SPI_END);
+	assign i2c_chipsel_o   = (avalon_addr_i >= `I2C_BASE   && avalon_addr_i <= `I2C_END);
+	assign pwm_chipsel_o   = (avalon_addr_i >= `PWM_BASE   && avalon_addr_i <= `PWM_END);
+	assign mem_chipsel_o   = (avalon_addr_i >= `DMEM_BASE  && avalon_addr_i <= `DMEM_END);
+	assign imem_chipsel_o  = (avalon_addr_i >= `IMEM_BASE  && avalon_addr_i <= `IMEM_END) ||
+                           (avalon_addr_i >= `BOOT_BASE  && avalon_addr_i <= `BOOT_END);
 
 	always_ff@(posedge clk_i)
 	begin
@@ -88,11 +89,11 @@ module avalon_interconnect(
 			pwm_chipsel_reg 	<= pwm_chipsel_o;
       plic_chipsel_reg  <= plic_chipsel_o;
       crc_chipsel_reg   <= crc_chipsel_o;
-	
+
 		end
 	end
 
-	always_comb 
+	always_comb
 	begin
 		case ({imem_chipsel_reg,mem_chipsel_reg,uart_chipsel_reg,timer_chipsel_reg,gpio_chipsel_reg,spi_chipsel_reg,i2c_chipsel_reg,pwm_chipsel_reg,plic_chipsel_reg,crc_chipsel_reg})
 			10'b1000000000:  data_out_o = imem_readdata_i;

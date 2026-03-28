@@ -1,4 +1,5 @@
 `timescale 1ns/10ps
+`include "mem_map.svh"
 import common_pkg::*;
 import debug_pkg::*;
 import core_pkg::*;
@@ -14,8 +15,8 @@ module soc_top
     input reset_i,
 
     //imem
-	output logic [13:0]  address_a_o,
-	output logic [11:0]  address_b_o,
+	output logic [`IMEM_ADDR_WIDTH-1:0]  address_a_o,
+	output logic [`DMEM_ADDR_WIDTH-1:0]  address_b_o,
 	output logic [3:0]  byteena_a_o,
 	output logic [3:0]  byteena_b_o,
 	output logic clock_a_o,
@@ -75,8 +76,8 @@ module soc_top
 		wire logic [31:0]spi_readdata;
 		wire logic [31:0]i2c_readdata;
 		wire logic [31:0]pwm_readdata;
-		wire logic [14:0]mem_addr;
-		wire logic [14:0]imem_addr;
+		wire logic [`DMEM_ADDR_WIDTH-1:0]mem_addr;
+		wire logic [`IMEM_ADDR_WIDTH-1:0]imem_addr;
 		wire logic [2:0]timer_addr;
 		wire logic [2:0] gpio_addr;
 		wire logic [7:0] spi_addr;

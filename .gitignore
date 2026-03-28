@@ -1,1 +1,46 @@
+# Synthesis PDK libraries
 flows/65GP_TT
+
+# Verilator build artifacts
+flows/simulation/obj_dir/
+flows/simulation/Vtb_soc_top
+flows/simulation/Vtb_soc_top_default
+
+# Simulation outputs
+*.vcd
+*.wlf
+*.key
+*.log
+*.history
+*.svcf
+transcript
+
+# QuestaSim
+flows/simulation/work/
+
+# Incisive/Xcelium
+flows/simulation/INCA_libs/
+flows/simulation/waves.shm/
+flows/simulation/.simvision/
+
+# Generated hex/text files in simulation dir
+flows/simulation/*.text
+flows/simulation/*.X
+
+# Software build outputs
+software/mem_init/tests/*.elf
+software/mem_init/tests/*.hex
+software/mem_init/tests/*.text
+software/mem_init/tests/*.bin
+
+# RISCOF third-party and generated
+verification/riscof/riscv-arch-test/
+verification/riscof/riscof_work/
+verification/riscof/*/__pycache__/
+
+# Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.pyc

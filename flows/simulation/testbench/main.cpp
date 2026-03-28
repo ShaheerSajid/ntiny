@@ -1,51 +1,82 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdlib.h>  // for strtol
+#include <stdlib.h>
 
 #include "Vtb_soc_top.h"
 #include "verilated.h"
 #include <verilated_vcd_c.h>
 
-#define MAX_SIM_TIME 100000
-#define RESET_TIME 10
-vluint64_t sim_time = 0;
+// Default timeout: 10M cycles (20M half-cycles)
+#define DEFAULT_MAX_CYCLES 10000000
+#define RESET_CYCLES 10
 
 int main(int argc, char **argv) {
-		
-	
-	// Initialize Verilators variables
 	Verilated::commandArgs(argc, argv);
 
-  Verilated::traceEverOn(true);
-	// Create an instance of our module under test
+	// Parse --timeout <cycles> and --trace from command line
+	vluint64_t max_cycles = DEFAULT_MAX_CYCLES;
+	bool enable_trace = false;
+
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
+			max_cycles = strtoull(argv[i + 1], NULL, 10);
+			i++;
+		} else if (strcmp(argv[i], "--trace") == 0) {
+			enable_trace = true;
+		}
+	}
+
+	// Create DUT instance
 	Vtb_soc_top *tb = new Vtb_soc_top;
-  VerilatedVcdC *m_trace = new VerilatedVcdC;
-  tb->trace(m_trace, 2);
-  m_trace->open("waveform.vcd");
-	// Tick the clock until we are done
 
-	while(!Verilated::gotFinish()) {
-    if(sim_time < RESET_TIME)
-      tb->reset = 1;
-    else
-      tb->reset = 0;
-		
-    tb->clk ^= 1;
-    tb->eval();
-    m_trace->dump(sim_time);
-    sim_time++;
-	
-	} 
-  tb->final();
-  m_trace->dump(sim_time);
+	// Set up VCD tracing (only if --trace is passed)
+	VerilatedVcdC *m_trace = NULL;
+	if (enable_trace) {
+		Verilated::traceEverOn(true);
+		m_trace = new VerilatedVcdC;
+		tb->trace(m_trace, 2);
+		m_trace->open("waveform.vcd");
+	}
 
-  m_trace->close();
-  delete tb;
-  delete m_trace;
-  exit(EXIT_SUCCESS);
-} 
+	vluint64_t sim_time = 0;
+	vluint64_t half_cycles = max_cycles * 2;
+	int exit_code = 2; // default: TIMEOUT
+
+	// Simulation loop
+	while (sim_time < half_cycles) {
+		// Check for $finish from testbench (tohost write)
+		if (Verilated::gotFinish()) {
+			exit_code = 0; // $finish called — exit code set by plusarg
+			break;
+		}
+
+		// Reset for first N cycles
+		if (sim_time < RESET_CYCLES * 2)
+			tb->reset = 1;
+		else
+			tb->reset = 0;
+
+		tb->clk ^= 1;
+		tb->eval();
+
+		if (m_trace)
+			m_trace->dump(sim_time);
+
+		sim_time++;
+	}
+
+	if (exit_code == 2)
+		fprintf(stderr, "TIMEOUT after %llu cycles\n",
+			(unsigned long long)max_cycles);
+
+	tb->final();
+	if (m_trace) {
+		m_trace->dump(sim_time);
+		m_trace->close();
+		delete m_trace;
+	}
+	delete tb;
+
+	return exit_code;
+}

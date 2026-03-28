@@ -1,3 +1,5 @@
+`include "mem_map.svh"
+
 module mem (
 	address_a,
 	address_b,
@@ -14,8 +16,8 @@ module mem (
 	q_a,
 	q_b);
 
-	input	[13:0]  address_a;
-	input	[11:0]  address_b;
+	input	[`IMEM_ADDR_WIDTH-1:0]  address_a;
+	input	[`DMEM_ADDR_WIDTH-1:0]  address_b;
 	input	[3:0]  byteena_a;
 	input	[3:0]  byteena_b;
 	input	  clock_a;
