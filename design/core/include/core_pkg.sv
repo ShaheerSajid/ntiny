@@ -312,6 +312,7 @@ typedef struct {
 	onebit_sig_e ebreak;            // EBREAK instruction
 	onebit_sig_e ecall;             // ECALL instruction
   onebit_sig_e mret;              // MRET instruction
+  onebit_sig_e sret;              // SRET instruction
 } ctrl_bus_e;
 
 endpackage

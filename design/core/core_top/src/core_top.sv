@@ -78,6 +78,7 @@ assign ctrl_bus_reset.wb_sel = NO_WB;
 assign ctrl_bus_reset.ebreak = FALSE;
 assign ctrl_bus_reset.ecall = FALSE;
 assign ctrl_bus_reset.mret = FALSE;
+assign ctrl_bus_reset.sret = FALSE;
 
 //pc and fetch
 logic [31:0] branch_target_address;
@@ -175,6 +176,11 @@ logic [31:0]epc_csr;
 logic [31:0]mtval_csr;
 logic [31:0]interrupt_src;
 logic [31:0]epc;
+logic [31:0]sepc;
+logic [1:0] priv_level;
+logic [31:0]medeleg;
+logic [31:0]mideleg;
+logic       trap_to_s;
 
 // AMO unit signals
 logic [31:0] amo_dbus_addr;
@@ -312,7 +318,8 @@ always_comb begin
 end
 
 assign interrupt_valid = onebit_sig_e'(trap_true);//FALSE;
-assign ret_valid = ctrl_bus_if_id.mret;//FALSE;
+assign ret_valid = onebit_sig_e'((ctrl_bus_if_id.mret && !illegal_mret) ||
+                                 (ctrl_bus_if_id.sret && !illegal_sret));
 assign debug_valid =  onebit_sig_e'(resumeack_o);
 
 // Misaligned access detection in IE stage
@@ -330,6 +337,19 @@ assign misalign_store_ie = (ctrl_bus_ie.mem_op == WRITE) && (
 // address is latched inside the AMO unit and alu_result becomes unreliable because
 // pipeline flush logic destroys the forwarding sources.
 assign misalign_amo_ie = (ctrl_bus_ie.amo_op != NO_AMO_OP) && |mem_addr_lsb && !amo_in_progress;
+
+// Privilege violation detection (ID stage, like ecall/ebreak)
+// CSR address[9:8] = minimum privilege level required
+logic [11:0] csr_addr_raw_id;
+assign csr_addr_raw_id = ctrl_bus_if_id.csr_addr;
+wire csr_access = (ctrl_bus_if_id.csr_op == WRITE_CSR) ||
+                   (ctrl_bus_if_id.csr_op == SET_CSR) ||
+                   (ctrl_bus_if_id.csr_op == CLEAR_CSR);
+wire illegal_csr_priv = csr_access && (priv_level < csr_addr_raw_id[9:8]);
+// MRET requires M-mode; SRET requires at least S-mode
+wire illegal_mret = (ctrl_bus_if_id.mret == TRUE) && (priv_level != 2'b11);
+wire illegal_sret = (ctrl_bus_if_id.sret == TRUE) && (priv_level < 2'b01);
+wire illegal_insn_id = illegal_csr_priv | illegal_mret | illegal_sret;
 assign exception_from_ie = misalign_load_ie | misalign_store_ie | misalign_amo_ie;
 
 //plic drive logic
@@ -344,7 +364,7 @@ begin
     from_plic <= 1'b0;
 end
 
-assign plic_complete_o = from_plic & ret_valid;
+assign plic_complete_o = from_plic & ctrl_bus_if_id.mret & ~illegal_mret;
 assign plic_claim_o = ext_itr_i & trap_true;
 
 always_comb
@@ -364,7 +384,7 @@ begin
 		PC_plus_4: pc_in = pc_out + 4;
 		BRANCH_PC: pc_in = branch_target_address;
     INTERRUPT: pc_in = handler_addr;
-    RET      : pc_in = epc;
+    RET      : pc_in = (ctrl_bus_if_id.sret == TRUE) ? sepc : epc;
 		BRANCH_DPC:pc_in = dpc;
 		default: pc_in = pc_out + 4;
 	endcase
@@ -582,9 +602,14 @@ interrupt_ctrl interrupt_ctrl_inst
   .vec_i            (vec_csr),
   .status_i         (status_csr),
   .pc_i             (pc_id),
+  // privilege and delegation
+  .priv_i           (priv_level),
+  .medeleg_i        (medeleg),
+  .mideleg_i        (mideleg),
   // synchronous exceptions
-  .ecall_i          (ctrl_bus_if_id.ecall),
-  .ebreak_i         (ctrl_bus_if_id.ebreak & ~dcsr[15]),
+  .ecall_i          (ctrl_bus_if_id.ecall & ~illegal_insn_id),
+  .ebreak_i         (ctrl_bus_if_id.ebreak & ~dcsr[15] & ~illegal_insn_id),
+  .illegal_insn_i   (illegal_insn_id),
   .misalign_load_i  (misalign_load_ie),
   .misalign_store_i (misalign_store_ie),
   .misalign_amo_i   (misalign_amo_ie),
@@ -592,6 +617,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .fault_addr_i     (alu_result),
   //to csr and core
   .trap_valid_o     (trap_true),
+  .trap_to_s_o      (trap_to_s),
   .handler_addr_o   (handler_addr),
   .ecause_o         (ecause_csr),
   .epc_o            (epc_csr),
@@ -717,17 +743,23 @@ csr_unit csr_unit_inst
 
   //trap signals (interrupts + exceptions)
   .trap_valid_i         (interrupt_valid),
+  .trap_to_s_i          (trap_to_s),
   .ecause_i             (ecause_csr),
   .epc_i                (epc_csr),
   .mtval_i              (mtval_csr),
   .interrupt_src_i      (interrupt_src),
   .ret_i                (ctrl_bus_ie.mret),
+  .sret_i               (ctrl_bus_ie.sret),
 
   .ip_o                 (ip_csr),
   .ie_o                 (ie_csr),
   .vec_o                (vec_csr),
   .status_o             (status_csr),
-  .epc_o                (epc)
+  .epc_o                (epc),
+  .sepc_o               (sepc),
+  .priv_o               (priv_level),
+  .medeleg_o            (medeleg),
+  .mideleg_o            (mideleg)
 );
 
 alu alu_inst

@@ -433,6 +433,7 @@ assign ctrl_bus_o.wb_sel = wb_sel;
 assign ctrl_bus_o.ebreak = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'd1);
 assign ctrl_bus_o.ecall = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'd0);
 assign ctrl_bus_o.mret = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'h302);
+assign ctrl_bus_o.sret = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'h102);
 
 endmodule
 
