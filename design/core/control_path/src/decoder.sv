@@ -434,6 +434,8 @@ assign ctrl_bus_o.ebreak = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'd1);
 assign ctrl_bus_o.ecall = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'd0);
 assign ctrl_bus_o.mret = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'h302);
 assign ctrl_bus_o.sret = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'h102);
+// SFENCE.VMA: funct7=0001001 (bits[31:25]), funct3=000 (SYSTEM), opcode=0x73
+assign ctrl_bus_o.sfence_vma = onebit_sig_e'(csr_op == SYSTEM && instruction_i[31:25] == 7'b0001001);
 
 endmodule
 

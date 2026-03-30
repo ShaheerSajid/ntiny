@@ -29,6 +29,11 @@ module interrupt_ctrl
   input misalign_load_i,
   input misalign_store_i,
   input misalign_amo_i,
+  // page faults from MMU
+  input insn_page_fault_i,
+  input load_page_fault_i,
+  input store_page_fault_i,
+  input [31:0] page_fault_addr_i,
   input [31:0] pc_ie_i,
   input [31:0] fault_addr_i,
 
@@ -84,7 +89,9 @@ assign async_valid   = m_async_valid | s_async_valid;
 
 // sync exceptions (always taken, independent of interrupt enables)
 logic sync_exception;
-assign sync_exception = misalign_load_i | misalign_store_i | misalign_amo_i | ecall_i | ebreak_i | illegal_insn_i;
+assign sync_exception = misalign_load_i | misalign_store_i | misalign_amo_i |
+                         ecall_i | ebreak_i | illegal_insn_i |
+                         insn_page_fault_i | load_page_fault_i | store_page_fault_i;
 
 // Ecall cause depends on current privilege level
 logic [7:0] ecall_cause;
@@ -96,9 +103,24 @@ always_comb begin
   endcase
 end
 
-// priority: misalign (IE, earlier in program order) > ecall/ebreak (ID) > M-interrupts > S-interrupts
+// priority: page faults > misalign > illegal > ecall/ebreak > interrupts
 always_comb begin
-  if (misalign_load_i) begin
+  if (insn_page_fault_i) begin
+    cause_code   = 8'd12;  // instruction page fault
+    epc_out      = pc_i;
+    mtval_out    = page_fault_addr_i;
+    is_interrupt = 1'b0;
+  end else if (load_page_fault_i) begin
+    cause_code   = 8'd13;  // load page fault
+    epc_out      = pc_ie_i;
+    mtval_out    = page_fault_addr_i;
+    is_interrupt = 1'b0;
+  end else if (store_page_fault_i) begin
+    cause_code   = 8'd15;  // store/AMO page fault
+    epc_out      = pc_ie_i;
+    mtval_out    = page_fault_addr_i;
+    is_interrupt = 1'b0;
+  end else if (misalign_load_i) begin
     cause_code   = 8'd4;
     epc_out      = pc_ie_i;
     mtval_out    = fault_addr_i;

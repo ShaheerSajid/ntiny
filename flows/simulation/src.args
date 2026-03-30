@@ -36,6 +36,7 @@
 ../../design/uncore/pwm/src/pwm_top.sv
 ../../design/core/avalon_master/src/core2avl.sv
 ../../design/core/amo_unit/src/amo_unit.sv
+../../design/core/mmu/src/mmu_sv32.sv
 ../../design/core/core_top/src/core_top.sv
 ../../design/core/csr_unit/src/csr_unit.sv
 ../../design/core/regfile/src/reg_file.sv

@@ -79,6 +79,7 @@ assign ctrl_bus_reset.ebreak = FALSE;
 assign ctrl_bus_reset.ecall = FALSE;
 assign ctrl_bus_reset.mret = FALSE;
 assign ctrl_bus_reset.sret = FALSE;
+assign ctrl_bus_reset.sfence_vma = FALSE;
 
 //pc and fetch
 logic [31:0] branch_target_address;
@@ -181,6 +182,15 @@ logic [1:0] priv_level;
 logic [31:0]medeleg;
 logic [31:0]mideleg;
 logic       trap_to_s;
+logic [31:0]satp_csr;
+
+// MMU signals
+logic [31:0] i_paddr, d_paddr;
+logic        mmu_i_stall, mmu_d_stall;
+logic        mmu_i_fault, mmu_d_fault;
+logic [31:0] ptw_addr;
+logic        ptw_req, ptw_active;
+logic        d_store_for_mmu;
 
 // AMO unit signals
 logic [31:0] amo_dbus_addr;
@@ -297,8 +307,8 @@ assign am_done_o = am_done_r;
 ////////////////////////////////////////////
 
 //stalls
-assign if_id_stall = onebit_sig_e'(ie_stall | insert_bubble | (pstate == HALTED));
-assign ie_stall    = onebit_sig_e'(imem_stall | alu_stall | dbus.stall | amo_stall);
+assign if_id_stall = onebit_sig_e'(ie_stall | insert_bubble | (pstate == HALTED) | mmu_i_stall);
+assign ie_stall    = onebit_sig_e'(imem_stall | alu_stall | dbus.stall | amo_stall | mmu_d_stall);
 assign imem_stall  = onebit_sig_e'(iwb_stall);
 assign iwb_stall   = onebit_sig_e'(1'b0);
 
@@ -404,8 +414,9 @@ program_counter #(.DEFAULT(32'h00000000)) program_counter_inst
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
-assign ibus.address = reset_i? pc_out:pc_in;
-assign ibus.enable = interrupt_valid? 1'b0 : if_id_stall | c_stall;
+wire [31:0] i_vaddr = reset_i ? pc_out : pc_in;
+assign ibus.address = i_paddr;  // MMU translates i_vaddr → i_paddr
+assign ibus.enable = (interrupt_valid || mmu_i_stall) ? 1'b0 : (if_id_stall | c_stall);
 
 
 //c_extension
@@ -613,6 +624,11 @@ interrupt_ctrl interrupt_ctrl_inst
   .misalign_load_i  (misalign_load_ie),
   .misalign_store_i (misalign_store_ie),
   .misalign_amo_i   (misalign_amo_ie),
+  // page faults from MMU
+  .insn_page_fault_i  (mmu_i_fault),
+  .load_page_fault_i  (mmu_d_fault & ~d_store_for_mmu),
+  .store_page_fault_i (mmu_d_fault & d_store_for_mmu),
+  .page_fault_addr_i  (mmu_d_fault ? d_vaddr_pre : i_vaddr),
   .pc_ie_i          (pc_ie),
   .fault_addr_i     (alu_result),
   //to csr and core
@@ -759,7 +775,37 @@ csr_unit csr_unit_inst
   .sepc_o               (sepc),
   .priv_o               (priv_level),
   .medeleg_o            (medeleg),
-  .mideleg_o            (mideleg)
+  .mideleg_o            (mideleg),
+  .satp_o               (satp_csr)
+);
+
+// ── Sv32 MMU ─────────────────────────────────────────────────
+mmu_sv32 mmu_inst (
+  .clk_i          (clk_i),
+  .reset_i        (reset_i),
+  .satp_i         (satp_csr),
+  .priv_i         (priv_level),
+  .mstatus_i      (status_csr),
+  .sfence_i       (ctrl_bus_ie.sfence_vma),
+  // Instruction translation
+  .i_vaddr_i      (i_vaddr),
+  .i_req_i        (~reset_i),
+  .i_paddr_o      (i_paddr),
+  .i_stall_o      (mmu_i_stall),
+  .i_fault_o      (mmu_i_fault),
+  // Data translation
+  .d_vaddr_i      (d_vaddr_pre),
+  .d_req_i        (d_req_for_mmu),
+  .d_store_i      (d_store_for_mmu),
+  .d_paddr_o      (d_paddr),
+  .d_stall_o      (mmu_d_stall),
+  .d_fault_o      (mmu_d_fault),
+  // PTW memory interface
+  .ptw_addr_o     (ptw_addr),
+  .ptw_req_o      (ptw_req),
+  .ptw_data_i     (dbus.readdata),
+  .ptw_stall_i    (dbus.stall),
+  .ptw_active_o   (ptw_active)
 );
 
 alu alu_inst
@@ -859,12 +905,23 @@ amo_unit amo_unit_inst
 	.in_progress_o    (amo_in_progress)
 );
 
-// DBus mux: AMO unit takes over bus during atomic operations
-assign dbus.address    = amo_active ? amo_dbus_addr       : c2a_address;
-assign dbus.byteenable = amo_active ? amo_dbus_byteenable : c2a_byteenable;
-assign dbus.read       = amo_active ? amo_dbus_read       : c2a_read;
-assign dbus.write      = amo_active ? amo_dbus_write      : c2a_write;
-assign dbus.writedata  = amo_active ? amo_dbus_writedata  : c2a_writedata;
+// DBus mux: PTW > AMO > core data access
+// Virtual address before translation (for MMU input)
+wire [31:0] d_vaddr_pre = amo_active ? amo_dbus_addr : c2a_address;
+assign d_store_for_mmu = amo_active ? amo_dbus_write : c2a_write;
+wire d_req_for_mmu = amo_active ? (amo_dbus_read | amo_dbus_write) : (c2a_read | c2a_write);
+
+// PTW takes over dbus when walking page table; otherwise use translated address
+assign dbus.address    = ptw_active ? ptw_addr :
+                         amo_active ? d_paddr  : d_paddr;
+assign dbus.byteenable = ptw_active ? 4'b1111 :
+                         amo_active ? amo_dbus_byteenable : c2a_byteenable;
+assign dbus.read       = ptw_active ? ptw_req :
+                         amo_active ? amo_dbus_read       : c2a_read;
+assign dbus.write      = ptw_active ? 1'b0 :
+                         amo_active ? amo_dbus_write      : c2a_write;
+assign dbus.writedata  = ptw_active ? 32'b0 :
+                         amo_active ? amo_dbus_writedata  : c2a_writedata;
 
 always_ff@(posedge clk_i or posedge reset_i)
 	begin

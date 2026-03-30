@@ -38,6 +38,7 @@ module csr_unit (
   output [1:0] priv_o,            // current privilege level
   output [31:0]medeleg_o,
   output [31:0]mideleg_o,
+  output [31:0]satp_o,
 
 	output logic [31:0]csr_value_o
 	);
@@ -365,6 +366,7 @@ module csr_unit (
 	assign priv_o    = priv_level;
 	assign medeleg_o = _MEDELEG;
 	assign mideleg_o = _MIDELEG;
+	assign satp_o    = _SATP;
 
 endmodule
 

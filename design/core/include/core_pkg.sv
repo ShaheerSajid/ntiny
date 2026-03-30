@@ -313,6 +313,7 @@ typedef struct {
 	onebit_sig_e ecall;             // ECALL instruction
   onebit_sig_e mret;              // MRET instruction
   onebit_sig_e sret;              // SRET instruction
+  onebit_sig_e sfence_vma;        // SFENCE.VMA instruction
 } ctrl_bus_e;
 
 endpackage
