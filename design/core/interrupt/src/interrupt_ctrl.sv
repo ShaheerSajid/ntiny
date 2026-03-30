@@ -22,6 +22,7 @@ module interrupt_ctrl
   input ebreak_i,
   input misalign_load_i,
   input misalign_store_i,
+  input misalign_amo_i,
   input [31:0] pc_ie_i,
   input [31:0] fault_addr_i,
 
@@ -52,7 +53,7 @@ assign async_valid    = (external_valid | software_valid | timer_valid) & status
 
 // sync exceptions (always taken, independent of MIE)
 logic sync_exception;
-assign sync_exception = misalign_load_i | misalign_store_i | ecall_i | ebreak_i;
+assign sync_exception = misalign_load_i | misalign_store_i | misalign_amo_i | ecall_i | ebreak_i;
 
 // priority: misalign (IE, earlier in program order) > ecall/ebreak (ID) > async interrupts
 always_comb begin
@@ -61,8 +62,8 @@ always_comb begin
     epc_out      = pc_ie_i;
     mtval_out    = fault_addr_i;
     is_interrupt = 1'b0;
-  end else if (misalign_store_i) begin
-    cause_code   = 8'd6;
+  end else if (misalign_store_i || misalign_amo_i) begin
+    cause_code   = 8'd6;  // store/AMO address misaligned
     epc_out      = pc_ie_i;
     mtval_out    = fault_addr_i;
     is_interrupt = 1'b0;

@@ -21,6 +21,7 @@ typedef enum logic [`OPCODE_LENGTH-1:0] {
 	FNMSUB	= 7'b1001011,
 	FNMADD	= 7'b1001111,
 	F_OP	= 7'b1010011,
+	AMO		= 7'b0101111,
 	NO_INS	= 7'b0000000
 } rv32_opcodes_e;
 
@@ -99,6 +100,21 @@ typedef enum logic[3:0] {
 	NO_MUL_OP
 } mul_op_e;
 
+//atomic (A-extension)
+typedef enum logic[3:0] {
+	AMOADD,
+	AMOSWAP,
+	LR_W,
+	SC_W,
+	AMOXOR,
+	AMOMIN,
+	AMOMAX,
+	AMOMINU,
+	AMOMAXU,
+	AMOOR,
+	AMOAND,
+	NO_AMO_OP
+} amo_op_e;
 
 //floating
 typedef enum logic[4:0] {
@@ -279,6 +295,7 @@ typedef struct {
 	onebit_sig_e csr_use_immediate; // CSR immediate vs register source
 	csr_reg_e csr_addr;             // CSR address
 	mul_op_e mul_op;                // M-ext multiply/divide operation
+	amo_op_e amo_op;                // A-ext atomic operation
 	float_op_e float_op;            // F-ext floating-point operation
 	roundmode_e roundmode;          // FP rounding mode
 	bit_op_e bit_op;                // Zba/Zbb bit manipulation operation

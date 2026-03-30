@@ -61,6 +61,7 @@ assign ctrl_bus_reset.csr_op = NO_CSR_OP;
 assign ctrl_bus_reset.csr_use_immediate = FALSE;
 assign ctrl_bus_reset.csr_addr = NO_CSR_REG;
 assign ctrl_bus_reset.mul_op = NO_MUL_OP;
+assign ctrl_bus_reset.amo_op = NO_AMO_OP;
 assign ctrl_bus_reset.bit_op = NO_BIT_OP;
 assign ctrl_bus_reset.float_op = NO_FP_OP;
 assign ctrl_bus_reset.roundmode = RNE;
@@ -175,9 +176,28 @@ logic [31:0]mtval_csr;
 logic [31:0]interrupt_src;
 logic [31:0]epc;
 
+// AMO unit signals
+logic [31:0] amo_dbus_addr;
+logic [3:0]  amo_dbus_byteenable;
+logic        amo_dbus_read;
+logic        amo_dbus_write;
+logic [31:0] amo_dbus_writedata;
+logic [31:0] amo_result;
+onebit_sig_e amo_stall;
+logic        amo_active;
+logic        amo_in_progress;
+
+// core2avl intermediate signals (muxed with AMO unit)
+logic [31:0] c2a_address;
+logic [3:0]  c2a_byteenable;
+onebit_sig_e c2a_read;
+onebit_sig_e c2a_write;
+logic [31:0] c2a_writedata;
+
 // Misaligned access detection (IE stage)
 logic misalign_load_ie;
 logic misalign_store_ie;
+logic misalign_amo_ie;
 logic exception_from_ie;
 ////////////////////////////////debug logic//////////////////////////
 logic [31:0] dpc;
@@ -272,7 +292,7 @@ assign am_done_o = am_done_r;
 
 //stalls
 assign if_id_stall = onebit_sig_e'(ie_stall | insert_bubble | (pstate == HALTED));
-assign ie_stall    = onebit_sig_e'(imem_stall | alu_stall | dbus.stall);
+assign ie_stall    = onebit_sig_e'(imem_stall | alu_stall | dbus.stall | amo_stall);
 assign imem_stall  = onebit_sig_e'(iwb_stall);
 assign iwb_stall   = onebit_sig_e'(1'b0);
 
@@ -305,7 +325,12 @@ assign misalign_store_ie = (ctrl_bus_ie.mem_op == WRITE) && (
     (ctrl_bus_ie.load_store_width == HALF && mem_addr_lsb[0]) ||
     (ctrl_bus_ie.load_store_width == WORD && |mem_addr_lsb)
 );
-assign exception_from_ie = misalign_load_ie | misalign_store_ie;
+// AMO instructions require word-aligned addresses (cause 6: store/AMO misaligned)
+// Only check on the entry cycle (AMO unit in IDLE): once the FSM is running, the
+// address is latched inside the AMO unit and alu_result becomes unreliable because
+// pipeline flush logic destroys the forwarding sources.
+assign misalign_amo_ie = (ctrl_bus_ie.amo_op != NO_AMO_OP) && |mem_addr_lsb && !amo_in_progress;
+assign exception_from_ie = misalign_load_ie | misalign_store_ie | misalign_amo_ie;
 
 //plic drive logic
 logic from_plic;
@@ -562,6 +587,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .ebreak_i         (ctrl_bus_if_id.ebreak & ~dcsr[15]),
   .misalign_load_i  (misalign_load_ie),
   .misalign_store_i (misalign_store_ie),
+  .misalign_amo_i   (misalign_amo_ie),
   .pc_ie_i          (pc_ie),
   .fault_addr_i     (alu_result),
   //to csr and core
@@ -724,7 +750,9 @@ alu alu_inst
 );
 always_comb
 begin
-	case(ctrl_bus_ie.exec_result)
+	if (ctrl_bus_ie.amo_op != NO_AMO_OP)
+		exec_result_ie = amo_result;
+	else case(ctrl_bus_ie.exec_result)
 		ALU_RES: exec_result_ie = alu_result;
 		CSR_RES: exec_result_ie = csr_result;
 		default: exec_result_ie = 0;
@@ -766,14 +794,45 @@ core2avl core2avl_inst
 	.addr_i			    	(((pstate==HALTED) & am_en_i)? am_ad_i :  alu_result),
 	.data2write_i		  (((pstate==HALTED) & am_en_i)? am_di_i :  opB_forwarded_data),
 	.data2read_o		  (readdata_imem),
-	//avl signals
-	.readdata_i			  (dbus.readdata), 
-	.address_o			  (dbus.address), 
-	.writedata_o		  (dbus.writedata), 
-	.byteenable_o		  (dbus.byteenable), 
-	.read_o				    (dbus.read), 
-	.write_o			    (dbus.write)
+	//avl signals (intermediate, muxed with AMO unit)
+	.readdata_i			  (dbus.readdata),
+	.address_o			  (c2a_address),
+	.writedata_o		  (c2a_writedata),
+	.byteenable_o		  (c2a_byteenable),
+	.read_o				    (c2a_read),
+	.write_o			    (c2a_write)
 );
+
+// ── AMO unit ──────────────────────────────────────────────────
+amo_unit amo_unit_inst
+(
+	.clk_i            (clk_i),
+	.reset_i          (reset_i),
+	.amo_op_i         (ctrl_bus_ie.amo_op),
+	.addr_i           (alu_result),
+	.rs2_i            (opB_forwarded_data),
+	.flush_i          (ie_flush | interrupt_valid),
+	// DBus
+	.dbus_addr_o      (amo_dbus_addr),
+	.dbus_byteenable_o(amo_dbus_byteenable),
+	.dbus_read_o      (amo_dbus_read),
+	.dbus_write_o     (amo_dbus_write),
+	.dbus_writedata_o (amo_dbus_writedata),
+	.dbus_readdata_i  (dbus.readdata),
+	.dbus_stall_i     (dbus.stall),
+	// Control
+	.result_o         (amo_result),
+	.stall_o          (amo_stall),
+	.active_o         (amo_active),
+	.in_progress_o    (amo_in_progress)
+);
+
+// DBus mux: AMO unit takes over bus during atomic operations
+assign dbus.address    = amo_active ? amo_dbus_addr       : c2a_address;
+assign dbus.byteenable = amo_active ? amo_dbus_byteenable : c2a_byteenable;
+assign dbus.read       = amo_active ? amo_dbus_read       : c2a_read;
+assign dbus.write      = amo_active ? amo_dbus_write      : c2a_write;
+assign dbus.writedata  = amo_active ? amo_dbus_writedata  : c2a_writedata;
 
 always_ff@(posedge clk_i or posedge reset_i)
 	begin

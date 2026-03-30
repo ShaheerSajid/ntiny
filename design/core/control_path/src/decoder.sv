@@ -22,6 +22,7 @@ csr_op_e csr_op;
 onebit_sig_e csr_use_immediate;
 csr_reg_e csr_addr;
 mul_op_e mul_op;
+amo_op_e amo_op;
 float_op_e float_op;
 roundmode_e roundmode;
 bit_op_e bit_op;
@@ -60,6 +61,7 @@ begin
     csr_use_immediate = FALSE;
     csr_addr = NO_CSR_REG;
     mul_op = NO_MUL_OP;
+    amo_op = NO_AMO_OP;
     float_op = NO_FP_OP;
     roundmode = RNE;
     bit_op = NO_BIT_OP;
@@ -214,6 +216,31 @@ begin
                         rs2_int = reg_add_e'(instruction_i[24:20]);
                         rd_int = reg_add_e'(instruction_i[11:7]);
                         wb_sel = EXEC;
+                    end
+        // --- RV32A: Atomic Memory Operations ---
+        AMO     :   begin
+                        operand_a = REGISTER;  // rs1 = address
+                        operand_b = NO_OPERAND; // ALU: rs1 + 0 = address
+                        alu_op = ADD;
+                        rs1_int = reg_add_e'(instruction_i[19:15]);
+                        rs2_int = reg_add_e'(instruction_i[24:20]);
+                        rd_int = reg_add_e'(instruction_i[11:7]);
+                        exec_result = ALU_RES;
+                        wb_sel = EXEC;
+                        case(instruction_i[31:27]) // funct5
+                            5'b00010: amo_op = LR_W;     // LR.W
+                            5'b00011: amo_op = SC_W;     // SC.W
+                            5'b00001: amo_op = AMOSWAP;  // AMOSWAP.W
+                            5'b00000: amo_op = AMOADD;   // AMOADD.W
+                            5'b00100: amo_op = AMOXOR;   // AMOXOR.W
+                            5'b01100: amo_op = AMOAND;   // AMOAND.W
+                            5'b01000: amo_op = AMOOR;    // AMOOR.W
+                            5'b10000: amo_op = AMOMIN;   // AMOMIN.W
+                            5'b10100: amo_op = AMOMAX;   // AMOMAX.W
+                            5'b11000: amo_op = AMOMINU;  // AMOMINU.W
+                            5'b11100: amo_op = AMOMAXU;  // AMOMAXU.W
+                            default:  amo_op = NO_AMO_OP;
+                        endcase
                     end
         // --- Zicsr: CSR Access ---
         CSR     :   begin
@@ -389,6 +416,7 @@ assign ctrl_bus_o.csr_op = csr_op;
 assign ctrl_bus_o.csr_use_immediate = csr_use_immediate;
 assign ctrl_bus_o.csr_addr = csr_addr;
 assign ctrl_bus_o.mul_op = mul_op;
+assign ctrl_bus_o.amo_op = amo_op;
 assign ctrl_bus_o.float_op = float_op;
 assign ctrl_bus_o.roundmode = roundmode;
 assign ctrl_bus_o.bit_op = bit_op;

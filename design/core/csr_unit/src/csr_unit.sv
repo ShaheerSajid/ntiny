@@ -160,9 +160,9 @@ module csr_unit (
 			INSTRETH:		  csr_value_o = _MINSTRETH;
 			MSTATUS:		  csr_value_o = _MSTATUS;
 `ifdef FPU
-			MISA:			    csr_value_o = 32'h40001126; // RV32IMFC
+			MISA:			    csr_value_o = 32'h40001127; // RV32IMAFC
 `else
-			MISA:			    csr_value_o = 32'h40001106; // RV32IMC
+			MISA:			    csr_value_o = 32'h40001107; // RV32IMAC
 `endif
 			MIE:			    csr_value_o = _MIE;
 			MTVEC:			  csr_value_o = _MTVEC;
