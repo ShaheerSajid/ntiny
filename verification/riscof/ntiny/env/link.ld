@@ -5,19 +5,19 @@ ENTRY(rvtest_entry_point)
 
 MEMORY
 {
-  IMEM (rwx) : ORIGIN = 0x00000000, LENGTH = 0x00200000
-  DMEM (rwx) : ORIGIN = 0x10000000, LENGTH = 0x02000000
+  RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 0x00400000
 }
 
 SECTIONS
 {
-  .text.init : { *(.text.init) } > IMEM
-  . = ALIGN(0x100);
-  .text : { *(.text) } > IMEM
+  .text.init : { *(.text.init) } > RAM
+  . = ALIGN(0x1000);
+  .text : { *(.text) } > RAM
 
-  .data : { *(.data) *(.data.*) *(.data.string) } > DMEM
-  .sdata : { *(.sdata) *(.sdata.*) } > DMEM
-  .bss (NOLOAD) : { *(.bss) *(.bss.*) } > DMEM
+  . = ALIGN(0x1000);
+  .data : { *(.data) *(.data.*) *(.data.string) } > RAM
+  .sdata : { *(.sdata) *(.sdata.*) } > RAM
+  .bss (NOLOAD) : { *(.bss) *(.bss.*) } > RAM
 
   /* tohost at fixed bus address — no backing memory needed, testbench monitors bus writes */
   .tohost 0x0F000000 (NOLOAD) : { *(.tohost) }

@@ -3,10 +3,8 @@ SHELL := /bin/bash
 # Path to the unified memory map JSON
 MEM_MAP_JSON = ../../design/common/mem_map.json
 
-# Extract RISCOF profile memory values from JSON (decimal for +define+)
-RISCOF_IMEM_SIZE := $(shell python3 -c "import json; d=json.load(open('$(MEM_MAP_JSON)')); print(int(d['profiles']['riscof']['IMEM_SIZE_BYTES'],16))")
-RISCOF_DMEM_BASE := $(shell python3 -c "import json; d=json.load(open('$(MEM_MAP_JSON)')); print(int(d['profiles']['riscof']['DMEM_BASE'],16))")
-RISCOF_DMEM_SIZE := $(shell python3 -c "import json; d=json.load(open('$(MEM_MAP_JSON)')); print(int(d['profiles']['riscof']['DMEM_SIZE_BYTES'],16))")
+# Extract RISCOF profile RAM size from JSON (decimal for +define+)
+RISCOF_RAM_SIZE := $(shell python3 -c "import json; d=json.load(open('$(MEM_MAP_JSON)')); print(int(d['profiles']['riscof']['RAM_SIZE_BYTES'],16))")
 
 # --- Memory map generation ---
 .PHONY: gen_mem_map
@@ -58,23 +56,15 @@ VERILATOR_SRCS = \
 	../../verification/dv/src/tracer.sv \
 	testbench/uartdpi.c \
 	testbench/uartdpi.sv \
-	testbench/arm_boot_dummy.v \
-	testbench/arm_imem_dummy.v \
-	testbench/arm_dmem_dummy.v \
-	testbench/mem.v \
-	testbench/bootmem.v \
 	testbench/tb_soc_top.v \
 	--exe testbench/main.cpp
 
 VERILATOR_RISCOF_DEFINES = \
-	+define+IMEM_SIZE_BYTES=$(RISCOF_IMEM_SIZE) \
-	+define+DMEM_BASE=$(RISCOF_DMEM_BASE) \
-	+define+DMEM_SIZE_BYTES=$(RISCOF_DMEM_SIZE)
+	+define+RAM_SIZE_BYTES=$(RISCOF_RAM_SIZE)
 
 # --- Init ---
 mem_init:
-	python3 ../../software/tools/split.py ../../software/build/baremetal.mem.text imem.text dmem.text
-	python3 ../../software/tools/hex_text.py ../../software/common/boot.bin boot.text
+	python3 ../../software/tools/hex_text.py ../../software/build/baremetal.bin ram.hex
 
 # --- Questa targets ---
 questa_sim:
@@ -152,7 +142,7 @@ incisive_sim_gate:
 # Build the Verilator model (no simulation)
 verilator_build:
 	verilator $(VERILATOR_COMMON) \
-	-DBOOT -DDV_TRACER \
+	-DDV_TRACER \
 	$(VERILATOR_INCDIRS) \
 	$(VERILATOR_SRCS)
 	make -j -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
@@ -210,7 +200,7 @@ RISCOF_SUITE = $(RISCOF_DIR)/riscv-arch-test/riscv-test-suite/
 RISCOF_ENV = $(RISCOF_DIR)/riscv-arch-test/riscv-test-suite/env
 RISCOF_VENV = $(HOME)/Software/riscof_env/bin/activate
 
-# Build Verilator model for RISCOF (no BOOT — PC starts at 0x00000000)
+# Build Verilator model for RISCOF (4MB RAM, no DV_TRACER)
 verilator_build_riscof:
 	verilator $(VERILATOR_COMMON) \
 	$(VERILATOR_RISCOF_DEFINES) \

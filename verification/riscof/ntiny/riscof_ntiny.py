@@ -31,7 +31,6 @@ class ntiny(pluginTemplate):
         self.repo_root = os.path.abspath(os.path.join(self.pluginpath, '..', '..', '..'))
         self.sim_dir = os.path.join(self.repo_root, 'flows', 'simulation')
         self.verilator_bin = os.path.join(self.sim_dir, 'Vtb_soc_top')
-        self.split_tool = os.path.join(self.repo_root, 'software', 'tools', 'split.py')
         self.hex_text_tool = os.path.join(self.repo_root,
             'software', 'tools', 'hex_text.py')
         self.run_script = os.path.join(self.pluginpath, 'run_test.sh')
@@ -83,14 +82,13 @@ class ntiny(pluginTemplate):
             compile_cmd = self.compile_cmd.format(march, test, elf, compile_macros)
 
             if self.target_run:
-                simcmd = '{script} {elf} {sig} {tc} {vbin} {ht} {sp}'.format(
+                simcmd = '{script} {elf} {sig} {tc} {vbin} {ht}'.format(
                     script=self.run_script,
                     elf=elf,
                     sig=sig_file,
                     tc=self.toolchain,
                     vbin=self.verilator_bin,
-                    ht=self.hex_text_tool,
-                    sp=self.split_tool
+                    ht=self.hex_text_tool
                 )
             else:
                 simcmd = 'echo "NO RUN"'

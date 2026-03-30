@@ -8,7 +8,9 @@
 ../../design/soc_top/src/soc_top.sv
 ../../design/debug/src/debug_top.sv
 ../../design/core/c_ext/src/c_controller.sv
-../../design/interconnect/src/avalon_interconnect.sv
+../../design/interconnect/src/addr_decoder.sv
+../../design/interconnect/src/periph_bridge.sv
+../../design/memory/src/ram_dp.sv
 ../../design/core/alu/src/alu.sv
 ../../design/core/fpu/PakFPU/src/fp_pkg.sv
 ../../design/core/fpu/PakFPU/src/lzc.sv

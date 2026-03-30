@@ -2,57 +2,48 @@
 // Source: design/common/mem_map.json
 
 
-// --- IMEM ---
-`ifndef IMEM_BASE
-  `define IMEM_BASE     32'h0000_0000
+// --- RAM ---
+`ifndef RAM_BASE
+  `define RAM_BASE     32'h8000_0000
 `endif
-`ifndef IMEM_SIZE_BYTES
-  `define IMEM_SIZE_BYTES 32'h0000_8000
+`ifndef RAM_SIZE_BYTES
+  `define RAM_SIZE_BYTES 32'h0000_8000
 `endif
-`define IMEM_END        (`IMEM_BASE + `IMEM_SIZE_BYTES - 1)
-`define IMEM_DEPTH      (`IMEM_SIZE_BYTES / 4)
-`define IMEM_ADDR_WIDTH $clog2(`IMEM_DEPTH)
-
-// --- DMEM ---
-`ifndef DMEM_BASE
-  `define DMEM_BASE     32'h0001_0000
-`endif
-`ifndef DMEM_SIZE_BYTES
-  `define DMEM_SIZE_BYTES 32'h0000_2000
-`endif
-`define DMEM_END        (`DMEM_BASE + `DMEM_SIZE_BYTES - 1)
-`define DMEM_DEPTH      (`DMEM_SIZE_BYTES / 4)
-`define DMEM_ADDR_WIDTH $clog2(`DMEM_DEPTH)
+`define RAM_END        (`RAM_BASE + `RAM_SIZE_BYTES - 1)
+`define RAM_DEPTH      (`RAM_SIZE_BYTES / 4)
+`define RAM_ADDR_WIDTH $clog2(`RAM_DEPTH)
 
 // --- BOOT ---
 `ifndef BOOT_BASE
-  `define BOOT_BASE     32'h8000_0000
+  `define BOOT_BASE     32'h0000_1000
 `endif
 `ifndef BOOT_SIZE_BYTES
-  `define BOOT_SIZE_BYTES 32'h0000_0200
+  `define BOOT_SIZE_BYTES 32'h0000_1000
 `endif
 `define BOOT_END        (`BOOT_BASE + `BOOT_SIZE_BYTES - 1)
 `define BOOT_DEPTH      (`BOOT_SIZE_BYTES / 4)
 `define BOOT_ADDR_WIDTH $clog2(`BOOT_DEPTH)
 
 // --- Peripherals ---
-`define CRC_BASE        32'h0008_0000
-`define CRC_END         32'h0008_001F
-`define UART_BASE        32'h0010_0000
-`define UART_END         32'h0010_0010
-`define TIMER_BASE        32'h0020_0000
-`define TIMER_END         32'h0020_0010
-`define GPIO_BASE        32'h0040_0000
-`define GPIO_END         32'h0040_000F
-`define PLIC_BASE        32'h0080_0000
-`define PLIC_END         32'h0080_000F
-`define SPI_BASE        32'h0100_0000
-`define SPI_END         32'h0100_00FF
-`define I2C_BASE        32'h0200_0000
-`define I2C_END         32'h0200_00FF
-`define PWM_BASE        32'h0200_1000
-`define PWM_END         32'h0200_1FFF
+`define UART_BASE        32'h1000_0000
+`define UART_END         32'h1000_0FFF
+`define SPI_BASE        32'h1001_0000
+`define SPI_END         32'h1001_0FFF
+`define I2C_BASE        32'h1002_0000
+`define I2C_END         32'h1002_0FFF
+`define GPIO_BASE        32'h1003_0000
+`define GPIO_END         32'h1003_0FFF
+`define PWM_BASE        32'h1004_0000
+`define PWM_END         32'h1004_0FFF
+`define TIMER_BASE        32'h1005_0000
+`define TIMER_END         32'h1005_0FFF
+`define CRC_BASE        32'h1006_0000
+`define CRC_END         32'h1006_0FFF
+`define CLINT_BASE        32'h0200_0000
+`define CLINT_END         32'h0200_FFFF
+`define PLIC_BASE        32'h0C00_0000
+`define PLIC_END         32'h0DFF_FFFF
 
 // --- Special ---
-`define SOFT_INT_ADDR     32'h0400_0000
+`define SOFT_INT_ADDR     32'h1007_0000
 `define TOHOST_ADDR     32'h0F00_0000

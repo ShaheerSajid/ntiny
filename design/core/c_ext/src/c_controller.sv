@@ -46,9 +46,9 @@ begin
 	endcase
 end
 `ifdef BOOT
-program_counter #(.DEFAULT(32'h80000000)) c_program_counter_inst
+program_counter #(.DEFAULT(32'h00001000)) c_program_counter_inst
 `else
-program_counter #(.DEFAULT(32'h00000000)) c_program_counter_inst
+program_counter #(.DEFAULT(32'h80000000)) c_program_counter_inst
 `endif
 (
 	.clk_i		(clk_i),

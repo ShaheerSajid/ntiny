@@ -7,10 +7,10 @@ module core_top
 	input logic	clk_i,
 	input logic	reset_i,
 
-	//instruction master
-	IBus.m ibus,	
-	//custom bus
-	DBus.m dbus,
+	//instruction port
+	mem_bus.master imem_port,
+	//data port
+	mem_bus.master dmem_port,
 
 	output onebit_sig_e resumeack_o,
 	output onebit_sig_e running_o,
@@ -298,7 +298,7 @@ begin
 			ar_do_o <= rs1_float;
 
 		ar_done_r <= ar_en_i;
-		am_done_r <= onebit_sig_e'(am_en_i & (~dbus.stall));
+		am_done_r <= onebit_sig_e'(am_en_i & dmem_port.ready);
 	end
 end
 assign am_do_o = readdata_imem;
@@ -308,7 +308,8 @@ assign am_done_o = am_done_r;
 
 //stalls
 assign if_id_stall = onebit_sig_e'(ie_stall | insert_bubble | (pstate == HALTED) | mmu_i_stall);
-assign ie_stall    = onebit_sig_e'(imem_stall | alu_stall | dbus.stall | amo_stall | mmu_d_stall);
+wire dmem_busy = dmem_port.req & ~dmem_port.ready;
+assign ie_stall    = onebit_sig_e'(imem_stall | alu_stall | dmem_busy | amo_stall | mmu_d_stall);
 assign imem_stall  = onebit_sig_e'(iwb_stall);
 assign iwb_stall   = onebit_sig_e'(1'b0);
 
@@ -403,9 +404,9 @@ end
 // FETCH STAGE
 // ============================================================
 `ifdef BOOT
-program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
+program_counter #(.DEFAULT(32'h00001000)) program_counter_inst
 `else
-program_counter #(.DEFAULT(32'h00000000)) program_counter_inst
+program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 `endif
 (
 	.clk_i		(clk_i),
@@ -415,8 +416,11 @@ program_counter #(.DEFAULT(32'h00000000)) program_counter_inst
 	.pc_out_o	(pc_out)
 );
 wire [31:0] i_vaddr = reset_i ? pc_out : pc_in;
-assign ibus.address = i_paddr;  // MMU translates i_vaddr → i_paddr
-assign ibus.enable = (interrupt_valid || mmu_i_stall) ? 1'b0 : (if_id_stall | c_stall);
+assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
+assign imem_port.req   = ~if_id_stall & ~c_stall & ~interrupt_valid;
+assign imem_port.we    = 1'b0;
+assign imem_port.be    = 4'b1111;
+assign imem_port.wdata = 32'b0;
 
 
 //c_extension
@@ -446,7 +450,7 @@ c_controller c_controller_inst
   .interrupt_true_i       (interrupt_valid),
 	.flush_i				        (controller_flush),
 	.pc_sel_i				        (pc_sel),
-	.instruction_i			    (reset_i? 0:ibus.instruction),
+	.instruction_i			    (reset_i? 0:imem_port.rdata),
 	.branch_taken_i			    (onebit_sig_e'(controller_branch_taken)),
 	.branch_target_address_i(controller_branch_addr),
   .branch_addr_i          (branch_target_address),
@@ -803,8 +807,8 @@ mmu_sv32 mmu_inst (
   // PTW memory interface
   .ptw_addr_o     (ptw_addr),
   .ptw_req_o      (ptw_req),
-  .ptw_data_i     (dbus.readdata),
-  .ptw_stall_i    (dbus.stall),
+  .ptw_data_i     (dmem_port.rdata),
+  .ptw_stall_i    (ptw_req ? ~dmem_port.rvalid : ~dmem_port.ready),
   .ptw_active_o   (ptw_active)
 );
 
@@ -873,7 +877,7 @@ core2avl core2avl_inst
 	.data2write_i		  (((pstate==HALTED) & am_en_i)? am_di_i :  opB_forwarded_data),
 	.data2read_o		  (readdata_imem),
 	//avl signals (intermediate, muxed with AMO unit)
-	.readdata_i			  (dbus.readdata),
+	.readdata_i			  (dmem_port.rdata),
 	.address_o			  (c2a_address),
 	.writedata_o		  (c2a_writedata),
 	.byteenable_o		  (c2a_byteenable),
@@ -896,8 +900,8 @@ amo_unit amo_unit_inst
 	.dbus_read_o      (amo_dbus_read),
 	.dbus_write_o     (amo_dbus_write),
 	.dbus_writedata_o (amo_dbus_writedata),
-	.dbus_readdata_i  (dbus.readdata),
-	.dbus_stall_i     (dbus.stall),
+	.dbus_readdata_i  (dmem_port.rdata),
+	.dbus_stall_i     (amo_dbus_read ? ~dmem_port.rvalid : ~dmem_port.ready),
 	// Control
 	.result_o         (amo_result),
 	.stall_o          (amo_stall),
@@ -905,22 +909,22 @@ amo_unit amo_unit_inst
 	.in_progress_o    (amo_in_progress)
 );
 
-// DBus mux: PTW > AMO > core data access
+// D-port mux: PTW > AMO > core data access
 // Virtual address before translation (for MMU input)
 wire [31:0] d_vaddr_pre = amo_active ? amo_dbus_addr : c2a_address;
 assign d_store_for_mmu = amo_active ? amo_dbus_write : c2a_write;
 wire d_req_for_mmu = amo_active ? (amo_dbus_read | amo_dbus_write) : (c2a_read | c2a_write);
 
-// PTW takes over dbus when walking page table; otherwise use translated address
-assign dbus.address    = ptw_active ? ptw_addr :
-                         amo_active ? d_paddr  : d_paddr;
-assign dbus.byteenable = ptw_active ? 4'b1111 :
+// PTW takes over D-port when walking page table; otherwise use translated address
+assign dmem_port.addr  = ptw_active ? ptw_addr : d_paddr;
+assign dmem_port.be    = ptw_active ? 4'b1111 :
                          amo_active ? amo_dbus_byteenable : c2a_byteenable;
-assign dbus.read       = ptw_active ? ptw_req :
-                         amo_active ? amo_dbus_read       : c2a_read;
-assign dbus.write      = ptw_active ? 1'b0 :
-                         amo_active ? amo_dbus_write      : c2a_write;
-assign dbus.writedata  = ptw_active ? 32'b0 :
+assign dmem_port.req   = ptw_active ? ptw_req :
+                         amo_active ? (amo_dbus_read | amo_dbus_write) :
+                                      (c2a_read | c2a_write);
+assign dmem_port.we    = ptw_active ? 1'b0 :
+                         amo_active ? amo_dbus_write : c2a_write;
+assign dmem_port.wdata = ptw_active ? 32'b0 :
                          amo_active ? amo_dbus_writedata  : c2a_writedata;
 
 always_ff@(posedge clk_i or posedge reset_i)

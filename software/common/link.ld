@@ -6,8 +6,7 @@ OUTPUT_ARCH(riscv)
 
 MEMORY
 {
-  ROM (rwx) : ORIGIN = 0x00000000, LENGTH = 0x00008000
-  RAM (rwx) : ORIGIN = 0x00010000, LENGTH = 0x00002000
+  RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 0x00008000
 }
 
 ENTRY(_init)
@@ -16,12 +15,12 @@ SECTIONS
 {
   PROVIDE(__stack_top = ORIGIN(RAM) + LENGTH(RAM));
 
-  .init           : { *(.init) } > ROM
-  .RESET_HANDLER  : { *(.RESET_HANDLER) } > ROM
-  .ISR_SOFT_ASM   : { *(.ISR_SOFT_ASM) } > ROM
-  .ISR_TIMER_ASM  : { *(.ISR_TIMER_ASM) } > ROM
-  .ISR_EXT_ASM    : { *(.ISR_EXT_ASM) } > ROM
-  .ISR_DEFAULT_ASM : { *(.ISR_DEFAULT_ASM) } > ROM
+  .init           : { *(.init) } > RAM
+  .RESET_HANDLER  : { *(.RESET_HANDLER) } > RAM
+  .ISR_SOFT_ASM   : { *(.ISR_SOFT_ASM) } > RAM
+  .ISR_TIMER_ASM  : { *(.ISR_TIMER_ASM) } > RAM
+  .ISR_EXT_ASM    : { *(.ISR_EXT_ASM) } > RAM
+  .ISR_DEFAULT_ASM : { *(.ISR_DEFAULT_ASM) } > RAM
   .text :
   {
     *(.text.unlikely .text.*_unlikely .text.unlikely.*)
@@ -31,7 +30,7 @@ SECTIONS
     *(SORT(.text.sorted.*))
     *(.text .stub .text.* .gnu.linkonce.t.*)
     *(.gnu.warning)
-  } > ROM
+  } > RAM
   PROVIDE (__etext = .);
   PROVIDE (_etext = .);
   PROVIDE (etext = .);

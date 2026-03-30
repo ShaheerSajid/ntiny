@@ -22,7 +22,7 @@
 
 #define RVMODEL_BOOT
 
-// Signature data region — placed in DMEM by linker
+// Signature data region — placed in RAM by linker
 #define RVMODEL_DATA_BEGIN                                              \
   RVMODEL_DATA_SECTION                                                  \
   .align 4;                                                             \

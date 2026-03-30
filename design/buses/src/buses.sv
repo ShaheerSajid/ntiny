@@ -1,26 +1,29 @@
-interface IBus;
-    logic [31:0] instruction;
-    logic [31:0] address;
-    bit enable;
-    bit stall;
+// ── mem_bus ──────────────────────────────────────────────────
+// Unified memory bus interface (OBI-style valid/ready protocol)
+//
+// Protocol:
+//   - Transaction accepted when req && ready on rising clock edge
+//   - Reads:  rvalid + rdata appear 1 cycle after acceptance (SRAM timing)
+//   - Writes: complete on acceptance, no response needed
+//   - ready held low to back-pressure master
+//
+interface mem_bus;
+    logic        req;       // master → slave: transaction request
+    logic        ready;     // slave → master: can accept this cycle
+    logic        we;        // master → slave: write enable (0=read, 1=write)
+    logic [31:0] addr;      // master → slave: byte address
+    logic [3:0]  be;        // master → slave: byte enable
+    logic [31:0] wdata;     // master → slave: write data
+    logic [31:0] rdata;     // slave → master: read data
+    logic        rvalid;    // slave → master: read data valid
 
-    modport m (input  instruction, stall, output address, enable);
+    modport master (output req, we, addr, be, wdata,
+                    input  ready, rdata, rvalid);
+    modport slave  (input  req, we, addr, be, wdata,
+                    output ready, rdata, rvalid);
 endinterface
 
-
-
-interface DBus;
-    logic [31:0] address;
-    logic [3:0] byteenable; 
-    bit read;
-    logic[31:0] readdata;  
-    bit write;
-    logic [31:0] writedata;
-    bit stall;
-
-    modport m (input  readdata, stall, output address, byteenable , read, write, writedata);
-endinterface
-
+// ── DebugBus ────────────────────────────────────────────────
 interface DebugBus;
     bit core_resume_req;
     bit	core_halt_req;

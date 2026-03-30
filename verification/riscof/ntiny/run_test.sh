@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: run_test.sh <elf> <sig_file> <toolchain_path> <verilator_bin> <hex_text> <split>
+# Usage: run_test.sh <elf> <sig_file> <toolchain_path> <verilator_bin> <hex_text>
 set -e
 
 ELF=$1
@@ -7,7 +7,6 @@ SIG_FILE=$2
 TOOLCHAIN=$3
 VERILATOR_BIN=$4
 HEX_TEXT=$5
-SPLIT=$6
 WORK_DIR=$(dirname "$ELF")
 
 NM="${TOOLCHAIN}/riscv64-unknown-elf-nm"
@@ -15,14 +14,11 @@ OBJCOPY="${TOOLCHAIN}/riscv64-unknown-elf-objcopy"
 
 cd "$WORK_DIR"
 
-# Extract IMEM and DMEM directly from ELF sections (avoids huge flat binary)
-${OBJCOPY} -O binary -j .text.init -j .text "$ELF" imem.bin
-${OBJCOPY} -O binary -j .data -j .sdata "$ELF" dmem.bin
+# Extract full binary from ELF (unified RAM: .text + .data in one image)
+${OBJCOPY} -O binary "$ELF" ram.bin
 
-# Convert each region to hex text for $readmemh
-python3 ${HEX_TEXT} imem.bin imem.text
-python3 ${HEX_TEXT} dmem.bin dmem.text
-touch boot.text
+# Convert to hex text for $readmemh
+python3 ${HEX_TEXT} ram.bin ram.hex
 
 # Extract signature addresses from ELF
 SIG_BEGIN=$(${NM} "$ELF" | grep " begin_signature" | cut -d" " -f1)
