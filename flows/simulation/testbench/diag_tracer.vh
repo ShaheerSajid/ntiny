@@ -150,6 +150,18 @@ always @(posedge clk) begin
         end
 
         // =====================================================================
+        // EVENT: Memory write (store commits — dtlb_hit, no fault, not stale, not stalled)
+        // =====================================================================
+        if (`MMU.d_store_i && `MMU.dtlb_hit && !`CORE.mmu_d_fault && !`CORE.stale_imem && !`CORE.mmu_d_stall) begin
+            $fwrite(diag_fd, "MEM_WR[%0d] vaddr=%08h paddr=%08h data=%08h pc_imem=%08h\n",
+                diag_cyc,
+                `MMU.d_vaddr_i,
+                `MMU.d_paddr_o,
+                `CORE.srcB_imem_diag,
+                `CORE.pc_imem);
+        end
+
+        // =====================================================================
         // PER-CYCLE: Pipeline state — all 4 stages + control
         // =====================================================================
         // Line 1: Pipeline PCs, instruction word, pc_sel
@@ -226,11 +238,14 @@ always @(posedge clk) begin
             `CORE.csr_result);
 
         // Line 6: IE operand values (forwarded)
-        $fwrite(diag_fd, "  OPRS: rs1_ie=%08h rs2_ie=%08h opA=%08h opB=%08h | csr_data=%08h mem_op=%0d\n",
+        // fwdb: 0=NO_FORWARD, 1=FORWARD_IMEM, 2=FORWARD_IWB
+        $fwrite(diag_fd, "  OPRS: rs1_ie=%08h rs2_ie=%08h opA=%08h opB=%08h | fwdb=%0d opB_fwd=%08h | csr_data=%08h mem_op=%0d\n",
             `CORE.rs1_forwarded_ie,
             `CORE.rs2_forwarded_ie,
             `CORE.alu_operand_a,
             `CORE.alu_operand_b,
+            `CORE.forwardb_ie,
+            `CORE.opB_forwarded_data,
             `CSR.csr_data,
             `CORE.ctrl_bus_ie.mem_op);
 
@@ -272,7 +287,7 @@ always @(posedge clk) begin
             `MMU.pte_u);
 
         // Line 10: Writeback stage + memory
-        $fwrite(diag_fd, "  WB: exec_iwb=%08h rd_iwb=%08h wb_data=%08h rd=%0d wb_sel=%0d stale=%0b | imem_type=%0d imem_rd=%0d\n",
+        $fwrite(diag_fd, "  WB: exec_iwb=%08h rd_iwb=%08h wb_data=%08h rd=%0d wb_sel=%0d stale=%0b | imem_type=%0d imem_rd=%0d srcB_imem_diag=%08h\n",
             `CORE.exec_result_iwb,
             `CORE.readdata_iwb,
             `CORE.write_back_data,
@@ -280,7 +295,8 @@ always @(posedge clk) begin
             `CORE.ctrl_bus_iwb.wb_sel,
             `CORE.stale_iwb,
             `CORE.ctrl_bus_imem.inst_type,
-            `CORE.ctrl_bus_imem.rd_int);
+            `CORE.ctrl_bus_imem.rd_int,
+            `CORE.srcB_imem_diag);
 
         // =====================================================================
         // Infinite loop detection

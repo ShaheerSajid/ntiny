@@ -825,6 +825,26 @@ always_ff@(posedge clk_i or posedge reset_i)
 			c_valid_ie <= c_valid;
 			stale_ie <= stale_id;
 		end
+		else begin
+			// During a stall the IE pipeline registers are frozen, but forwarding
+			// sources (IMEM/IWB) continue to advance.  If the instruction currently
+			// in IE has a forwarding dependency on a source that is about to leave
+			// the pipeline, capture the forwarded value now so it is not lost.
+			// Without this, a store whose rs2 source completes IWB while the store
+			// itself is stuck in IE (e.g. DTLB miss) would write stale data.
+			if (forwarda_ie == FORWARD_IWB)
+				rs1_forwarded_ie <= write_back_data;
+			else if (forwarda_ie == FORWARD_IMEM)
+				rs1_forwarded_ie <= imem_forwarded_data;
+			if (forwardb_ie == FORWARD_IWB)
+				rs2_forwarded_ie <= write_back_data;
+			else if (forwardb_ie == FORWARD_IMEM)
+				rs2_forwarded_ie <= imem_forwarded_data;
+			if (forwardc_ie == FORWARD_IWB)
+				rs3_forwarded_ie <= write_back_data;
+			else if (forwardc_ie == FORWARD_IMEM)
+				rs3_forwarded_ie <= imem_forwarded_data;
+		end
 	end
 
 //execute stage
@@ -1136,6 +1156,15 @@ end
 
 
 //tracer
+`ifdef DV_DIAG_TRACE
+// Minimal pipeline-visible signals for diag tracer (srcB_imem not in DV_TRACER block)
+logic [31:0] srcB_imem_diag;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) srcB_imem_diag <= 0;
+    else if (!ie_stall) srcB_imem_diag <= opB_forwarded_data;
+end
+`endif
+
 `ifdef DV_TRACER
 logic [31:0] i1,i2,i3;
 logic [31:0] pc1;
