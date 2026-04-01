@@ -35,3 +35,14 @@ ${VERILATOR_BIN} --timeout 10000000 \
     +sig_file=${SIG_FILE} \
     +sig_begin=${SIG_BEGIN} \
     +sig_end=${SIG_END} || true
+
+# Compare DUT signature against Spike reference if it exists
+REF_SIG="$(dirname "$WORK_DIR")/ref/Reference-spike.signature"
+if [ -f "$REF_SIG" ] && [ -f "$SIG_FILE" ]; then
+    if diff -q "$SIG_FILE" "$REF_SIG" > /dev/null 2>&1; then
+        echo "SIG_COMPARE: PASS"
+    else
+        NDIFF=$(diff "$SIG_FILE" "$REF_SIG" | grep -c "^[<>]" || true)
+        echo "SIG_COMPARE: FAIL (${NDIFF} differing lines)"
+    fi
+fi

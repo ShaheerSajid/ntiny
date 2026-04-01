@@ -10,11 +10,15 @@ module mmu_sv32 (
 
     // CSR configuration
     input  logic [31:0] satp_i,       // MODE[31], ASID[30:22], PPN[21:0]
-    input  logic [1:0]  priv_i,       // current privilege level
+    input  logic [1:0]  priv_i,       // current privilege level (for data translation)
+    input  logic [1:0]  i_priv_i,     // instruction-side privilege (may differ on MRET/SRET)
     input  logic [31:0] mstatus_i,    // MPRV[17], MPP[12:11], SUM[18], MXR[19]
 
     // SFENCE.VMA flush
     input  logic        sfence_i,
+
+    // Pipeline flush — abort any in-flight PTW walk (trap/interrupt redirect)
+    input  logic        flush_i,
 
     // Instruction address translation
     input  logic [31:0] i_vaddr_i,    // virtual address from PC
@@ -22,6 +26,7 @@ module mmu_sv32 (
     output logic [31:0] i_paddr_o,    // translated physical address
     output logic        i_stall_o,    // stall fetch (TLB miss)
     output logic        i_fault_o,    // instruction page fault (cause 12)
+    output logic [31:0] i_fault_addr_o, // faulting virtual address (may differ from i_vaddr_i during PTW)
 
     // Data address translation
     input  logic [31:0] d_vaddr_i,    // virtual address from ALU/AMO
@@ -30,6 +35,7 @@ module mmu_sv32 (
     output logic [31:0] d_paddr_o,    // translated physical address
     output logic        d_stall_o,    // stall data access (TLB miss)
     output logic        d_fault_o,    // load/store page fault (cause 13/15)
+    output logic [31:0] d_fault_addr_o, // faulting virtual address (may differ from d_vaddr_i during PTW)
 
     // PTW memory interface (directly drives dbus when active)
     output logic [31:0] ptw_addr_o,   // physical address for PTE read
@@ -47,7 +53,7 @@ module mmu_sv32 (
     // Effective privilege: for data, MPRV overrides to MPP
     wire [1:0] d_eff_priv = (mstatus_i[17] && mstatus_i[12:11] != 2'b11)
                             ? mstatus_i[12:11] : priv_i;
-    wire i_translate = sv32_en && (priv_i != 2'b11);
+    wire i_translate = sv32_en && (i_priv_i != 2'b11);
     wire d_translate = sv32_en && (d_eff_priv != 2'b11);
 
     // Access modifiers from mstatus
@@ -101,11 +107,13 @@ module mmu_sv32 (
         : {itlb_entry.ppn1, itlb_entry.ppn0, i_vaddr_i[11:0]}; // 4KB: PPN[1:0] + offset
 
     // ITLB permission check
+    // NOTE: SUM (mstatus[18]) only applies to DATA accesses. Instruction fetches from
+    // U-mode pages are ALWAYS forbidden in S-mode, regardless of SUM (spec §3.1.6.3).
     wire i_perm_ok = itlb_entry.x &&          // must be executable
                      itlb_entry.a &&          // accessed bit
-                     ((priv_i == 2'b00) ? itlb_entry.u :               // U-mode needs U bit
-                      (priv_i == 2'b01) ? (!itlb_entry.u || sum_bit) : // S-mode: U pages only with SUM
-                      1'b1);                                            // M-mode: always OK
+                     ((i_priv_i == 2'b00) ? itlb_entry.u :    // U-mode needs U bit
+                      (i_priv_i == 2'b01) ? !itlb_entry.u :   // S-mode: U pages always forbidden for insn fetch
+                      1'b1);                                   // M-mode: always OK
 
     // ── DTLB ─────────────────────────────────────────────────────
     tlb_entry_t dtlb [TLB_ENTRIES];
@@ -152,6 +160,7 @@ module mmu_sv32 (
     typedef enum logic [2:0] {
         PTW_IDLE,
         PTW_L1,       // reading level-1 PTE
+        PTW_L0_WAIT,  // wait 1 cycle for L1 rvalid to clear before L0 read
         PTW_L0,       // reading level-0 PTE
         PTW_FILL,     // write TLB entry
         PTW_FAULT     // page fault detected
@@ -200,18 +209,19 @@ module mmu_sv32 (
 
     // U/S permission check
     logic ptw_priv_fault;
-    wire [1:0] ptw_check_priv = ptw_for_insn ? priv_i : d_eff_priv;
+    wire [1:0] ptw_check_priv = ptw_for_insn ? i_priv_i : d_eff_priv;
     always_comb begin
         if (ptw_check_priv == 2'b00)
             ptw_priv_fault = !pte_u;             // U-mode needs U bit
         else if (ptw_check_priv == 2'b01)
-            ptw_priv_fault = pte_u && !sum_bit;  // S-mode: U pages need SUM
+            // SUM only applies to data; instruction fetch from U-pages always faults in S-mode
+            ptw_priv_fault = ptw_for_insn ? pte_u : (pte_u && !sum_bit);
         else
             ptw_priv_fault = 1'b0;               // M-mode OK
     end
 
     // PTW address computation
-    wire [31:0] ptw_l1_addr = {satp_ppn, 10'b0} + {20'b0, ptw_vaddr[31:22], 2'b00};
+    wire [31:0] ptw_l1_addr = {satp_ppn[19:0], 12'b0} + {20'b0, ptw_vaddr[31:22], 2'b00};
     wire [31:0] ptw_l0_addr = {pte_ppn1, pte_ppn0, 12'b0} + {20'b0, ptw_vaddr[21:12], 2'b00};
 
     // Latched L1 PTE for address construction during L0
@@ -227,6 +237,10 @@ module mmu_sv32 (
             ptw_for_insn <= 1'b0;
             ptw_mega <= 1'b0;
             ptw_l1_pte_saved <= '0;
+        end else if (flush_i) begin
+            // Pipeline flush (trap/interrupt): abort any in-flight PTW walk.
+            // The PTW was walking a stale virtual address that is no longer relevant.
+            ptw_state <= PTW_IDLE;
         end else begin
             case (ptw_state)
                 PTW_IDLE: begin
@@ -264,10 +278,17 @@ module mmu_sv32 (
                                 ptw_state <= PTW_FILL;
                             end
                         end else begin
-                            // Pointer: go to level 0
-                            ptw_state <= PTW_L0;
+                            // Pointer: go to level 0 (via wait state to drain stale rvalid)
+                            ptw_state <= PTW_L0_WAIT;
                         end
                     end
+                end
+
+                PTW_L0_WAIT: begin
+                    // One dead cycle: ptw_active=0, no request issued.
+                    // This lets the stale rvalid from the L1 read clear
+                    // before we start the L0 read.
+                    ptw_state <= PTW_L0;
                 end
 
                 PTW_L0: begin
@@ -371,12 +392,16 @@ module mmu_sv32 (
     assign i_paddr_o = i_translate ? i_paddr_tlb : i_vaddr_i;
     assign i_stall_o = i_translate && i_req_i && (!itlb_hit || ptw_active_o);
     assign i_fault_o = (i_translate && i_req_i && itlb_hit && !i_perm_ok) ||
-                       (ptw_state == PTW_FAULT && ptw_for_insn);
+                       (i_translate && ptw_state == PTW_FAULT && ptw_for_insn);
+    // Fault address: PTW fault uses the address that was being walked, not current i_vaddr
+    assign i_fault_addr_o = (ptw_state == PTW_FAULT && ptw_for_insn) ? ptw_vaddr : i_vaddr_i;
 
     // Data side
     assign d_paddr_o = d_translate ? d_paddr_tlb : d_vaddr_i;
     assign d_stall_o = d_translate && d_req_i && (!dtlb_hit || ptw_active_o);
     assign d_fault_o = (d_translate && d_req_i && dtlb_hit && !d_perm_ok) ||
-                       (ptw_state == PTW_FAULT && !ptw_for_insn);
+                       (d_translate && ptw_state == PTW_FAULT && !ptw_for_insn);
+    // Fault address: PTW fault uses the address that was being walked
+    assign d_fault_addr_o = (ptw_state == PTW_FAULT && !ptw_for_insn) ? ptw_vaddr : d_vaddr_i;
 
 endmodule

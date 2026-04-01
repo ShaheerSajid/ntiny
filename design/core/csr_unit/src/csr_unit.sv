@@ -173,9 +173,11 @@ module csr_unit (
 			end
 		end else if (ret_i) begin
 			// MRET: MIE=MPIE, MPIE=1, MPP=U(00)
+			// If MPP != M, also clear MPRV (spec §3.1.6.1)
 			_MSTATUS[3]     <= _MSTATUS[7];
 			_MSTATUS[7]     <= 1'b1;
 			_MSTATUS[12:11] <= 2'b00;
+			_MSTATUS[17]    <= (_MSTATUS[12:11] == 2'b11) ? _MSTATUS[17] : 1'b0;
 		end else if (sret_i) begin
 			// SRET: SIE=SPIE, SPIE=1, SPP=0
 			_MSTATUS[1]  <= _MSTATUS[5];

@@ -188,9 +188,79 @@ logic [31:0]satp_csr;
 logic [31:0] i_paddr, d_paddr;
 logic        mmu_i_stall, mmu_d_stall;
 logic        mmu_i_fault, mmu_d_fault;
+logic [31:0] mmu_i_fault_addr, mmu_d_fault_addr;
 logic [31:0] ptw_addr;
 logic        ptw_req, ptw_active;
 logic        d_store_for_mmu;
+
+// Track whether PTW had a read request on the bus last cycle.
+// rvalid from the RAM is pulsed 1 cycle after the read request — so we must
+// only accept rvalid when it corresponds to the PTW's OWN request, not a
+// stale rvalid left over from a prior core load/AMO that happened right
+// before the PTW took over the dbus.
+logic ptw_req_prev;
+always_ff @(posedge clk_i or posedge reset_i)
+    if (reset_i) ptw_req_prev <= 1'b0;
+    else         ptw_req_prev <= ptw_req;
+wire ptw_rvalid = dmem_port.rvalid & ptw_req_prev;
+
+// Registered instruction page fault — breaks the combinational loop:
+//   i_fault_o → trap_valid → interrupt_valid → mmu_priv → i_translate → i_fault_o
+// Also naturally gives correct priority: data faults from IE (combinational) are processed
+// before instruction faults from IF (delayed 1 cycle by register).
+logic        mmu_i_fault_r;
+logic [31:0] mmu_i_fault_addr_r;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        mmu_i_fault_r      <= 1'b0;
+        mmu_i_fault_addr_r <= 32'b0;
+    end else if (interrupt_valid) begin
+        // Clear when a trap fires (pipeline redirects to handler).
+        // Do NOT clear on branch/ret: if the branch/ret TARGET itself faults
+        // (e.g., page without A bit), the fault is real and must propagate.
+        // Speculative faults (pc+4 past page boundary) are prevented by
+        // flush_i aborting the PTW before it reaches FAULT state.
+        mmu_i_fault_r      <= 1'b0;
+        mmu_i_fault_addr_r <= 32'b0;
+    end else begin
+        mmu_i_fault_r      <= mmu_i_fault;
+        mmu_i_fault_addr_r <= mmu_i_fault_addr;
+    end
+end
+
+// Instruction valid flag for ID stage: low for 1 cycle after a trap redirect
+// when imem_port.rdata still contains stale data from the pre-trap fetch.
+// Prevents stale ecall/ebreak/branch from re-triggering after traps.
+//
+// Only traps produce a stale cycle: the trap handler address is loaded into
+// the PC, but the IF/ID register still holds the old instruction for 1 cycle.
+// Branches and returns do NOT produce stale cycles in this pipeline — the
+// fetch redirect is combinational, so the target instruction arrives in ID
+// on the very next cycle.
+logic insn_valid_id;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i)
+        insn_valid_id <= 1'b0;
+    else if (interrupt_valid)
+        insn_valid_id <= 1'b0;
+    else if (!if_id_stall)
+        insn_valid_id <= 1'b1;
+end
+
+// Stale instruction tracking: when a trap fires, the instruction in ID is stale
+// and must not produce side effects (register writes, memory ops) as it flows
+// through IE/IMEM/IWB. Only set after trap, NOT after reset.
+logic stale_id, stale_ie, stale_imem, stale_iwb;
+logic post_trap;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i)
+        post_trap <= 1'b0;
+    else if (interrupt_valid)
+        post_trap <= 1'b1;
+    else if (!if_id_stall)
+        post_trap <= 1'b0;
+end
+assign stale_id = post_trap;
 
 // AMO unit signals
 logic [31:0] amo_dbus_addr;
@@ -307,7 +377,25 @@ assign am_done_o = am_done_r;
 ////////////////////////////////////////////
 
 //stalls
-assign if_id_stall = onebit_sig_e'(ie_stall | insert_bubble | (pstate == HALTED) | mmu_i_stall);
+// CSR read-after-write hazard: mret/sret in ID reads epc, but preceding CSR write in IE hasn't committed yet
+wire csr_ret_hazard = ((ctrl_bus_if_id.mret && !illegal_mret) ||
+                       (ctrl_bus_if_id.sret && !illegal_sret)) &&
+                      ctrl_bus_ie.csr_op != NO_CSR_OP &&
+                      ((ctrl_bus_if_id.mret && ctrl_bus_ie.csr_addr == 12'h341) ||
+                       (ctrl_bus_if_id.sret && ctrl_bus_ie.csr_addr == 12'h141));
+
+// Refetch stall: when a trap fires during a stall (e.g. MMU page table walk),
+// imem_port.req=0 on the trap cycle so the fetch for handler_addr is never issued.
+// The following cycle the main PC has already advanced to handler_addr+4, skipping
+// the first vector table entry. Fix: insert 1 stall cycle to hold both PCs at
+// handler_addr and force-issue the fetch so the correct instruction arrives.
+logic refetch_after_trap;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) refetch_after_trap <= 1'b0;
+    else         refetch_after_trap <= interrupt_valid & if_id_stall;
+end
+
+assign if_id_stall = onebit_sig_e'(ie_stall | insert_bubble | refetch_after_trap | (pstate == HALTED) | mmu_i_stall | csr_ret_hazard);
 wire dmem_busy = dmem_port.req & ~dmem_port.ready;
 assign ie_stall    = onebit_sig_e'(imem_stall | alu_stall | dmem_busy | amo_stall | mmu_d_stall);
 assign imem_stall  = onebit_sig_e'(iwb_stall);
@@ -329,9 +417,32 @@ always_comb begin
 end
 
 assign interrupt_valid = onebit_sig_e'(trap_true);//FALSE;
-assign ret_valid = onebit_sig_e'((ctrl_bus_if_id.mret && !illegal_mret) ||
-                                 (ctrl_bus_if_id.sret && !illegal_sret));
+assign ret_valid = onebit_sig_e'(((ctrl_bus_if_id.mret && !illegal_mret) ||
+                                  (ctrl_bus_if_id.sret && !illegal_sret)) && insn_valid_id);
 assign debug_valid =  onebit_sig_e'(resumeack_o);
+
+// ── Early MRET/SRET commit from ID ──────────────────────────────
+// Per RISC-V spec, xRET atomically updates priv + xSTATUS + PC. If the
+// instruction fetch at the return target triggers a page fault BEFORE xRET
+// reaches IE, the trap must be taken from the post-xRET state (new privilege,
+// updated mstatus). We commit the CSR side effects on the first cycle of
+// ret_valid using a one-shot flag to prevent re-firing while stalled.
+logic ret_side_effects_done;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i)
+        ret_side_effects_done <= 1'b0;
+    else if (interrupt_valid)
+        ret_side_effects_done <= 1'b0;
+    else if (ret_valid && !csr_ret_hazard && !ret_side_effects_done)
+        ret_side_effects_done <= 1'b1;
+    else if (!ret_valid)
+        ret_side_effects_done <= 1'b0;
+end
+
+wire ret_fire  = ctrl_bus_if_id.mret && insn_valid_id && !illegal_mret &&
+                 !ret_side_effects_done && !csr_ret_hazard && !interrupt_valid;
+wire sret_fire = ctrl_bus_if_id.sret && insn_valid_id && !illegal_sret &&
+                 !ret_side_effects_done && !csr_ret_hazard && !interrupt_valid;
 
 // Misaligned access detection in IE stage
 wire [1:0] mem_addr_lsb = alu_result[1:0];
@@ -358,9 +469,16 @@ wire csr_access = (ctrl_bus_if_id.csr_op == WRITE_CSR) ||
                    (ctrl_bus_if_id.csr_op == CLEAR_CSR);
 wire illegal_csr_priv = csr_access && (priv_level < csr_addr_raw_id[9:8]);
 // MRET requires M-mode; SRET requires at least S-mode
-wire illegal_mret = (ctrl_bus_if_id.mret == TRUE) && (priv_level != 2'b11);
-wire illegal_sret = (ctrl_bus_if_id.sret == TRUE) && (priv_level < 2'b01);
-wire illegal_insn_id = illegal_csr_priv | illegal_mret | illegal_sret;
+// Once ret_side_effects_done, the xRET has already committed its CSR side effects
+// from ID. Don't flag it as illegal due to the (now-updated) privilege level.
+wire illegal_mret = (ctrl_bus_if_id.mret == TRUE) && (priv_level != 2'b11) && !ret_side_effects_done;
+wire illegal_sret = (ctrl_bus_if_id.sret == TRUE) && (priv_level < 2'b01) && !ret_side_effects_done;
+// TVM enforcement: SATP access or SFENCE.VMA from S-mode when mstatus.TVM=1 → illegal insn
+wire tvm_active        = status_csr[20] && (priv_level == 2'b01);
+wire illegal_satp_tvm  = tvm_active && csr_access && (csr_addr_raw_id == 12'h180);
+wire illegal_sfence_tvm = tvm_active && (ctrl_bus_if_id.sfence_vma == TRUE);
+wire illegal_insn_id = illegal_csr_priv | illegal_mret | illegal_sret
+                     | illegal_satp_tvm | illegal_sfence_tvm;
 assign exception_from_ie = misalign_load_ie | misalign_store_ie | misalign_amo_ie;
 
 //plic drive logic
@@ -378,16 +496,22 @@ end
 assign plic_complete_o = from_plic & ctrl_bus_if_id.mret & ~illegal_mret;
 assign plic_claim_o = ext_itr_i & trap_true;
 
+// Do NOT gate branch_taken with insn_valid_id: after a trap, c_controller delivers
+// the first mtvec instruction into ID on the very next cycle (N+1), but insn_valid_id
+// is still 0 that cycle (cleared on cycle N). Gating would suppress the JAL redirect,
+// causing the CPU to execute handler entry[1] instead of entry[0].
+// The IE register flush on interrupt_valid already prevents stale pre-trap effects.
+wire branch_taken_valid = branch_taken;
+wire ret_valid_valid    = ret_valid;  // already gated with insn_valid_id in assignment
+
 always_comb
 begin
-	casez({branch_taken, interrupt_valid, ret_valid, debug_valid})
-		4'b0000: pc_sel = PC_plus_4;
-		4'b1000: pc_sel = BRANCH_PC;
-		4'b?100: pc_sel = INTERRUPT;
-		4'b??10: pc_sel = RET;
-		4'b???1: pc_sel = BRANCH_DPC;
-		default: pc_sel = PC_plus_4;
-	endcase
+	// Priority: debug > interrupt/trap > branch > ret > PC+4
+	if (debug_valid)             pc_sel = BRANCH_DPC;
+	else if (interrupt_valid)    pc_sel = INTERRUPT;
+	else if (branch_taken_valid) pc_sel = BRANCH_PC;
+	else if (ret_valid_valid)    pc_sel = RET;
+	else                         pc_sel = PC_plus_4;
 end
 always_comb
 begin
@@ -415,9 +539,13 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
-wire [31:0] i_vaddr = reset_i ? pc_out : pc_in;
+// refetch_after_trap: use pc_out (= handler_addr, held by the stall) so the
+// memory request targets the correct handler address instead of handler_addr+4.
+wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_after_trap) ? pc_out : pc_in;
 assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
-assign imem_port.req   = ~if_id_stall & ~c_stall & ~interrupt_valid;
+// Force req=1 during refetch: if_id_stall=1 on that cycle (from refetch_after_trap)
+// so ~if_id_stall would be 0, but we still need to issue the fetch.
+assign imem_port.req   = refetch_after_trap | (~if_id_stall & ~c_stall);
 assign imem_port.we    = 1'b0;
 assign imem_port.be    = 4'b1111;
 assign imem_port.wdata = 32'b0;
@@ -431,10 +559,10 @@ logic controller_branch_taken;
 logic [31:0] controller_branch_addr;
 onebit_sig_e controller_flush;
 
-assign controller_branch_taken = branch_taken | resumeack_o | ret_valid;
+assign controller_branch_taken = branch_taken_valid | resumeack_o | ret_valid;
 assign controller_flush = onebit_sig_e'(resumereq_i | interrupt_valid);
 always_comb begin
-  casez({branch_taken, ret_valid, resumeack_o})
+  casez({branch_taken_valid, ret_valid, resumeack_o})
 		3'b100: controller_branch_addr = branch_target_address;
 		3'b?10: controller_branch_addr = epc;
 		3'b??1: controller_branch_addr = dpc;
@@ -475,14 +603,27 @@ decoder decoder_inst
   .instruction_i	(instruction_pipe),
 	.ctrl_bus_o		    (ctrl_bus_if_id)
 );
+// ── JAL/JALR rd write on instruction page fault ──────────────
+// Per RISC-V spec, JAL/JALR writes rd = PC+4 before the instruction
+// fetch at the target can fault. If the target fetch triggers an
+// instruction page fault, the JALR never reaches WB, so we force the
+// rd write here in the same cycle the trap fires.
+wire jalr_fault_wr = interrupt_valid & mmu_i_fault_r & insn_valid_id &
+                     (ctrl_bus_if_id.inst_type == JUMP || ctrl_bus_if_id.inst_type == JUMP_R) &
+                     (ctrl_bus_if_id.rd_int != NO_REG);
+
+wire        rf_wr_en   = jalr_fault_wr | (ctrl_bus_iwb.rd_int != NO_REG);
+wire [4:0]  rf_wr_addr = jalr_fault_wr ? ctrl_bus_if_id.rd_int[4:0] : ctrl_bus_iwb.rd_int[4:0];
+wire [31:0] rf_wr_data = jalr_fault_wr ? (pc_id + 32'd4)            : write_back_data;
+
 reg_file regfile_inst
 (
-	.clk_i		  (clk_i) ,	
+	.clk_i		  (clk_i) ,
 	.reset_i	  (reset_i),
 	.stall_i	  (1'b0),
-	.write_i	  (ctrl_bus_iwb.rd_int != NO_REG),
-	.wraddr_i	  (ctrl_bus_iwb.rd_int[4:0]),	
-	.wrdata_i	  (write_back_data),
+	.write_i	  (rf_wr_en),
+	.wraddr_i	  (rf_wr_addr),
+	.wrdata_i	  (rf_wr_data),
 	.rdaddra_i	(((pstate==HALTED) & ar_en_i)? ar_ad_i[4:0] : ctrl_bus_if_id.rs1_int[4:0]),
 	.rddataa_o	(rs1_int),
 	.rdaddrb_i	(ctrl_bus_if_id.rs2_int[4:0]),
@@ -616,23 +757,23 @@ interrupt_ctrl interrupt_ctrl_inst
   .ie_i             (ie_csr),
   .vec_i            (vec_csr),
   .status_i         (status_csr),
-  .pc_i             (pc_id),
+  .pc_i             (mmu_i_fault_r ? mmu_i_fault_addr_r : pc_id),
   // privilege and delegation
   .priv_i           (priv_level),
   .medeleg_i        (medeleg),
   .mideleg_i        (mideleg),
   // synchronous exceptions
-  .ecall_i          (ctrl_bus_if_id.ecall & ~illegal_insn_id),
-  .ebreak_i         (ctrl_bus_if_id.ebreak & ~dcsr[15] & ~illegal_insn_id),
-  .illegal_insn_i   (illegal_insn_id),
+  .ecall_i          (ctrl_bus_if_id.ecall & ~illegal_insn_id & insn_valid_id),
+  .ebreak_i         (ctrl_bus_if_id.ebreak & ~dcsr[15] & ~illegal_insn_id & insn_valid_id),
+  .illegal_insn_i   (illegal_insn_id & insn_valid_id),
   .misalign_load_i  (misalign_load_ie),
   .misalign_store_i (misalign_store_ie),
   .misalign_amo_i   (misalign_amo_ie),
-  // page faults from MMU
-  .insn_page_fault_i  (mmu_i_fault),
+  // page faults from MMU (insn fault registered to break combinational loop)
+  .insn_page_fault_i  (mmu_i_fault_r),
   .load_page_fault_i  (mmu_d_fault & ~d_store_for_mmu),
   .store_page_fault_i (mmu_d_fault & d_store_for_mmu),
-  .page_fault_addr_i  (mmu_d_fault ? d_vaddr_pre : i_vaddr),
+  .page_fault_addr_i  (mmu_d_fault ? mmu_d_fault_addr : mmu_i_fault_addr_r),
   .pc_ie_i          (pc_ie),
   .fault_addr_i     (alu_result),
   //to csr and core
@@ -659,8 +800,9 @@ always_ff@(posedge clk_i or posedge reset_i)
 			rs2_forwarded_ie <= 0;
 			rs3_forwarded_ie <= 0;
 			c_valid_ie <= FALSE;
+			stale_ie <= 1'b0;
 		end
-		else if(ie_flush) begin
+		else if(ie_flush || interrupt_valid) begin
 			ctrl_bus_ie <= ctrl_bus_reset;
 			pc_ie <= 0;
 			imm_ie <= 0;
@@ -668,15 +810,20 @@ always_ff@(posedge clk_i or posedge reset_i)
 			rs2_forwarded_ie <= 0;
 			rs3_forwarded_ie <= 0;
 			c_valid_ie <= FALSE;
+			stale_ie <= 1'b0;
 		end
 		else if(!ie_stall) begin
-			ctrl_bus_ie <= ctrl_bus_if_id;
+			// When stale_id is set (1 cycle after trap), the instruction in ID is
+			// leftover from before the trap redirect. Inject NOP to prevent any
+			// side effects (register writes, memory ops, CSR ops) as it flows through.
+			ctrl_bus_ie <= stale_id ? ctrl_bus_reset : ctrl_bus_if_id;
 			pc_ie <= pc_id;
 			imm_ie <= imm_id;
 			rs1_forwarded_ie <= rs1_forwarded_id;
 			rs2_forwarded_ie <= rs2_forwarded_id;
 			rs3_forwarded_ie <= rs3_forwarded_id;
 			c_valid_ie <= c_valid;
+			stale_ie <= stale_id;
 		end
 	end
 
@@ -768,8 +915,8 @@ csr_unit csr_unit_inst
   .epc_i                (epc_csr),
   .mtval_i              (mtval_csr),
   .interrupt_src_i      (interrupt_src),
-  .ret_i                (ctrl_bus_ie.mret),
-  .sret_i               (ctrl_bus_ie.sret),
+  .ret_i                (ret_fire),
+  .sret_i               (sret_fire),
 
   .ip_o                 (ip_csr),
   .ie_o                 (ie_csr),
@@ -784,19 +931,37 @@ csr_unit csr_unit_inst
 );
 
 // ── Sv32 MMU ─────────────────────────────────────────────────
+// Use registered priv_level, with a combinational override for MRET/SRET.
+// On trap cycles (interrupt_valid), priv is still the old value but the handler
+// code is identity-mapped (VA==PA), so M-mode non-translation is correct.
+// On MRET/SRET cycles, the fetch address is the return target (mepc/sepc) which
+// is in the target privilege's address space. We must use the target privilege
+// for translation so the MMU resolves the correct physical address.
+// status_csr.MPP[12:11] gives the MRET target; status_csr.SPP[8] gives SRET target.
+wire [1:0] ret_target_priv = ctrl_bus_if_id.mret ? status_csr[12:11] :  // MRET: MPP
+                                                    {1'b0, status_csr[8]}; // SRET: SPP
+// Don't override during csr_ret_hazard: epc is stale, using S-mode privilege
+// would cause the MMU to translate a stale address and start a spurious PTW walk.
+// After ret_side_effects_done, priv_level is already the target privilege (the
+// MRET/SRET CSR side effects committed from ID), so use priv_level directly.
+wire [1:0] mmu_priv = (ret_valid && !csr_ret_hazard && !ret_side_effects_done) ? ret_target_priv : priv_level;
+
 mmu_sv32 mmu_inst (
   .clk_i          (clk_i),
   .reset_i        (reset_i),
   .satp_i         (satp_csr),
-  .priv_i         (priv_level),
+  .priv_i         (priv_level),   // data-side: always use actual privilege
+  .i_priv_i       (mmu_priv),     // instruction-side: overridden on MRET/SRET
   .mstatus_i      (status_csr),
   .sfence_i       (ctrl_bus_ie.sfence_vma),
+  .flush_i        (interrupt_valid | (~if_id_stall & (branch_taken_valid | ret_valid))),
   // Instruction translation
   .i_vaddr_i      (i_vaddr),
   .i_req_i        (~reset_i),
   .i_paddr_o      (i_paddr),
   .i_stall_o      (mmu_i_stall),
   .i_fault_o      (mmu_i_fault),
+  .i_fault_addr_o (mmu_i_fault_addr),
   // Data translation
   .d_vaddr_i      (d_vaddr_pre),
   .d_req_i        (d_req_for_mmu),
@@ -804,11 +969,12 @@ mmu_sv32 mmu_inst (
   .d_paddr_o      (d_paddr),
   .d_stall_o      (mmu_d_stall),
   .d_fault_o      (mmu_d_fault),
+  .d_fault_addr_o (mmu_d_fault_addr),
   // PTW memory interface
   .ptw_addr_o     (ptw_addr),
   .ptw_req_o      (ptw_req),
   .ptw_data_i     (dmem_port.rdata),
-  .ptw_stall_i    (ptw_req ? ~dmem_port.rvalid : ~dmem_port.ready),
+  .ptw_stall_i    (ptw_req ? ~ptw_rvalid : ~dmem_port.ready),
   .ptw_active_o   (ptw_active)
 );
 
@@ -847,16 +1013,19 @@ always_ff@(posedge clk_i or posedge reset_i)
 			ctrl_bus_imem <= ctrl_bus_reset;
 			pc_imem <= 0;
 			exec_result_imem <= 0;
+			stale_imem <= 1'b0;
 		end
 		else if(imem_flush) begin
 			ctrl_bus_imem <= ctrl_bus_reset;
 			pc_imem <= 0;
 			exec_result_imem <= 0;
+			stale_imem <= 1'b0;
 		end
 		else if(!imem_stall) begin
 			ctrl_bus_imem <= ctrl_bus_ie;
 			pc_imem <= c_valid_ie? pc_ie + 2 : pc_ie + 4;
 			exec_result_imem <= exec_result_ie;
+			stale_imem <= stale_ie;
 		end
 	end
 
@@ -934,18 +1103,21 @@ always_ff@(posedge clk_i or posedge reset_i)
 			pc_iwb <= 0;
 			exec_result_iwb <= 0;
 			readdata_iwb <= 0;
+			stale_iwb <= 1'b0;
 		end
 		else if(iwb_flush) begin
 			ctrl_bus_iwb <= ctrl_bus_reset;
 			pc_iwb <= 0;
 			exec_result_iwb <= 0;
 			readdata_iwb <= 0;
+			stale_iwb <= 1'b0;
 		end
 		else if(!iwb_stall) begin
 			ctrl_bus_iwb <= ctrl_bus_imem;
 			pc_iwb <= pc_imem;
 			exec_result_iwb <= exec_result_imem;
 			readdata_iwb <= readdata_imem;
+			stale_iwb <= stale_imem;
 		end
 	end
 // ============================================================

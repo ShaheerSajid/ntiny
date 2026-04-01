@@ -5,7 +5,7 @@ ENTRY(rvtest_entry_point)
 
 MEMORY
 {
-  RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 0x00400000
+  RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 0x01000000
 }
 
 SECTIONS

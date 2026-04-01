@@ -23,14 +23,20 @@
 #define RVMODEL_BOOT
 
 // Signature data region — placed in RAM by linker
+// NOTE: RVMODEL_DATA_SECTION must come AFTER end_signature (not before begin_signature).
+// The vm_sv32 tests do `.align 12` immediately before RVMODEL_DATA_BEGIN to ensure
+// begin_signature is 4KB-page-aligned. Inserting begin_regstate/end_regstate before
+// begin_signature breaks that alignment, causing s11 SREG writes from VERIFICATION_RWX
+// to land inside the sig capture range (overwriting the end canary). Spike's model_test.h
+// places RVMODEL_DATA_SECTION in RVMODEL_DATA_END — we match that here.
 #define RVMODEL_DATA_BEGIN                                              \
-  RVMODEL_DATA_SECTION                                                  \
   .align 4;                                                             \
   .global begin_signature; begin_signature:
 
 #define RVMODEL_DATA_END                                                \
   .align 4;                                                             \
-  .global end_signature; end_signature:
+  .global end_signature; end_signature:                                 \
+  RVMODEL_DATA_SECTION
 
 #define RVMODEL_IO_INIT
 #define RVMODEL_IO_WRITE_STR(_R, _STR)

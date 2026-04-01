@@ -156,6 +156,75 @@ always @(posedge clk) begin
 	end
 end
 
+// Diagnostic pipeline tracer (dedicated file for maintainability)
+`include "testbench/diag_tracer.vh"
+
+// Debug: trace page faults and PTW activity
+`ifdef DV_MMU_TRACE
+always @(posedge clk) begin
+	if (!reset) begin
+		// Instruction page fault
+		if (soc_top_inst.core_top_inst.mmu_i_fault)
+			$display("MMU: I-FAULT vaddr=%08h paddr=%08h pc_id=%08h priv=%0d",
+				soc_top_inst.core_top_inst.mmu_inst.i_vaddr_i,
+				soc_top_inst.core_top_inst.mmu_inst.i_paddr_o,
+				soc_top_inst.core_top_inst.pc_id,
+				soc_top_inst.core_top_inst.priv_level);
+		// Data page fault
+		if (soc_top_inst.core_top_inst.mmu_d_fault)
+			$display("MMU: D-FAULT vaddr=%08h store=%0b pc_ie=%08h priv=%0d d_eff_priv=%0d",
+				soc_top_inst.core_top_inst.mmu_inst.d_vaddr_i,
+				soc_top_inst.core_top_inst.mmu_inst.d_store_i,
+				soc_top_inst.core_top_inst.pc_ie,
+				soc_top_inst.core_top_inst.priv_level,
+				soc_top_inst.core_top_inst.mmu_inst.d_eff_priv);
+		// PTW state transitions
+		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 5 /* PTW_FAULT */)
+			$display("MMU: PTW-FAULT vaddr=%08h for_insn=%0b for_store=%0b pte=%08h mega=%0b",
+				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_for_insn,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_for_store,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_pte,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_mega);
+		// PTW reading PTE
+		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 1 /* PTW_L1 */ && !soc_top_inst.core_top_inst.mmu_inst.ptw_stall_i)
+			$display("MMU: PTW-L1 addr=%08h data=%08h vaddr=%08h",
+				soc_top_inst.core_top_inst.mmu_inst.ptw_addr_o,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_data_i,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr);
+		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 3 /* PTW_L0 */ && !soc_top_inst.core_top_inst.mmu_inst.ptw_stall_i)
+			$display("MMU: PTW-L0 addr=%08h data=%08h vaddr=%08h",
+				soc_top_inst.core_top_inst.mmu_inst.ptw_addr_o,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_data_i,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr);
+		// PTW FILL (permission check)
+		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 4 /* PTW_FILL */)
+			$display("MMU: PTW-FILL vaddr=%08h pte=%08h perm_fault=%0b priv_fault=%0b for_insn=%0b for_store=%0b mega=%0b",
+				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_pte,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_perm_fault,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_priv_fault,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_for_insn,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_for_store,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_mega);
+		// DTLB hit with fault
+		if (soc_top_inst.core_top_inst.mmu_inst.d_translate &&
+		    soc_top_inst.core_top_inst.mmu_inst.d_req_i &&
+		    soc_top_inst.core_top_inst.mmu_inst.dtlb_hit &&
+		    !soc_top_inst.core_top_inst.mmu_inst.d_perm_ok)
+			$display("MMU: DTLB-FAULT vaddr=%08h store=%0b entry: r=%0b w=%0b x=%0b d=%0b a=%0b u=%0b",
+				soc_top_inst.core_top_inst.mmu_inst.d_vaddr_i,
+				soc_top_inst.core_top_inst.mmu_inst.d_store_i,
+				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.r,
+				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.w,
+				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.x,
+				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.d,
+				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.a,
+				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.u);
+	end
+end
+`endif
+
 `ifndef VERILATOR_SIM
 	always begin
 		 #10 clk = !clk;

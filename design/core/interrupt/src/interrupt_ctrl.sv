@@ -103,14 +103,11 @@ always_comb begin
   endcase
 end
 
-// priority: page faults > misalign > illegal > ecall/ebreak > interrupts
+// priority: IE exceptions (older) > IF/ID exceptions (younger) > interrupts
+// IE stage: data page faults, misalign (from executing instruction)
+// IF/ID stage: insn page fault (registered), illegal, ecall, ebreak
 always_comb begin
-  if (insn_page_fault_i) begin
-    cause_code   = 8'd12;  // instruction page fault
-    epc_out      = pc_i;
-    mtval_out    = page_fault_addr_i;
-    is_interrupt = 1'b0;
-  end else if (load_page_fault_i) begin
+  if (load_page_fault_i) begin
     cause_code   = 8'd13;  // load page fault
     epc_out      = pc_ie_i;
     mtval_out    = page_fault_addr_i;
@@ -129,6 +126,11 @@ always_comb begin
     cause_code   = 8'd6;  // store/AMO address misaligned
     epc_out      = pc_ie_i;
     mtval_out    = fault_addr_i;
+    is_interrupt = 1'b0;
+  end else if (insn_page_fault_i) begin
+    cause_code   = 8'd12;  // instruction page fault
+    epc_out      = pc_i;
+    mtval_out    = page_fault_addr_i;
     is_interrupt = 1'b0;
   end else if (illegal_insn_i) begin
     cause_code   = 8'd2;  // illegal instruction

@@ -60,7 +60,8 @@ VERILATOR_SRCS = \
 	--exe testbench/main.cpp
 
 VERILATOR_RISCOF_DEFINES = \
-	+define+RAM_SIZE_BYTES=$(RISCOF_RAM_SIZE)
+	+define+RAM_SIZE_BYTES=$(RISCOF_RAM_SIZE) \
+	+define+DV_DIAG_TRACE
 
 # --- Init ---
 mem_init:
@@ -199,6 +200,7 @@ RISCOF_DIR = ../../verification/riscof
 RISCOF_SUITE = $(RISCOF_DIR)/riscv-arch-test/riscv-test-suite/
 RISCOF_ENV = $(RISCOF_DIR)/riscv-arch-test/riscv-test-suite/env
 RISCOF_VENV = $(HOME)/Software/riscof_env/bin/activate
+RISCOF_WORK = riscof_work
 
 # Build Verilator model for RISCOF (4MB RAM, no DV_TRACER)
 verilator_build_riscof:
@@ -234,6 +236,47 @@ riscof_fpu: clean verilator_build_riscof_fpu
 	riscof run --config=config_fpu.ini \
 		--suite=$(realpath $(RISCOF_SUITE)) \
 		--env=$(realpath $(RISCOF_ENV))
+
+# Print a pass/fail summary by comparing DUT signatures against Spike references.
+# Run after 'make riscof' (or standalone if riscof_work already exists).
+.PHONY: riscof_summary
+riscof_summary:
+	@echo ""; \
+	echo "========================================"; \
+	echo " RISCOF Signature Comparison Summary"; \
+	echo "========================================"; \
+	pass=0; fail=0; missing=0; \
+	for ref in $$(find $(RISCOF_WORK) -name "Reference-spike.signature" 2>/dev/null | sort); do \
+		testdir=$$(dirname "$$ref"); \
+		suite=$$(echo "$$testdir" | sed 's|.*/riscof_work/||' | sed 's|/ref$$||' | sed 's|/src/||' | tr '/' ' '); \
+		testname=$$(basename $$(dirname "$$testdir")); \
+		dutsig="$$(dirname "$$testdir")/dut/DUT-ntiny.signature"; \
+		if [ ! -f "$$dutsig" ]; then \
+			printf "  %-55s  MISSING\n" "$$testname"; \
+			missing=$$((missing+1)); \
+		elif diff -q "$$dutsig" "$$ref" > /dev/null 2>&1; then \
+			printf "  %-55s  PASS\n" "$$testname"; \
+			pass=$$((pass+1)); \
+		else \
+			ndiff=$$(diff "$$dutsig" "$$ref" | grep -c '^[<>]' || true); \
+			printf "  %-55s  FAIL  ($$ndiff differing lines)\n" "$$testname"; \
+			fail=$$((fail+1)); \
+		fi; \
+	done; \
+	echo "========================================"; \
+	echo "  PASS: $$pass   FAIL: $$fail   MISSING: $$missing   TOTAL: $$((pass+fail+missing))"; \
+	echo "========================================"
+
+# Full run + summary in one command
+.PHONY: riscof_run
+riscof_run: clean verilator_build_riscof
+	@echo "--- Running RISCOF compliance tests ---"
+	cd $(RISCOF_DIR) && source $(RISCOF_VENV) && \
+	riscof run --config=config.ini \
+		--suite=$(realpath $(RISCOF_SUITE)) \
+		--env=$(realpath $(RISCOF_ENV)) \
+		--work-dir=$(realpath .)/$(RISCOF_WORK) || true
+	@$(MAKE) riscof_summary
 
 .PHONY: riscof_testlist
 riscof_testlist:
