@@ -460,7 +460,7 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 (
 	.clk_i		(clk_i),
 	.reset_i	(reset_i),
-	.stall_i	(interrupt_valid? 1'b0 : if_id_stall | c_stall),
+	.stall_i	(interrupt_valid ? 1'b0 : if_id_stall | c_stall),
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
@@ -476,47 +476,29 @@ assign imem_port.be    = 4'b1111;
 assign imem_port.wdata = 32'b0;
 
 
-//c_extension
-
-//address select logic
-
-logic controller_branch_taken;
-logic [31:0] controller_branch_addr;
+// ── Compressed instruction alignment ────────────────────────────────────
+// redirect fires on any non-sequential PC change; pc_in is the unified target.
+wire c_redirect = (pc_sel != PC_plus_4);
 onebit_sig_e controller_flush;
-
-assign controller_branch_taken = branch_taken_valid | resumeack_o | ret_valid;
 assign controller_flush = onebit_sig_e'(resumereq_i | interrupt_valid);
-always_comb begin
-  casez({branch_taken_valid, ret_valid, resumeack_o})
-		3'b100: controller_branch_addr = branch_target_address;
-		3'b?10: controller_branch_addr = epc;
-		3'b??1: controller_branch_addr = dpc;
-		default: controller_branch_addr = 0;
-	endcase
-end
 
 c_controller c_controller_inst
 (
-	.clk_i					        (clk_i),
-	.reset_i				        (reset_i),
-	.stall_i				        (if_id_stall),
-  .interrupt_true_i       (interrupt_valid),
-	.flush_i				        (controller_flush),
-	.pc_sel_i				        (pc_sel),
-	.instruction_i			    (reset_i? 0:imem_port.rdata),
-	.branch_taken_i			    (onebit_sig_e'(controller_branch_taken)),
-	.branch_target_address_i(controller_branch_addr),
-  .branch_addr_i          (branch_target_address),
-	.dpc_i					        (dpc),
-  .handler_addr_i         (handler_addr),
-  .epc_i                  (epc),
+	.clk_i                  (clk_i),
+	.reset_i                (reset_i),
+	.stall_i                (if_id_stall),
+	.flush_i                (controller_flush),
+	.redirect_i             (c_redirect),
+	.redirect_addr_i        (pc_in),
+	.interrupt_i            (interrupt_valid),
+	.instruction_i          (reset_i ? 0 : imem_port.rdata),
 
-	.instruction_addr_o		  (pc_id),
-	.instruction_o			    (instruction_pipe),
+	.instruction_addr_o     (pc_id),
+	.instruction_o          (instruction_pipe),
 	.next_instruction_addr_o(next_instruction_addr),
-	.c_stall_o				      (c_stall),
-	.c_valid_o				      (c_valid),
-	.busy_o					        (c_busy)
+	.c_stall_o              (c_stall),
+	.c_valid_o              (c_valid),
+	.busy_o                 (c_busy)
 );
 
 //instruction decode stage
