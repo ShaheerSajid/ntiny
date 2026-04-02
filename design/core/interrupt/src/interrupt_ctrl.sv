@@ -1,217 +1,209 @@
 import common_pkg::*;
 import core_pkg::*;
 
-module interrupt_ctrl
-(
-	input clk_i,
-  input rst_i,
+// ── Trap Controller ─────────────────────────────────────────────────────────
+// Centralises all exception detection, interrupt qualification, prioritisation,
+// delegation, and handler address selection.
+//
+// Exception detection (misalign, page fault gating) is done here — core_top
+// passes raw pipeline state and MMU signals, not pre-computed exception flags.
+//
+module interrupt_ctrl (
+    input clk_i,
+    input rst_i,
 
-  //interrupt sources
-  input ext_itr_i,
-  input timer_itr_i,
-  input soft_itr_i,
+    // ── Async interrupt sources ─────────────────────────────────────────
+    input ext_itr_i,
+    input timer_itr_i,
+    input soft_itr_i,
 
-  input [31:0]ip_i,
-  input [31:0]ie_i,
-  input [31:0]vec_i,
-  input [31:0]status_i,
-  input [31:0]pc_i,
+    // ── CSR state ───────────────────────────────────────────────────────
+    input [31:0] ip_i,
+    input [31:0] ie_i,
+    input [31:0] vec_i,
+    input [31:0] status_i,
 
-  // privilege and delegation
-  input [1:0]  priv_i,
-  input [31:0] medeleg_i,
-  input [31:0] mideleg_i,
+    // ── Program counters ────────────────────────────────────────────────
+    input [31:0] pc_id_i,              // ID-stage PC
+    input [31:0] pc_ie_i,              // IE-stage PC
 
-  // synchronous exception sources
-  input ecall_i,
-  input ebreak_i,
-  input illegal_insn_i,
-  input misalign_load_i,
-  input misalign_store_i,
-  input misalign_amo_i,
-  // page faults from MMU
-  input insn_page_fault_i,
-  input load_page_fault_i,
-  input store_page_fault_i,
-  input [31:0] page_fault_addr_i,
-  input [31:0] pc_ie_i,
-  input [31:0] fault_addr_i,
+    // ── Privilege and delegation ────────────────────────────────────────
+    input [1:0]  priv_i,
+    input [31:0] medeleg_i,
+    input [31:0] mideleg_i,
 
-  output trap_valid_o,
-  output trap_to_s_o,
-  output [31:0]handler_addr_o,
-  output [31:0]ecause_o,
-  output [31:0]epc_o,
-  output [31:0]mtval_o,
-  output [31:0]interrupt_src_o
+    // ── ID-stage exception sources (raw, gated here) ────────────────────
+    input        ecall_raw_i,          // ctrl_bus_if_id.ecall
+    input        ebreak_raw_i,         // ctrl_bus_if_id.ebreak
+    input        illegal_insn_i,       // from privilege_unit (already computed)
+    input        insn_valid_id_i,      // from hazard_unit
+    input        debug_ebreak_i,       // dcsr[15] — ebreak enters debug, not trap
 
+    // ── IE-stage signals for misalign detection ─────────────────────────
+    input mem_op_e       ie_mem_op_i,
+    input load_store_width_e ie_ls_width_i,
+    input amo_op_e       ie_amo_op_i,
+    input [1:0]          ie_addr_lsb_i,    // alu_result[1:0]
+    input [31:0]         ie_fault_addr_i,  // alu_result (full address for mtval)
+    input                amo_in_progress_i,
+
+    // ── MMU page faults ─────────────────────────────────────────────────
+    input        insn_page_fault_i,    // registered mmu_i_fault_r
+    input [31:0] insn_fault_addr_i,    // registered mmu_i_fault_addr_r
+    input        data_page_fault_i,    // mmu_d_fault (combinational)
+    input        data_fault_is_store_i,// d_store_for_mmu
+    input [31:0] data_fault_addr_i,    // mmu_d_fault_addr
+
+    // ── Outputs ─────────────────────────────────────────────────────────
+    output       trap_valid_o,
+    output       trap_to_s_o,
+    output [31:0] handler_addr_o,
+    output [31:0] ecause_o,
+    output [31:0] epc_o,
+    output [31:0] mtval_o,
+    output [31:0] interrupt_src_o,
+    // Exception side-effect: suppress memory op on misalign
+    output       exception_from_ie_o
 );
 
-logic [7:0] cause_code;
-logic is_interrupt;
-logic [31:0] epc_out;
-logic [31:0] mtval_out;
+// ═══════════════════════════════════════════════════════════════════════════
+// Misaligned access detection (IE stage)
+// ═══════════════════════════════════════════════════════════════════════════
+wire misalign_load = (ie_mem_op_i == READ) && (
+    (ie_ls_width_i == HALF && ie_addr_lsb_i[0]) ||
+    (ie_ls_width_i == WORD && |ie_addr_lsb_i)
+);
+wire misalign_store = (ie_mem_op_i == WRITE) && (
+    (ie_ls_width_i == HALF && ie_addr_lsb_i[0]) ||
+    (ie_ls_width_i == WORD && |ie_addr_lsb_i)
+);
+wire misalign_amo = (ie_amo_op_i != NO_AMO_OP) && |ie_addr_lsb_i && !amo_in_progress_i;
 
-// async interrupt qualification
-// M-mode interrupts: MEIP(11), MSIP(3), MTIP(7)
-// S-mode interrupts: SEIP(9), SSIP(1), STIP(5)
-logic external_valid;
-logic software_valid;
-logic timer_valid;
-logic s_external_valid;
-logic s_software_valid;
-logic s_timer_valid;
-logic async_valid;
+assign exception_from_ie_o = misalign_load | misalign_store | misalign_amo;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ID-stage exception gating (only fire on valid, non-illegal instructions)
+// ═══════════════════════════════════════════════════════════════════════════
+wire ecall_valid   = ecall_raw_i  & ~illegal_insn_i & insn_valid_id_i;
+wire ebreak_valid  = ebreak_raw_i & ~debug_ebreak_i & ~illegal_insn_i & insn_valid_id_i;
+wire illegal_valid = illegal_insn_i & insn_valid_id_i;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Page fault separation (load vs store)
+// ═══════════════════════════════════════════════════════════════════════════
+wire load_page_fault  = data_page_fault_i & ~data_fault_is_store_i;
+wire store_page_fault = data_page_fault_i &  data_fault_is_store_i;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PC for exception: instruction faults use saved fault address
+// ═══════════════════════════════════════════════════════════════════════════
+wire [31:0] pc_for_id = insn_page_fault_i ? insn_fault_addr_i : pc_id_i;
+
+// Page fault address: data fault has priority over instruction fault
+wire [31:0] page_fault_addr = data_page_fault_i ? data_fault_addr_i : insn_fault_addr_i;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Async interrupt qualification
+// ═══════════════════════════════════════════════════════════════════════════
 // M-mode interrupt pending & enabled
-assign external_valid = ip_i[11] & ie_i[11];
-assign software_valid = ip_i[3] & ie_i[3];
-assign timer_valid    = ip_i[7] & ie_i[7];
-
+wire external_valid   = ip_i[11] & ie_i[11];
+wire software_valid   = ip_i[3]  & ie_i[3];
+wire timer_valid      = ip_i[7]  & ie_i[7];
 // S-mode interrupt pending & enabled
-assign s_external_valid = ip_i[9] & ie_i[9];
-assign s_software_valid = ip_i[1] & ie_i[1];
-assign s_timer_valid    = ip_i[5] & ie_i[5];
+wire s_external_valid = ip_i[9]  & ie_i[9];
+wire s_software_valid = ip_i[1]  & ie_i[1];
+wire s_timer_valid    = ip_i[5]  & ie_i[5];
 
-// Global interrupt enable:
-// - M-mode interrupts taken when priv < M, or priv==M && MIE
-// - S-mode interrupts taken when priv < S, or priv==S && SIE
-logic m_ie_global;
-logic s_ie_global;
-assign m_ie_global = (priv_i < 2'b11) || status_i[3];  // MIE
-assign s_ie_global = (priv_i < 2'b01) || (priv_i == 2'b01 && status_i[1]);  // SIE
+// Global interrupt enable
+wire m_ie_global = (priv_i < 2'b11) || status_i[3];
+wire s_ie_global = (priv_i < 2'b01) || (priv_i == 2'b01 && status_i[1]);
 
-logic m_async_valid;
-logic s_async_valid;
-assign m_async_valid = (external_valid | software_valid | timer_valid) & m_ie_global;
-assign s_async_valid = (s_external_valid | s_software_valid | s_timer_valid) & s_ie_global;
-assign async_valid   = m_async_valid | s_async_valid;
+wire m_async_valid = (external_valid | software_valid | timer_valid) & m_ie_global;
+wire s_async_valid = (s_external_valid | s_software_valid | s_timer_valid) & s_ie_global;
+wire async_valid   = m_async_valid | s_async_valid;
 
-// sync exceptions (always taken, independent of interrupt enables)
-logic sync_exception;
-assign sync_exception = misalign_load_i | misalign_store_i | misalign_amo_i |
-                         ecall_i | ebreak_i | illegal_insn_i |
-                         insn_page_fault_i | load_page_fault_i | store_page_fault_i;
+// Sync exception aggregate
+wire sync_exception = misalign_load | misalign_store | misalign_amo |
+                      ecall_valid | ebreak_valid | illegal_valid |
+                      insn_page_fault_i | load_page_fault | store_page_fault;
 
 // Ecall cause depends on current privilege level
 logic [7:0] ecall_cause;
 always_comb begin
-  case (priv_i)
-    2'b00:   ecall_cause = 8'd8;   // ecall from U-mode
-    2'b01:   ecall_cause = 8'd9;   // ecall from S-mode
-    default: ecall_cause = 8'd11;  // ecall from M-mode
-  endcase
+    case (priv_i)
+        2'b00:   ecall_cause = 8'd8;
+        2'b01:   ecall_cause = 8'd9;
+        default: ecall_cause = 8'd11;
+    endcase
 end
 
-// priority: IE exceptions (older) > IF/ID exceptions (younger) > interrupts
-// IE stage: data page faults, misalign (from executing instruction)
-// IF/ID stage: insn page fault (registered), illegal, ecall, ebreak
+// ═══════════════════════════════════════════════════════════════════════════
+// Exception/interrupt priority and cause/epc/mtval selection
+// ═══════════════════════════════════════════════════════════════════════════
+// Priority: IE exceptions (older) > IF/ID exceptions > async interrupts
+logic [7:0]  cause_code;
+logic        is_interrupt;
+logic [31:0] epc_out;
+logic [31:0] mtval_out;
+
 always_comb begin
-  if (load_page_fault_i) begin
-    cause_code   = 8'd13;  // load page fault
-    epc_out      = pc_ie_i;
-    mtval_out    = page_fault_addr_i;
-    is_interrupt = 1'b0;
-  end else if (store_page_fault_i) begin
-    cause_code   = 8'd15;  // store/AMO page fault
-    epc_out      = pc_ie_i;
-    mtval_out    = page_fault_addr_i;
-    is_interrupt = 1'b0;
-  end else if (misalign_load_i) begin
-    cause_code   = 8'd4;
-    epc_out      = pc_ie_i;
-    mtval_out    = fault_addr_i;
-    is_interrupt = 1'b0;
-  end else if (misalign_store_i || misalign_amo_i) begin
-    cause_code   = 8'd6;  // store/AMO address misaligned
-    epc_out      = pc_ie_i;
-    mtval_out    = fault_addr_i;
-    is_interrupt = 1'b0;
-  end else if (insn_page_fault_i) begin
-    cause_code   = 8'd12;  // instruction page fault
-    epc_out      = pc_i;
-    mtval_out    = page_fault_addr_i;
-    is_interrupt = 1'b0;
-  end else if (illegal_insn_i) begin
-    cause_code   = 8'd2;  // illegal instruction
-    epc_out      = pc_i;
-    mtval_out    = 32'h0;
-    is_interrupt = 1'b0;
-  end else if (ecall_i) begin
-    cause_code   = ecall_cause;
-    epc_out      = pc_i;
-    mtval_out    = 32'h0;
-    is_interrupt = 1'b0;
-  end else if (ebreak_i) begin
-    cause_code   = 8'd3;
-    epc_out      = pc_i;
-    mtval_out    = pc_i;
-    is_interrupt = 1'b0;
-  end else if (external_valid && m_ie_global) begin
-    cause_code   = 8'd11;
-    epc_out      = pc_i;
-    mtval_out    = 32'h0;
-    is_interrupt = 1'b1;
-  end else if (software_valid && m_ie_global) begin
-    cause_code   = 8'd3;
-    epc_out      = pc_i;
-    mtval_out    = 32'h0;
-    is_interrupt = 1'b1;
-  end else if (timer_valid && m_ie_global) begin
-    cause_code   = 8'd7;
-    epc_out      = pc_i;
-    mtval_out    = 32'h0;
-    is_interrupt = 1'b1;
-  end else if (s_external_valid && s_ie_global) begin
-    cause_code   = 8'd9;
-    epc_out      = pc_i;
-    mtval_out    = 32'h0;
-    is_interrupt = 1'b1;
-  end else if (s_software_valid && s_ie_global) begin
-    cause_code   = 8'd1;
-    epc_out      = pc_i;
-    mtval_out    = 32'h0;
-    is_interrupt = 1'b1;
-  end else if (s_timer_valid && s_ie_global) begin
-    cause_code   = 8'd5;
-    epc_out      = pc_i;
-    mtval_out    = 32'h0;
-    is_interrupt = 1'b1;
-  end else begin
-    cause_code   = 8'd0;
-    epc_out      = pc_i;
-    mtval_out    = 32'h0;
-    is_interrupt = 1'b0;
-  end
+    if (load_page_fault) begin
+        cause_code = 8'd13; epc_out = pc_ie_i; mtval_out = page_fault_addr; is_interrupt = 1'b0;
+    end else if (store_page_fault) begin
+        cause_code = 8'd15; epc_out = pc_ie_i; mtval_out = page_fault_addr; is_interrupt = 1'b0;
+    end else if (misalign_load) begin
+        cause_code = 8'd4;  epc_out = pc_ie_i; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
+    end else if (misalign_store || misalign_amo) begin
+        cause_code = 8'd6;  epc_out = pc_ie_i; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
+    end else if (insn_page_fault_i) begin
+        cause_code = 8'd12; epc_out = pc_for_id; mtval_out = page_fault_addr; is_interrupt = 1'b0;
+    end else if (illegal_valid) begin
+        cause_code = 8'd2;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
+    end else if (ecall_valid) begin
+        cause_code = ecall_cause; epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
+    end else if (ebreak_valid) begin
+        cause_code = 8'd3;  epc_out = pc_for_id; mtval_out = pc_for_id; is_interrupt = 1'b0;
+    end else if (external_valid && m_ie_global) begin
+        cause_code = 8'd11; epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+    end else if (software_valid && m_ie_global) begin
+        cause_code = 8'd3;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+    end else if (timer_valid && m_ie_global) begin
+        cause_code = 8'd7;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+    end else if (s_external_valid && s_ie_global) begin
+        cause_code = 8'd9;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+    end else if (s_software_valid && s_ie_global) begin
+        cause_code = 8'd1;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+    end else if (s_timer_valid && s_ie_global) begin
+        cause_code = 8'd5;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+    end else begin
+        cause_code = 8'd0;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
+    end
 end
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Outputs
+// ═══════════════════════════════════════════════════════════════════════════
 assign trap_valid_o = sync_exception | async_valid;
-assign epc_o    = epc_out;
-assign ecause_o = {is_interrupt ? 24'h800000 : 24'h0, cause_code};
-assign mtval_o  = mtval_out;
+assign epc_o        = epc_out;
+assign ecause_o     = {is_interrupt ? 24'h800000 : 24'h0, cause_code};
+assign mtval_o      = mtval_out;
 
-// ── Trap delegation ──────────────────────────────────────────
-// Delegate to S-mode when: priv < M, and the cause bit is set in medeleg/mideleg
-// M-mode traps are never delegated.
+// ── Trap delegation ─────────────────────────────────────────────────────
 logic delegate_to_s;
 always_comb begin
-  if (priv_i == 2'b11) begin
-    // Traps from M-mode always go to M-mode
-    delegate_to_s = 1'b0;
-  end else if (is_interrupt) begin
-    delegate_to_s = mideleg_i[cause_code[4:0]];
-  end else begin
-    delegate_to_s = medeleg_i[cause_code[4:0]];
-  end
+    if (priv_i == 2'b11)
+        delegate_to_s = 1'b0;
+    else if (is_interrupt)
+        delegate_to_s = mideleg_i[cause_code[4:0]];
+    else
+        delegate_to_s = medeleg_i[cause_code[4:0]];
 end
-
 assign trap_to_s_o = delegate_to_s;
 
-// ── Handler address ──────────────────────────────────────────
-// vec_i is already selected (mtvec or stvec) by CSR unit based on trap_to_s
+// ── Handler address ─────────────────────────────────────────────────────
 wire [31:0] base_addr = {vec_i[31:2], 2'b00};
 assign handler_addr_o = (vec_i[0] && is_interrupt) ? (base_addr + {24'b0, cause_code, 2'b00}) : base_addr;
 
-assign interrupt_src_o = {20'd0,ext_itr_i,3'b000,timer_itr_i,3'b000,soft_itr_i,3'b000};
+assign interrupt_src_o = {20'd0, ext_itr_i, 3'b000, timer_itr_i, 3'b000, soft_itr_i, 3'b000};
 
 endmodule

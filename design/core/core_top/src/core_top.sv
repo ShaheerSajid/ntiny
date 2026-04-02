@@ -219,9 +219,7 @@ onebit_sig_e c2a_write;
 logic [31:0] c2a_writedata;
 
 // Misaligned access detection (IE stage)
-logic misalign_load_ie;
-logic misalign_store_ie;
-logic misalign_amo_ie;
+// misalign detection moved into interrupt_ctrl
 logic exception_from_ie;
 ////////////////////////////////debug logic//////////////////////////
 logic [31:0] dpc;
@@ -408,18 +406,7 @@ privilege_unit privilege_unit_inst (
     .plic_complete_o    (plic_complete_o)
 );
 
-// Misaligned access detection in IE stage
-wire [1:0] mem_addr_lsb = alu_result[1:0];
-assign misalign_load_ie = (ctrl_bus_ie.mem_op == READ) && (
-    (ctrl_bus_ie.load_store_width == HALF && mem_addr_lsb[0]) ||
-    (ctrl_bus_ie.load_store_width == WORD && |mem_addr_lsb)
-);
-assign misalign_store_ie = (ctrl_bus_ie.mem_op == WRITE) && (
-    (ctrl_bus_ie.load_store_width == HALF && mem_addr_lsb[0]) ||
-    (ctrl_bus_ie.load_store_width == WORD && |mem_addr_lsb)
-);
-assign misalign_amo_ie = (ctrl_bus_ie.amo_op != NO_AMO_OP) && |mem_addr_lsb && !amo_in_progress;
-assign exception_from_ie = misalign_load_ie | misalign_store_ie | misalign_amo_ie;
+// exception_from_ie now driven by interrupt_ctrl (misalign detection moved there)
 
 // Do NOT gate branch_taken with insn_valid_id: after a trap, c_controller delivers
 // the first mtvec instruction into ID on the very next cycle (N+1), but insn_valid_id
@@ -653,44 +640,52 @@ imm_gen imm_gen_inst
 //interrupt and exception controller
 interrupt_ctrl interrupt_ctrl_inst
 (
-	.clk_i            (clk_i),
-  .rst_i            (reset_i),
-  //interrupt sources
-  .ext_itr_i        (ext_itr_i),
-  .timer_itr_i      (timer_itr_i),
-  .soft_itr_i       (soft_itr_i),
-  //from csr
-  .ip_i             (ip_csr),
-  .ie_i             (ie_csr),
-  .vec_i            (vec_csr),
-  .status_i         (status_csr),
-  .pc_i             (mmu_i_fault_r ? mmu_i_fault_addr_r : pc_id),
-  // privilege and delegation
-  .priv_i           (priv_level),
-  .medeleg_i        (medeleg),
-  .mideleg_i        (mideleg),
-  // synchronous exceptions
-  .ecall_i          (ctrl_bus_if_id.ecall & ~illegal_insn_id & insn_valid_id),
-  .ebreak_i         (ctrl_bus_if_id.ebreak & ~dcsr[15] & ~illegal_insn_id & insn_valid_id),
-  .illegal_insn_i   (illegal_insn_id & insn_valid_id),
-  .misalign_load_i  (misalign_load_ie),
-  .misalign_store_i (misalign_store_ie),
-  .misalign_amo_i   (misalign_amo_ie),
-  // page faults from MMU (insn fault registered to break combinational loop)
+	.clk_i              (clk_i),
+  .rst_i              (reset_i),
+  // Async interrupt sources
+  .ext_itr_i          (ext_itr_i),
+  .timer_itr_i        (timer_itr_i),
+  .soft_itr_i         (soft_itr_i),
+  // CSR state
+  .ip_i               (ip_csr),
+  .ie_i               (ie_csr),
+  .vec_i              (vec_csr),
+  .status_i           (status_csr),
+  // Program counters
+  .pc_id_i            (pc_id),
+  .pc_ie_i            (pc_ie),
+  // Privilege and delegation
+  .priv_i             (priv_level),
+  .medeleg_i          (medeleg),
+  .mideleg_i          (mideleg),
+  // ID-stage exception sources (raw — gating done inside)
+  .ecall_raw_i        (ctrl_bus_if_id.ecall),
+  .ebreak_raw_i       (ctrl_bus_if_id.ebreak),
+  .illegal_insn_i     (illegal_insn_id),
+  .insn_valid_id_i    (insn_valid_id),
+  .debug_ebreak_i     (dcsr[15]),
+  // IE-stage signals for misalign detection (done inside)
+  .ie_mem_op_i        (ctrl_bus_ie.mem_op),
+  .ie_ls_width_i      (ctrl_bus_ie.load_store_width),
+  .ie_amo_op_i        (ctrl_bus_ie.amo_op),
+  .ie_addr_lsb_i      (alu_result[1:0]),
+  .ie_fault_addr_i    (alu_result),
+  .amo_in_progress_i  (amo_in_progress),
+  // MMU page faults
   .insn_page_fault_i  (mmu_i_fault_r),
-  .load_page_fault_i  (mmu_d_fault & ~d_store_for_mmu),
-  .store_page_fault_i (mmu_d_fault & d_store_for_mmu),
-  .page_fault_addr_i  (mmu_d_fault ? mmu_d_fault_addr : mmu_i_fault_addr_r),
-  .pc_ie_i          (pc_ie),
-  .fault_addr_i     (alu_result),
-  //to csr and core
-  .trap_valid_o     (trap_true),
-  .trap_to_s_o      (trap_to_s),
-  .handler_addr_o   (handler_addr),
-  .ecause_o         (ecause_csr),
-  .epc_o            (epc_csr),
-  .mtval_o          (mtval_csr),
-  .interrupt_src_o  (interrupt_src)
+  .insn_fault_addr_i  (mmu_i_fault_addr_r),
+  .data_page_fault_i  (mmu_d_fault),
+  .data_fault_is_store_i(d_store_for_mmu),
+  .data_fault_addr_i  (mmu_d_fault_addr),
+  // Outputs
+  .trap_valid_o       (trap_true),
+  .trap_to_s_o        (trap_to_s),
+  .handler_addr_o     (handler_addr),
+  .ecause_o           (ecause_csr),
+  .epc_o              (epc_csr),
+  .mtval_o            (mtval_csr),
+  .interrupt_src_o    (interrupt_src),
+  .exception_from_ie_o(exception_from_ie)
 );
 
 // ============================================================
