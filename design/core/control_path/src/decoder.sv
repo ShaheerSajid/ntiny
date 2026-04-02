@@ -242,6 +242,11 @@ begin
                             default:  amo_op = NO_AMO_OP;
                         endcase
                     end
+        // --- FENCE / FENCE.I ---
+        MISC_MEM:   begin
+                        // FENCE (funct3=000): memory ordering — NOP on single-core write-through
+                        // FENCE.I (funct3=001): instruction cache invalidation
+                    end
         // --- Zicsr: CSR Access ---
         CSR     :   begin
                         imm_sel = CSR_imm;
@@ -436,6 +441,7 @@ assign ctrl_bus_o.mret = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'h302);
 assign ctrl_bus_o.sret = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'h102);
 // SFENCE.VMA: funct7=0001001 (bits[31:25]), funct3=000 (SYSTEM), opcode=0x73
 assign ctrl_bus_o.sfence_vma = onebit_sig_e'(csr_op == SYSTEM && instruction_i[31:25] == 7'b0001001);
+assign ctrl_bus_o.fence_i = onebit_sig_e'(instruction_i[6:0] == 7'b0001111 && instruction_i[14:12] == 3'b001);
 assign ctrl_bus_o.predicted_taken = FALSE; // BPU: static not-taken default (future BTB overrides in core_top)
 
 endmodule

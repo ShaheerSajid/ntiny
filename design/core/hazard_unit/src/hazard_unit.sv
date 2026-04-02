@@ -17,6 +17,7 @@ module hazard_unit (
     // ── External stall sources ──────────────────────────────────────────
     input  onebit_sig_e alu_stall_i,       // MUL/DIV in progress
     input  onebit_sig_e amo_stall_i,       // atomic memory op FSM
+    input  logic        icache_stall_i,     // I-cache fill in progress
     input  onebit_sig_e mmu_i_stall_i,     // instruction TLB / PTW
     input  onebit_sig_e mmu_d_stall_i,     // data TLB / PTW
     input  logic        dmem_req_i,        // data-bus request pending
@@ -86,7 +87,8 @@ assign csr_ret_hazard_o = ((id_mret_i && !illegal_mret_i) ||
 
 assign if_id_stall_o = onebit_sig_e'(ie_stall_o | insert_bubble_i |
                                       refetch_after_trap_o | halted_i |
-                                      mmu_i_stall_i | csr_ret_hazard_o);
+                                      icache_stall_i | mmu_i_stall_i |
+                                      csr_ret_hazard_o);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Flush logic (combinational)

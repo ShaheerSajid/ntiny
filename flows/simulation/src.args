@@ -12,6 +12,8 @@
 ../../design/interconnect/src/addr_decoder.sv
 ../../design/interconnect/src/periph_bridge.sv
 ../../design/memory/src/ram_dp.sv
+../../design/memory/src/icache.sv
+../../design/memory/src/dcache.sv
 ../../design/core/alu/src/alu.sv
 ../../design/core/fpu/PakFPU/src/fp_pkg.sv
 ../../design/core/fpu/PakFPU/src/lzc.sv

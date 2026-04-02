@@ -141,37 +141,109 @@ module soc_top
         .soft_chipsel_o (soft_chipsel)
     );
 
-    // ── Unified Dual-Port RAM ───────────────────────────────
-    // Port A: instruction fetch (read-only)
-    // Port B: data access (read/write)
-    logic [31:0] ram_pb_rdata;
-    logic        ram_pb_rvalid;
-    logic        ram_pb_ready;
+    // ── L1 Caches + Unified Dual-Port RAM ─────────────────────
+    // I-Cache: imem_bus → icache → RAM Port A
+    // D-Cache: dmem_bus (ram_sel) → dcache → RAM Port B
+    // Peripherals bypass D-cache entirely.
+    logic fence_i_wire;
 
+    // I-Cache ↔ RAM Port A wires
+    logic        ic_mem_req;
+    logic [31:0] ic_mem_addr;
+    logic [31:0] ic_mem_rdata;
+    logic        ic_mem_rvalid;
+    logic        ic_mem_ready;
+
+    icache #(
+        .ADDR_WIDTH  (32),
+        .DATA_WIDTH  (32),
+        .CACHE_BYTES (4096)
+    ) icache_inst (
+        .clk_i        (clk_i),
+        .reset_i      (reset_i),
+        .flush_i      (fence_i_wire),
+        // CPU-facing (from core imem_port)
+        .cpu_req_i    (imem_bus.req),
+        .cpu_addr_i   (imem_bus.addr),
+        .cpu_rdata_o  (imem_bus.rdata),
+        .cpu_rvalid_o (imem_bus.rvalid),
+        .cpu_ready_o  (imem_bus.ready),
+        // Memory-facing (to RAM Port A)
+        .mem_req_o    (ic_mem_req),
+        .mem_addr_o   (ic_mem_addr),
+        .mem_rdata_i  (ic_mem_rdata),
+        .mem_rvalid_i (ic_mem_rvalid),
+        .mem_ready_i  (ic_mem_ready)
+    );
+
+    // D-Cache ↔ RAM Port B wires
+    logic        dc_mem_req;
+    logic        dc_mem_we;
+    logic [31:0] dc_mem_addr;
+    logic [3:0]  dc_mem_be;
+    logic [31:0] dc_mem_wdata;
+    logic [31:0] dc_mem_rdata;
+    logic        dc_mem_rvalid;
+    logic        dc_mem_ready;
+
+    // D-Cache CPU-side outputs
+    logic [31:0] dc_cpu_rdata;
+    logic        dc_cpu_rvalid;
+    logic        dc_cpu_ready;
+
+    dcache #(
+        .ADDR_WIDTH  (32),
+        .DATA_WIDTH  (32),
+        .CACHE_BYTES (4096)
+    ) dcache_inst (
+        .clk_i        (clk_i),
+        .reset_i      (reset_i),
+        .flush_i      (fence_i_wire),
+        // CPU-facing (from core dmem_port, gated by ram_sel)
+        .cpu_req_i    (dmem_bus.req & ram_sel),
+        .cpu_we_i     (dmem_bus.we),
+        .cpu_addr_i   (dmem_bus.addr),
+        .cpu_be_i     (dmem_bus.be),
+        .cpu_wdata_i  (dmem_bus.wdata),
+        .cpu_rdata_o  (dc_cpu_rdata),
+        .cpu_rvalid_o (dc_cpu_rvalid),
+        .cpu_ready_o  (dc_cpu_ready),
+        // Memory-facing (to RAM Port B)
+        .mem_req_o    (dc_mem_req),
+        .mem_we_o     (dc_mem_we),
+        .mem_addr_o   (dc_mem_addr),
+        .mem_be_o     (dc_mem_be),
+        .mem_wdata_o  (dc_mem_wdata),
+        .mem_rdata_i  (dc_mem_rdata),
+        .mem_rvalid_i (dc_mem_rvalid),
+        .mem_ready_i  (dc_mem_ready)
+    );
+
+    // Unified Dual-Port RAM
     ram_dp #(
         .DEPTH    (`RAM_DEPTH),
         .HEX_FILE ("ram.hex")
     ) ram_inst (
         .clk_i       (clk_i),
-        // Port A — instruction fetch
-        .pa_req_i    (imem_bus.req),
-        .pa_addr_i   (imem_bus.addr),
-        .pa_rdata_o  (imem_bus.rdata),
-        .pa_rvalid_o (imem_bus.rvalid),
-        .pa_ready_o  (imem_bus.ready),
-        // Port B — data access
-        .pb_req_i    (dmem_bus.req & ram_sel),
-        .pb_we_i     (dmem_bus.we),
-        .pb_addr_i   (dmem_bus.addr),
-        .pb_be_i     (dmem_bus.be),
-        .pb_wdata_i  (dmem_bus.wdata),
-        .pb_rdata_o  (ram_pb_rdata),
-        .pb_rvalid_o (ram_pb_rvalid),
-        .pb_ready_o  (ram_pb_ready)
+        // Port A — I-Cache fills (read-only)
+        .pa_req_i    (ic_mem_req),
+        .pa_addr_i   (ic_mem_addr),
+        .pa_rdata_o  (ic_mem_rdata),
+        .pa_rvalid_o (ic_mem_rvalid),
+        .pa_ready_o  (ic_mem_ready),
+        // Port B — D-Cache fills + write-through
+        .pb_req_i    (dc_mem_req),
+        .pb_we_i     (dc_mem_we),
+        .pb_addr_i   (dc_mem_addr),
+        .pb_be_i     (dc_mem_be),
+        .pb_wdata_i  (dc_mem_wdata),
+        .pb_rdata_o  (dc_mem_rdata),
+        .pb_rvalid_o (dc_mem_rvalid),
+        .pb_ready_o  (dc_mem_ready)
     );
 
     // ── D-port read data mux ────────────────────────────────
-    // Select read data from RAM or peripheral bridge
+    // Select read data from D-Cache or peripheral bridge
     logic ram_sel_r;
     always_ff @(posedge clk_i or posedge reset_i) begin
         if (reset_i)
@@ -180,9 +252,9 @@ module soc_top
             ram_sel_r <= ram_sel;
     end
 
-    assign dmem_bus.rdata  = ram_sel_r ? ram_pb_rdata  : periph_rdata;
-    assign dmem_bus.rvalid = ram_sel_r ? ram_pb_rvalid : periph_rvalid;
-    assign dmem_bus.ready  = ram_sel   ? ram_pb_ready  : periph_ready;
+    assign dmem_bus.rdata  = ram_sel_r ? dc_cpu_rdata  : periph_rdata;
+    assign dmem_bus.rvalid = ram_sel_r ? dc_cpu_rvalid : periph_rvalid;
+    assign dmem_bus.ready  = ram_sel   ? dc_cpu_ready  : periph_ready;
 
     // ── Debug signals ───────────────────────────────────────
     onebit_sig_e ar_en, ar_wr;
@@ -242,7 +314,8 @@ module soc_top
         .timer_itr_i    (timer_interrupt),
         .soft_itr_i     (soft_intr),
         .plic_claim_o   (plic_claim),
-        .plic_complete_o(plic_complete)
+        .plic_complete_o(plic_complete),
+        .fence_i_o      (fence_i_wire)
     );
 
     // ── Debug module ────────────────────────────────────────

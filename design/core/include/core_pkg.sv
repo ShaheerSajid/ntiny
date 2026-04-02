@@ -22,6 +22,7 @@ typedef enum logic [`OPCODE_LENGTH-1:0] {
 	FNMADD	= 7'b1001111,
 	F_OP	= 7'b1010011,
 	AMO		= 7'b0101111,
+	MISC_MEM= 7'b0001111,   // FENCE / FENCE.I
 	NO_INS	= 7'b0000000
 } rv32_opcodes_e;
 
@@ -314,6 +315,7 @@ typedef struct {
   onebit_sig_e mret;              // MRET instruction
   onebit_sig_e sret;              // SRET instruction
   onebit_sig_e sfence_vma;        // SFENCE.VMA instruction
+  onebit_sig_e fence_i;           // FENCE.I instruction (flush I-cache)
   onebit_sig_e predicted_taken;   // BPU: was this branch predicted taken?
 } ctrl_bus_e;
 
@@ -353,6 +355,7 @@ function automatic ctrl_bus_e CTRL_BUS_NOP();
 	CTRL_BUS_NOP.mret            = FALSE;
 	CTRL_BUS_NOP.sret            = FALSE;
 	CTRL_BUS_NOP.sfence_vma      = FALSE;
+	CTRL_BUS_NOP.fence_i         = FALSE;
 	CTRL_BUS_NOP.predicted_taken = FALSE;
 endfunction
 

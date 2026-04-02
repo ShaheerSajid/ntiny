@@ -41,7 +41,10 @@ module core_top
 
 
   output plic_claim_o,
-  output plic_complete_o
+  output plic_complete_o,
+
+  // Cache control
+  output logic fence_i_o              // FENCE.I executed — flush I-cache (and D-cache for coherency)
 );
 
 
@@ -283,6 +286,7 @@ hazard_unit hazard_unit_inst (
     // External stall sources
     .alu_stall_i        (alu_stall),
     .amo_stall_i        (amo_stall),
+    .icache_stall_i     (1'b0),          // transparent cache: no stall
     .mmu_i_stall_i      (mmu_i_stall),
     .mmu_d_stall_i      (mmu_d_stall),
     .dmem_req_i         (dmem_port.req),
@@ -368,6 +372,9 @@ privilege_unit privilege_unit_inst (
 
 // exception_from_ie now driven by interrupt_ctrl (misalign detection moved there)
 
+// ── FENCE.I: flush I-cache + D-cache when instruction reaches IE ─
+assign fence_i_o = (ctrl_bus_ie.fence_i == TRUE) && !stale_ie;
+
 // ── BPU: mispredict detection ──────────────────────────────────
 // Mispredict fires when branch resolution disagrees with prediction.
 // Static not-taken: predicted_taken=0, so mispredict = branch_taken.
@@ -401,6 +408,7 @@ end
 // ============================================================
 // FETCH STAGE
 // ============================================================
+
 `ifdef BOOT
 program_counter #(.DEFAULT(32'h00001000)) program_counter_inst
 `else
@@ -440,7 +448,7 @@ c_controller c_controller_inst
 	.redirect_i             (c_redirect),
 	.redirect_addr_i        (pc_in),
 	.interrupt_i            (interrupt_valid),
-	.instruction_i          (reset_i ? 0 : imem_port.rdata),
+	.instruction_i          (reset_i ? 32'b0 : imem_port.rdata),
 
 	.instruction_addr_o     (pc_id),
 	.instruction_o          (instruction_pipe),
