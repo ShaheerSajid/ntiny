@@ -397,32 +397,49 @@ hazard_unit hazard_unit_inst (
 );
 
 assign interrupt_valid = onebit_sig_e'(trap_true);
-assign ret_valid = onebit_sig_e'(((ctrl_bus_if_id.mret && !illegal_mret) ||
-                                  (ctrl_bus_if_id.sret && !illegal_sret)) && insn_valid_id);
 assign debug_valid =  onebit_sig_e'(resumeack_o);
 
-// ── Early MRET/SRET commit from ID ──────────────────────────────
-// Per RISC-V spec, xRET atomically updates priv + xSTATUS + PC. If the
-// instruction fetch at the return target triggers a page fault BEFORE xRET
-// reaches IE, the trap must be taken from the post-xRET state (new privilege,
-// updated mstatus). We commit the CSR side effects on the first cycle of
-// ret_valid using a one-shot flag to prevent re-firing while stalled.
+// ── Privilege Unit ──────────────────────────────────────────────────────
+// Centralised privilege checks, xRET fire/one-shot, mmu_priv, PLIC protocol.
+wire illegal_mret, illegal_sret, illegal_insn_id;
+wire ret_fire, sret_fire;
 logic ret_side_effects_done;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i)
-        ret_side_effects_done <= 1'b0;
-    else if (interrupt_valid)
-        ret_side_effects_done <= 1'b0;
-    else if (ret_valid && !csr_ret_hazard && !ret_side_effects_done)
-        ret_side_effects_done <= 1'b1;
-    else if (!ret_valid)
-        ret_side_effects_done <= 1'b0;
-end
+wire [1:0] mmu_priv;
 
-wire ret_fire  = ctrl_bus_if_id.mret && insn_valid_id && !illegal_mret &&
-                 !ret_side_effects_done && !csr_ret_hazard && !interrupt_valid;
-wire sret_fire = ctrl_bus_if_id.sret && insn_valid_id && !illegal_sret &&
-                 !ret_side_effects_done && !csr_ret_hazard && !interrupt_valid;
+privilege_unit privilege_unit_inst (
+    .clk_i              (clk_i),
+    .reset_i            (reset_i),
+    // Current privilege state
+    .priv_level_i       (priv_level),
+    .status_csr_i       (status_csr),
+    // Decoded instruction (ID stage)
+    .id_mret_i          (ctrl_bus_if_id.mret),
+    .id_sret_i          (ctrl_bus_if_id.sret),
+    .id_sfence_vma_i    (ctrl_bus_if_id.sfence_vma),
+    .id_csr_op_i        (ctrl_bus_if_id.csr_op),
+    .id_csr_addr_i      (ctrl_bus_if_id.csr_addr),
+    // Pipeline state
+    .insn_valid_id_i    (insn_valid_id),
+    .csr_ret_hazard_i   (csr_ret_hazard),
+    .interrupt_valid_i  (interrupt_valid),
+    // PLIC interface
+    .ext_itr_i          (ext_itr_i),
+    .trap_true_i        (trap_true),
+    // Illegal instruction outputs
+    .illegal_mret_o     (illegal_mret),
+    .illegal_sret_o     (illegal_sret),
+    .illegal_insn_id_o  (illegal_insn_id),
+    // Return instruction control
+    .ret_valid_o        (ret_valid),
+    .ret_fire_o         (ret_fire),
+    .sret_fire_o        (sret_fire),
+    .ret_side_effects_done_o(ret_side_effects_done),
+    // MMU privilege
+    .mmu_priv_o         (mmu_priv),
+    // PLIC
+    .plic_claim_o       (plic_claim_o),
+    .plic_complete_o    (plic_complete_o)
+);
 
 // Misaligned access detection in IE stage
 wire [1:0] mem_addr_lsb = alu_result[1:0];
@@ -434,47 +451,8 @@ assign misalign_store_ie = (ctrl_bus_ie.mem_op == WRITE) && (
     (ctrl_bus_ie.load_store_width == HALF && mem_addr_lsb[0]) ||
     (ctrl_bus_ie.load_store_width == WORD && |mem_addr_lsb)
 );
-// AMO instructions require word-aligned addresses (cause 6: store/AMO misaligned)
-// Only check on the entry cycle (AMO unit in IDLE): once the FSM is running, the
-// address is latched inside the AMO unit and alu_result becomes unreliable because
-// pipeline flush logic destroys the forwarding sources.
 assign misalign_amo_ie = (ctrl_bus_ie.amo_op != NO_AMO_OP) && |mem_addr_lsb && !amo_in_progress;
-
-// Privilege violation detection (ID stage, like ecall/ebreak)
-// CSR address[9:8] = minimum privilege level required
-logic [11:0] csr_addr_raw_id;
-assign csr_addr_raw_id = ctrl_bus_if_id.csr_addr;
-wire csr_access = (ctrl_bus_if_id.csr_op == WRITE_CSR) ||
-                   (ctrl_bus_if_id.csr_op == SET_CSR) ||
-                   (ctrl_bus_if_id.csr_op == CLEAR_CSR);
-wire illegal_csr_priv = csr_access && (priv_level < csr_addr_raw_id[9:8]);
-// MRET requires M-mode; SRET requires at least S-mode
-// Once ret_side_effects_done, the xRET has already committed its CSR side effects
-// from ID. Don't flag it as illegal due to the (now-updated) privilege level.
-wire illegal_mret = (ctrl_bus_if_id.mret == TRUE) && (priv_level != 2'b11) && !ret_side_effects_done;
-wire illegal_sret = (ctrl_bus_if_id.sret == TRUE) && (priv_level < 2'b01) && !ret_side_effects_done;
-// TVM enforcement: SATP access or SFENCE.VMA from S-mode when mstatus.TVM=1 → illegal insn
-wire tvm_active        = status_csr[20] && (priv_level == 2'b01);
-wire illegal_satp_tvm  = tvm_active && csr_access && (csr_addr_raw_id == 12'h180);
-wire illegal_sfence_tvm = tvm_active && (ctrl_bus_if_id.sfence_vma == TRUE);
-wire illegal_insn_id = illegal_csr_priv | illegal_mret | illegal_sret
-                     | illegal_satp_tvm | illegal_sfence_tvm;
 assign exception_from_ie = misalign_load_ie | misalign_store_ie | misalign_amo_ie;
-
-//plic drive logic
-logic from_plic;
-always_ff@(posedge clk_i or posedge reset_i)
-begin
-	if(reset_i)
-		from_plic <= 1'b0;
-	else if(plic_claim_o)
-		from_plic <= 1'b1;
-  else if(plic_complete_o)
-    from_plic <= 1'b0;
-end
-
-assign plic_complete_o = from_plic & ctrl_bus_if_id.mret & ~illegal_mret;
-assign plic_claim_o = ext_itr_i & trap_true;
 
 // Do NOT gate branch_taken with insn_valid_id: after a trap, c_controller delivers
 // the first mtvec instruction into ID on the very next cycle (N+1), but insn_valid_id
@@ -931,21 +909,7 @@ csr_unit csr_unit_inst
 );
 
 // ── Sv32 MMU ─────────────────────────────────────────────────
-// Use registered priv_level, with a combinational override for MRET/SRET.
-// On trap cycles (interrupt_valid), priv is still the old value but the handler
-// code is identity-mapped (VA==PA), so M-mode non-translation is correct.
-// On MRET/SRET cycles, the fetch address is the return target (mepc/sepc) which
-// is in the target privilege's address space. We must use the target privilege
-// for translation so the MMU resolves the correct physical address.
-// status_csr.MPP[12:11] gives the MRET target; status_csr.SPP[8] gives SRET target.
-wire [1:0] ret_target_priv = ctrl_bus_if_id.mret ? status_csr[12:11] :  // MRET: MPP
-                                                    {1'b0, status_csr[8]}; // SRET: SPP
-// Don't override during csr_ret_hazard: epc is stale, using S-mode privilege
-// would cause the MMU to translate a stale address and start a spurious PTW walk.
-// After ret_side_effects_done, priv_level is already the target privilege (the
-// MRET/SRET CSR side effects committed from ID), so use priv_level directly.
-wire [1:0] mmu_priv = (ret_valid && !csr_ret_hazard && !ret_side_effects_done) ? ret_target_priv : priv_level;
-
+// mmu_priv (instruction-side privilege with MRET/SRET override) driven by privilege_unit.
 mmu_sv32 mmu_inst (
   .clk_i          (clk_i),
   .reset_i        (reset_i),

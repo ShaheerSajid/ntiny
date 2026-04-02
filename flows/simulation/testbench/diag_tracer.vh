@@ -200,7 +200,7 @@ always @(posedge clk) begin
         $fwrite(diag_fd, "  PRIV: priv=%0d mmu_priv=%0d ret_tgt_priv=%0d csr_ret_haz=%0b | mstatus=%08h satp=%08h medeleg=%08h mideleg=%08h\n",
             `CORE.priv_level,
             `CORE.mmu_priv,
-            `CORE.ret_target_priv,
+            `CORE.privilege_unit_inst.ret_target_priv,
             `CORE.csr_ret_hazard,
             `CSR._MSTATUS,
             `CSR._SATP,
