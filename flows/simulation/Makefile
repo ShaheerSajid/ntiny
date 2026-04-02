@@ -202,7 +202,7 @@ RISCOF_ENV = $(RISCOF_DIR)/riscv-arch-test/riscv-test-suite/env
 RISCOF_VENV = $(HOME)/Software/riscof_env/bin/activate
 RISCOF_WORK = riscof_work
 
-# Build Verilator model for RISCOF (4MB RAM, no DV_TRACER)
+# Build Verilator model for RISCOF (16MB RAM, with DV_DIAG_TRACE)
 verilator_build_riscof:
 	verilator $(VERILATOR_COMMON) \
 	$(VERILATOR_RISCOF_DEFINES) \
@@ -273,6 +273,17 @@ riscof_run: clean verilator_build_riscof
 	@echo "--- Running RISCOF compliance tests ---"
 	cd $(RISCOF_DIR) && source $(RISCOF_VENV) && \
 	riscof run --config=config.ini \
+		--suite=$(realpath $(RISCOF_SUITE)) \
+		--env=$(realpath $(RISCOF_ENV)) \
+		--work-dir=$(realpath .)/$(RISCOF_WORK) || true
+	@$(MAKE) riscof_summary
+
+# Full FPU run + summary in one command
+.PHONY: riscof_fpu_run
+riscof_fpu_run: clean verilator_build_riscof_fpu
+	@echo "--- Running RISCOF F-extension compliance tests ---"
+	cd $(RISCOF_DIR) && source $(RISCOF_VENV) && \
+	riscof run --config=config_fpu.ini \
 		--suite=$(realpath $(RISCOF_SUITE)) \
 		--env=$(realpath $(RISCOF_ENV)) \
 		--work-dir=$(realpath .)/$(RISCOF_WORK) || true

@@ -228,39 +228,10 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     end
 end
 
-// Instruction valid flag for ID stage: low for 1 cycle after a trap redirect
-// when imem_port.rdata still contains stale data from the pre-trap fetch.
-// Prevents stale ecall/ebreak/branch from re-triggering after traps.
-//
-// Only traps produce a stale cycle: the trap handler address is loaded into
-// the PC, but the IF/ID register still holds the old instruction for 1 cycle.
-// Branches and returns do NOT produce stale cycles in this pipeline — the
-// fetch redirect is combinational, so the target instruction arrives in ID
-// on the very next cycle.
+// insn_valid_id, post_trap, stale_id — now driven by hazard_unit
 logic insn_valid_id;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i)
-        insn_valid_id <= 1'b0;
-    else if (interrupt_valid)
-        insn_valid_id <= 1'b0;
-    else if (!if_id_stall)
-        insn_valid_id <= 1'b1;
-end
-
-// Stale instruction tracking: when a trap fires, the instruction in ID is stale
-// and must not produce side effects (register writes, memory ops) as it flows
-// through IE/IMEM/IWB. Only set after trap, NOT after reset.
 logic stale_id, stale_ie, stale_imem, stale_iwb;
 logic post_trap;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i)
-        post_trap <= 1'b0;
-    else if (interrupt_valid)
-        post_trap <= 1'b1;
-    else if (!if_id_stall)
-        post_trap <= 1'b0;
-end
-assign stale_id = post_trap;
 
 // AMO unit signals
 logic [31:0] amo_dbus_addr;
@@ -376,47 +347,56 @@ assign ar_done_o = ar_done_r;
 assign am_done_o = am_done_r;
 ////////////////////////////////////////////
 
-//stalls
-// CSR read-after-write hazard: mret/sret in ID reads epc, but preceding CSR write in IE hasn't committed yet
-wire csr_ret_hazard = ((ctrl_bus_if_id.mret && !illegal_mret) ||
-                       (ctrl_bus_if_id.sret && !illegal_sret)) &&
-                      ctrl_bus_ie.csr_op != NO_CSR_OP &&
-                      ((ctrl_bus_if_id.mret && ctrl_bus_ie.csr_addr == 12'h341) ||
-                       (ctrl_bus_if_id.sret && ctrl_bus_ie.csr_addr == 12'h141));
-
-// Refetch stall: when a trap fires during a stall (e.g. MMU page table walk),
-// imem_port.req=0 on the trap cycle so the fetch for handler_addr is never issued.
-// The following cycle the main PC has already advanced to handler_addr+4, skipping
-// the first vector table entry. Fix: insert 1 stall cycle to hold both PCs at
-// handler_addr and force-issue the fetch so the correct instruction arrives.
+// ── Hazard Unit ─────────────────────────────────────────────────────────
+// Centralised stall / flush / post-trap logic (was inline).
+wire csr_ret_hazard;
 logic refetch_after_trap;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i) refetch_after_trap <= 1'b0;
-    else         refetch_after_trap <= interrupt_valid & if_id_stall;
-end
 
-assign if_id_stall = onebit_sig_e'(ie_stall | insert_bubble | refetch_after_trap | (pstate == HALTED) | mmu_i_stall | csr_ret_hazard);
-wire dmem_busy = dmem_port.req & ~dmem_port.ready;
-assign ie_stall    = onebit_sig_e'(imem_stall | alu_stall | dmem_busy | amo_stall | mmu_d_stall);
-assign imem_stall  = onebit_sig_e'(iwb_stall);
-assign iwb_stall   = onebit_sig_e'(1'b0);
+hazard_unit hazard_unit_inst (
+    .clk_i              (clk_i),
+    .reset_i            (reset_i),
+    // External stall sources
+    .alu_stall_i        (alu_stall),
+    .amo_stall_i        (amo_stall),
+    .mmu_i_stall_i      (mmu_i_stall),
+    .mmu_d_stall_i      (mmu_d_stall),
+    .dmem_req_i         (dmem_port.req),
+    .dmem_ready_i       (dmem_port.ready),
+    .insert_bubble_i    (insert_bubble),
+    // Control flow
+    .interrupt_valid_i  (interrupt_valid),
+    .resumeack_i        (resumeack_o),
+    .exception_from_ie_i(exception_from_ie),
+    // Processor state
+    .halted_i           (pstate == HALTED),
+    // CSR ret hazard
+    .id_mret_i          (ctrl_bus_if_id.mret),
+    .id_sret_i          (ctrl_bus_if_id.sret),
+    .illegal_mret_i     (illegal_mret),
+    .illegal_sret_i     (illegal_sret),
+    .ie_csr_op_i        (ctrl_bus_ie.csr_op),
+    .ie_csr_addr_i      (ctrl_bus_ie.csr_addr),
+    // Stall outputs
+    .if_id_stall_o      (if_id_stall),
+    .ie_stall_o         (ie_stall),
+    .imem_stall_o       (imem_stall),
+    .iwb_stall_o        (iwb_stall),
+    // Flush outputs
+    .ie_flush_o         (ie_flush),
+    .imem_flush_o       (imem_flush),
+    .iwb_flush_o        (iwb_flush),
+    // Post-trap / stale
+    .post_trap_o        (post_trap),
+    .stale_id_o         (stale_id),
+    // Instruction validity
+    .insn_valid_id_o    (insn_valid_id),
+    // Fetch control
+    .refetch_after_trap_o(refetch_after_trap),
+    // CSR ret hazard
+    .csr_ret_hazard_o   (csr_ret_hazard)
+);
 
-//flushes
-always_comb begin
-  case({if_id_stall | resumeack_o | interrupt_valid, ie_stall, imem_stall, iwb_stall})
-    4'b1000: begin
-      ie_flush = TRUE;
-      // IE-stage exceptions (misalign) also flush IMEM to discard faulting instruction
-      imem_flush = onebit_sig_e'(exception_from_ie);
-      iwb_flush = FALSE;
-    end
-    4'b1100: {ie_flush,imem_flush,iwb_flush} = 3'b010;
-    4'b1110: {ie_flush,imem_flush,iwb_flush} = 3'b001;
-    default: {ie_flush,imem_flush,iwb_flush} = 3'b000;
-  endcase
-end
-
-assign interrupt_valid = onebit_sig_e'(trap_true);//FALSE;
+assign interrupt_valid = onebit_sig_e'(trap_true);
 assign ret_valid = onebit_sig_e'(((ctrl_bus_if_id.mret && !illegal_mret) ||
                                   (ctrl_bus_if_id.sret && !illegal_sret)) && insn_valid_id);
 assign debug_valid =  onebit_sig_e'(resumeack_o);

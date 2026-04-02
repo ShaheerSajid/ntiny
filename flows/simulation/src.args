@@ -46,6 +46,7 @@
 ../../design/uncore/uart/src/uart_top.sv
 ../../design/uncore/timer/src/timer_top.sv
 ../../design/core/stall_unit/src/stall_line.sv
+../../design/core/hazard_unit/src/hazard_unit.sv
 ../../design/core/branch/src/branch_comp.sv
 ../../design/core/program_counter/src/program_counter.sv
 ../../design/core/forwarding_unit/src/forwarding_logic.sv

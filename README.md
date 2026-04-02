@@ -1,6 +1,6 @@
-# ntiny — RV32IMFC SoC
+# ntiny — RV32IMAFCSU SoC
 
-A RISC-V SoC built around a single-issue, in-order 4-stage pipeline core. Taped out on TSMC 65nm as part of NUST's microprocessor project and successfully tested on a custom PCB.
+A RISC-V SoC built around a single-issue, in-order 4-stage pipeline core with Sv32 virtual memory. Taped out on TSMC 65nm as part of NUST's microprocessor project and successfully tested on a custom PCB.
 
 ## ISA Support
 
@@ -8,44 +8,61 @@ A RISC-V SoC built around a single-issue, in-order 4-stage pipeline core. Taped 
 |-----------|-------------|
 | RV32I | Base integer instruction set |
 | M | Hardware multiply/divide |
+| A | Atomic instructions (LR.W, SC.W, AMO.W) |
 | F | Single-precision floating point (PakFPU) |
 | C | Compressed (16-bit) instructions |
 | Zba | Address generation bit-manipulation |
 | Zbb | Basic bit-manipulation |
 | Zicsr | CSR instructions |
+| Zifencei | Instruction-fetch fence |
 
 ## SoC Features
 
-- 4-stage pipeline (Fetch, Decode, Execute, Memory/Writeback)
-- JTAG debug interface with halt/resume/single-step
-- M-mode privilege level with trap handling (ecall, ebreak, misaligned)
-- Boot ROM at 0x80000000 for JTAG-based boot flow
+- **Pipeline**: 4-stage in-order (IF/ID → IE → IMEM → IWB) with full forwarding
+- **Privilege modes**: M, S, and U with trap delegation (`medeleg`/`mideleg`)
+- **Virtual memory**: Sv32 MMU with ITLB, DTLB, hardware page table walker, and A/D bit handling
+- **Debug**: JTAG debug interface with halt/resume/single-step
+- **Interrupts**: PLIC + CLINT (machine timer, software interrupts)
 
 ### Peripherals
 
 | Peripheral | Base Address | Description |
 |------------|-------------|-------------|
-| UART | 0x00100000 | Serial TX/RX with configurable baud rate |
-| Timer | 0x00200000 | Prescaler, compare, interrupt |
-| GPIO | 0x00400000 | Bidirectional I/O with direction control |
-| PLIC | 0x00800000 | Platform-Level Interrupt Controller |
-| SPI | 0x01000000 | Xilinx-compatible SPI master |
-| I2C | 0x02000000 | I2C master (OpenCores-based) |
-| PWM | 0x02001000 | Dual-channel PWM with dead-time |
-| CRC | 0x00080000 | Hardware LFSR-based CRC |
+| CLINT | 0x02000000 | Core-local interruptor (mtime, mtimecmp, MSIP) |
+| PLIC | 0x0C000000 | Platform-level interrupt controller |
+| UART | 0x10000000 | Serial TX/RX with configurable baud rate |
+| SPI | 0x10010000 | SPI master |
+| I2C | 0x10020000 | I2C master (OpenCores-based) |
+| GPIO | 0x10030000 | Bidirectional I/O with direction control |
+| PWM | 0x10040000 | Dual-channel PWM with dead-time |
+| Timer | 0x10050000 | Prescaler, compare, interrupt |
+| CRC | 0x10060000 | Hardware LFSR-based CRC |
 
 ## Directory Structure
 
 ```
 design/
-  core/           Core pipeline (ALU, decoder, CSR, regfile, FPU, etc.)
+  core/           Core pipeline
+    alu/             ALU + MUL/DIV + Zba/Zbb
+    core_top/        Top-level pipeline integration
+    csr_unit/        CSR read/write/set/clear + privilege state
+    hazard_unit/     Centralised stall/flush/trap logic
+    mmu/             Sv32 MMU (ITLB, DTLB, PTW)
+    amo_unit/        Atomic memory operations (LR/SC/AMO)
+    fpu/             PakFPU single-precision floating point
+    c_ext/           RV32C compressed instruction decoder
+    forwarding_unit/ Data hazard forwarding
+    stall_unit/      Structural hazard detection (bubble insertion)
+    branch/          Branch comparator + target address
+    interrupt/       Trap/interrupt controller
   uncore/         Peripherals (UART, SPI, I2C, Timer, GPIO, PWM, PLIC, CRC)
-  interconnect/   Avalon bus interconnect
+  interconnect/   Bus interconnect + address decoder
+  memory/         Dual-port RAM
   debug/          JTAG debug module (DTM + DM)
   soc_top/        Top-level SoC integration
   common/         Shared headers: mem_map.svh, mem_map.h, mem_map.json
 flows/
-  simulation/     Verilator/Questa/Incisive simulation targets
+  simulation/     Verilator/Questa/Incisive simulation + Makefile
   synthesis/      Genus synthesis scripts
 software/
   mem_init/       Bare-metal test programs, linker scripts, firmware
@@ -82,15 +99,22 @@ make verilator_test
 ### RISCOF Compliance Tests
 
 ```bash
-# Run ISA compliance suite (RV32IMC_Zba_Zbb)
-make riscof
+cd flows/simulation
 
-# Run F-extension compliance suite
-make riscof_fpu
+# Full run + signature comparison summary
+make riscof_run
+
+# F-extension compliance suite + summary
+make riscof_fpu_run
+
+# Summary only (if riscof_work already exists)
+make riscof_summary
 
 # List tests without running
 make riscof_testlist
 ```
+
+Current status (non-PMP): **156/156 pass** (base), **495/495 pass** (with F-ext). PMP is not yet implemented.
 
 ### Other Simulators
 
@@ -111,40 +135,29 @@ python3 scripts/gen_mem_map.py --check  # verify files are up-to-date (CI)
 make -C flows/simulation gen_mem_map    # or via Makefile
 ```
 
-### Generated Files
-
-| File | Purpose |
-|------|---------|
-| `design/common/mem_map.svh` | SystemVerilog \`define header (RTL) |
-| `design/common/mem_map.h` | C header with `NTINY_` prefixed defines (firmware) |
-| `software/mem_init/tests/common/link.ld` | Linker script — default profile |
-| `verification/riscof/ntiny/env/link.ld` | Linker script — RISCOF profile |
-
 ### Profiles
 
-The JSON defines multiple memory profiles:
+| Profile | RAM Size | Description |
+|---------|----------|-------------|
+| **default** | 32 KB | Taped-out SoC (TSMC 65nm) |
+| **riscof** | 16 MB | RISCOF compliance (vm_sv32 page tables need large RAM) |
+| **linux** | 8 MB | Linux boot (kernel + rootfs) |
 
-- **default** — Taped-out SoC (IMEM 32KB @ 0x0, DMEM 8KB @ 0x10000, Boot ROM @ 0x80000000)
-- **riscof** — RISCOF compliance testing (IMEM 2MB @ 0x0, DMEM 32MB @ 0x10000000)
-
-The Makefile automatically reads RISCOF profile values from the JSON, so changing `mem_map.json` and re-running `gen_mem_map.py` is all that's needed to update the entire flow.
-
-Peripheral C headers (`design/uncore/*/sw/*.h`) include `mem_map.h` and use backward-compatible aliases, so existing firmware code continues to work without changes.
+All profiles use unified RAM at `0x80000000` (code + data in one region).
 
 ### Default Address Map
 
-| Region | Base | End | Size |
-|--------|------|-----|------|
-| IMEM | 0x00000000 | 0x00007FFF | 32 KB |
-| DMEM | 0x00010000 | 0x00011FFF | 8 KB |
-| CRC | 0x00080000 | 0x0008001F | 32 B |
-| UART | 0x00100000 | 0x00100010 | 16 B |
-| Timer | 0x00200000 | 0x00200010 | 16 B |
-| GPIO | 0x00400000 | 0x0040000F | 16 B |
-| PLIC | 0x00800000 | 0x0080000F | 16 B |
-| SPI | 0x01000000 | 0x010000FF | 256 B |
-| I2C | 0x02000000 | 0x020000FF | 256 B |
-| PWM | 0x02001000 | 0x02001FFF | 4 KB |
-| Soft IRQ | 0x04000000 | — | 4 B |
-| Tohost | 0x0F000000 | — | 4 B |
-| Boot ROM | 0x80000000 | 0x800001FF | 512 B |
+| Region | Base | Size |
+|--------|------|------|
+| Boot ROM | 0x00001000 | 4 KB |
+| CLINT | 0x02000000 | 64 KB |
+| PLIC | 0x0C000000 | 32 MB |
+| Tohost | 0x0F000000 | 4 B |
+| UART | 0x10000000 | 4 KB |
+| SPI | 0x10010000 | 4 KB |
+| I2C | 0x10020000 | 4 KB |
+| GPIO | 0x10030000 | 4 KB |
+| PWM | 0x10040000 | 4 KB |
+| Timer | 0x10050000 | 4 KB |
+| CRC | 0x10060000 | 4 KB |
+| RAM | 0x80000000 | profile-dependent |
