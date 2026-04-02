@@ -17,9 +17,9 @@
             "BOOT_SIZE_BYTES":"0x00001000"
         },
         "linux": {
-            "_comment": "Linux boot — 16MB RAM for OpenSBI + kernel + rootfs",
+            "_comment": "Linux boot — 32MB RAM for OpenSBI + kernel + rootfs",
             "RAM_BASE":       "0x80000000",
-            "RAM_SIZE_BYTES": "0x01000000",
+            "RAM_SIZE_BYTES": "0x02000000",
             "BOOT_BASE":      "0x00001000",
             "BOOT_SIZE_BYTES":"0x00001000"
         }

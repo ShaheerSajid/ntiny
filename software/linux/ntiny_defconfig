@@ -1,0 +1,53 @@
+# ntiny minimal Linux kernel config for RV32IMACSU + Sv32 MMU
+# Target: single-hart, 16MB RAM, OpenSBI, UART console
+
+# Architecture
+CONFIG_ARCH_RV32I=y
+CONFIG_NONPORTABLE=y
+# CONFIG_SMP is not set
+CONFIG_MMU=y
+
+# SoC — use generic/virt as base
+CONFIG_SOC_VIRT=y
+
+# Memory
+CONFIG_BLK_DEV_INITRD=y
+
+# Disable heavy features
+# CONFIG_MODULES is not set
+# CONFIG_VIRTUALIZATION is not set
+# CONFIG_PM is not set
+# CONFIG_CPU_IDLE is not set
+# CONFIG_HIGH_RES_TIMERS is not set
+# CONFIG_PROFILING is not set
+# CONFIG_BPF_SYSCALL is not set
+# CONFIG_CGROUPS is not set
+# CONFIG_NAMESPACES is not set
+# CONFIG_NET is not set
+# CONFIG_BLOCK is not set
+# CONFIG_SWAP is not set
+
+# Console
+CONFIG_TTY=y
+CONFIG_SERIAL_EARLYCON=y
+CONFIG_HVC_RISCV_SBI=y
+CONFIG_PRINTK=y
+
+# Boot command line
+CONFIG_CMDLINE="earlycon=sbi console=hvc0"
+CONFIG_CMDLINE_FORCE=y
+
+# Initramfs
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_INITRAMFS_SOURCE=""
+
+# Minimal filesystem
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_TMPFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+
+# Disable debug for size
+# CONFIG_DEBUG_KERNEL is not set
+# CONFIG_FTRACE is not set
