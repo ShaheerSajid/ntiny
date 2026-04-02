@@ -18,6 +18,7 @@
 #include "dhry.h"
 #include "ee_printf.h"
 #include "init.h"
+#include "tohost.h"
 /* Global Variables: */
 #define DDHRY_ITERS 1000
 Rec_Pointer     Ptr_Glob,
@@ -289,8 +290,7 @@ main ()
     ee_printf ("%6.2f\n", Dhrystones_Per_Second / 1757);
     ee_printf ("\n");
   }
-   uart_putc('#');
-   while(1);
+   tohost_pass();
 }
 
 

@@ -60,7 +60,13 @@ void RESET_HANDLER()
 	__asm("mv x30, x1");
 	__asm("mv x31, x1");
 
-	__asm("csrrw x0, mtvec, x0");
+	/* Set mtvec to vector table (_init) in vectored mode (bit 0 = 1) */
+	__asm("la t0, _init\n"
+	      "ori t0, t0, 1\n"
+	      "csrw mtvec, t0");
+	/* Enable FPU: set mstatus.FS = Initial (01) */
+	__asm("li t0, (1 << 13)\n"
+	      "csrs mstatus, t0");
 	__asm(".option push\n"
 	".option norelax\n"
 	"la gp, __global_pointer$\n"

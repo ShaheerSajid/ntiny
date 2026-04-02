@@ -1,0 +1,78 @@
+/* Benchmark linker script — 64KB RAM for unrolled CoreMark/Dhrystone */
+/* Based on link.ld (default profile) with increased RAM */
+OUTPUT_FORMAT("elf32-littleriscv", "elf32-littleriscv", "elf32-littleriscv")
+GROUP(-lc -lgloss -lgcc -lm)
+OUTPUT_ARCH(riscv)
+
+MEMORY
+{
+  RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 0x00010000
+}
+
+ENTRY(_init)
+
+SECTIONS
+{
+  PROVIDE(__stack_top = ORIGIN(RAM) + LENGTH(RAM));
+
+  .init           : { *(.init) } > RAM
+  .RESET_HANDLER  : { *(.RESET_HANDLER) } > RAM
+  .ISR_SOFT_ASM   : { *(.ISR_SOFT_ASM) } > RAM
+  .ISR_TIMER_ASM  : { *(.ISR_TIMER_ASM) } > RAM
+  .ISR_EXT_ASM    : { *(.ISR_EXT_ASM) } > RAM
+  .ISR_DEFAULT_ASM : { *(.ISR_DEFAULT_ASM) } > RAM
+  .text :
+  {
+    *(.text.unlikely .text.*_unlikely .text.unlikely.*)
+    *(.text.exit .text.exit.*)
+    *(.text.startup .text.startup.*)
+    *(.text.hot .text.hot.*)
+    *(SORT(.text.sorted.*))
+    *(.text .stub .text.* .gnu.linkonce.t.*)
+    *(.gnu.warning)
+  } > RAM
+  PROVIDE (__etext = .);
+  PROVIDE (_etext = .);
+  PROVIDE (etext = .);
+
+  .rodata : { *(.rodata .rodata.* .gnu.linkonce.r.*) } > RAM
+  .data :
+  {
+    __DATA_BEGIN__ = .;
+    *(.data .data.* .gnu.linkonce.d.*)
+    SORT(CONSTRUCTORS)
+    __SDATA_BEGIN__ = .;
+    *(.srodata.cst16) *(.srodata.cst8) *(.srodata.cst4) *(.srodata.cst2) *(.srodata .srodata.*)
+    *(.sdata .sdata.* .gnu.linkonce.s.*)
+  } > RAM
+
+  _edata = .; PROVIDE (edata = .);
+  . = .;
+  __bss_start = .;
+
+  .sbss :
+  {
+    *(.dynsbss)
+    *(.sbss .sbss.* .gnu.linkonce.sb.*)
+    *(.scommon)
+  } > RAM
+  .bss :
+  {
+    *(.dynbss)
+    *(.bss .bss.* .gnu.linkonce.b.*)
+    *(COMMON)
+    . = ALIGN(. != 0 ? 32 / 8 : 1);
+  } > RAM
+
+  . = ALIGN(32 / 8);
+  . = SEGMENT_START("ldata-segment", .);
+  . = ALIGN(32 / 8);
+  __BSS_END__ = .;
+  __global_pointer$ = MIN(__SDATA_BEGIN__ + 0x800,
+                      MAX(__DATA_BEGIN__ + 0x800, __BSS_END__ - 0x800));
+
+  /* tohost at fixed bus address */
+  .tohost 0x0F000000 (NOLOAD) : { *(.tohost) }
+
+  _end = .; PROVIDE (end = .);
+}

@@ -35,6 +35,7 @@ typedef struct {
   int master;
   int slave;
   char tmp_read;
+  FILE *logfile;
 } uartdpi_t;
 
 #ifdef __cplusplus
@@ -53,7 +54,11 @@ void* uartdpi_create(const char *name) {
   printf("uartdpi: Create %s for %s\n", obj->ptyname, name);
 
   fcntl(obj->master, F_SETFL, fcntl(obj->master, F_GETFL, 0) | O_NONBLOCK);
-  
+
+  obj->logfile = fopen("uart.log", "w");
+  if (obj->logfile)
+    setvbuf(obj->logfile, NULL, _IONBF, 0);
+
   return (void*) obj;
 }
 
@@ -76,6 +81,11 @@ void uartdpi_write(void *obj, int data)
 
   int rv = write(dpi->master, &data, 1);
   (void) rv;
+
+  /* Print directly to terminal and log file */
+  fputc(data, stderr);
+  if (dpi->logfile)
+    fputc(data, dpi->logfile);
 }
 
 #ifdef __cplusplus

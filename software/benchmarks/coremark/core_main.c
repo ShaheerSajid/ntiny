@@ -22,6 +22,8 @@ Original Author: Shay Gal-on
 */
 #include "coremark.h"
 #include "uart.h"
+#include "tohost.h"
+
 /* Function: iterate
         Run the benchmark for a specified number of iterations.
 
@@ -115,7 +117,7 @@ MAIN_RETURN_TYPE
 main(int argc, char *argv[])
 {
 #endif
-	uart_init(115200);
+    uart_init(115200);
     ee_u16       i, j = 0, num_algorithms = 0;
     ee_s16       known_id = -1, total_errors = 0;
     ee_u16       seedcrc = 0;
@@ -439,5 +441,6 @@ for (i = 0; i < MULTITHREAD; i++)
     /* And last call any target specific code for finalizing */
     portable_fini(&(results[0].port));
 
+    tohost_pass();
     return MAIN_RETURN_VAL;
 }

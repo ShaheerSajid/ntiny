@@ -161,8 +161,14 @@ test_all: test_all_build
 COREMARK_DIR = benchmarks/coremark
 DHRYSTONE_DIR = benchmarks/dhrystone
 
-# Benchmarks use integer-only march to keep code size within ROM
-BENCH_MARCH = -mabi=ilp32 -march=rv32imc_zicsr_zba_zbb
+# Benchmarks use integer-only march; 64KB linker script for headroom
+BENCH_MARCH = -mabi=ilp32 -march=rv32imfc_zicsr_zba_zbb
+BENCH_LDFLAGS = \
+	-T $(COMMON)/link_bench.ld \
+	-Wl,-gc-sections \
+	-Wl,-u,ISR_DEFAULT_ASM,-u,ISR_TIMER_ASM,-u,ISR_EXT_ASM,-u,ISR_SOFT_ASM \
+	--specs=nosys.specs \
+	-nostartfiles
 
 .PHONY: benchmark_coremark
 benchmark_coremark: | $(BUILDDIR)
@@ -177,14 +183,15 @@ benchmark_coremark: | $(BUILDDIR)
 		-Ofast -ffunction-sections -fdata-sections $(BENCH_MARCH) \
 		-I$(COREMARK_DIR) \
 		-I$(COREMARK_DIR)/portme \
+		-flto \
 		-finline-functions \
-		-finline-limit=400 \
+		-finline-limit=1000 \
 		-fno-code-hoisting \
 		-mbranch-cost=0 \
 		-funroll-all-loops \
 		-DITERATIONS=1 \
 		-DCLOCKS_PER_SEC=50000000 \
-		$(LDFLAGS)
+		$(BENCH_LDFLAGS)
 	$(ELFSIZE) $(BUILDDIR)/coremark.elf
 	@echo "=== Built benchmark: coremark ==="
 
@@ -194,19 +201,18 @@ benchmark_dhrystone: | $(BUILDDIR)
 		$(INCLUDES) -I$(DHRYSTONE_DIR) \
 		-Ofast -ffunction-sections -fdata-sections $(BENCH_MARCH) \
 		-std=gnu89 -Wno-implicit -fno-common \
-		-DMSC_CLOCK -DNOENUM -DCLK_TCK=50000000 -DDHRY_ITERS=1000 -DVERILATOR
+		-DMSC_CLOCK -DNOENUM -DCLK_TCK=50000000 -DDHRY_ITERS=10000
 	$(CC) -c -o $(BUILDDIR)/dhry_2.o $(DHRYSTONE_DIR)/dhry_2.c \
 		$(INCLUDES) -I$(DHRYSTONE_DIR) \
 		-Ofast -ffunction-sections -fdata-sections $(BENCH_MARCH) \
 		-std=gnu89 -Wno-implicit -fno-common \
-		-DMSC_CLOCK -DNOENUM -DCLK_TCK=50000000 -DDHRY_ITERS=1000 -DVERILATOR
+		-DMSC_CLOCK -DNOENUM -DCLK_TCK=50000000 -DDHRY_ITERS=10000
 	$(CC) -o $(BUILDDIR)/dhrystone.elf \
 		$(BUILDDIR)/dhry_1.o $(BUILDDIR)/dhry_2.o \
 		$(COMMON)/clock.c \
 		$(SRCS_MINIMAL) $(INCLUDES) \
 		-Ofast -ffunction-sections -fdata-sections $(BENCH_MARCH) \
-		-DVERILATOR \
-		$(LDFLAGS)
+		$(BENCH_LDFLAGS)
 	$(ELFSIZE) $(BUILDDIR)/dhrystone.elf
 	@echo "=== Built benchmark: dhrystone ==="
 
