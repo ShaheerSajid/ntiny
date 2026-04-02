@@ -46,40 +46,7 @@ module core_top
 
 
 //reset
-ctrl_bus_e ctrl_bus_reset;
-assign ctrl_bus_reset.inst_type = NO_INS;
-assign ctrl_bus_reset.br_cond = NO_CONDITION;
-assign ctrl_bus_reset.load_store_width = NO_WIDTH;
-assign ctrl_bus_reset.mem_unsigned = FALSE;
-assign ctrl_bus_reset.imm_sel = NO_IMM;
-assign ctrl_bus_reset.mem_op = NO_MEM_OP;
-assign ctrl_bus_reset.operand_a = NO_OPERAND;
-assign ctrl_bus_reset.operand_b = NO_OPERAND;
-assign ctrl_bus_reset.operand_c = NO_OPERAND;
-assign ctrl_bus_reset.alu_op = NO_ALU_OP;
-assign ctrl_bus_reset.csr_op = NO_CSR_OP;
-assign ctrl_bus_reset.csr_use_immediate = FALSE;
-assign ctrl_bus_reset.csr_addr = NO_CSR_REG;
-assign ctrl_bus_reset.mul_op = NO_MUL_OP;
-assign ctrl_bus_reset.amo_op = NO_AMO_OP;
-assign ctrl_bus_reset.bit_op = NO_BIT_OP;
-assign ctrl_bus_reset.float_op = NO_FP_OP;
-assign ctrl_bus_reset.roundmode = RNE;
-assign ctrl_bus_reset.exec_result = NO_EX_RES;
-assign ctrl_bus_reset.rs1_int = NO_REG;
-assign ctrl_bus_reset.rs2_int = NO_REG;
-assign ctrl_bus_reset.rs3_int = NO_REG;
-assign ctrl_bus_reset.rd_int = NO_REG;
-assign ctrl_bus_reset.rs1_float = NO_REG;
-assign ctrl_bus_reset.rs2_float = NO_REG;
-assign ctrl_bus_reset.rs3_float = NO_REG;
-assign ctrl_bus_reset.rd_float = NO_REG;
-assign ctrl_bus_reset.wb_sel = NO_WB;
-assign ctrl_bus_reset.ebreak = FALSE;
-assign ctrl_bus_reset.ecall = FALSE;
-assign ctrl_bus_reset.mret = FALSE;
-assign ctrl_bus_reset.sret = FALSE;
-assign ctrl_bus_reset.sfence_vma = FALSE;
+// NOP control bundle — CTRL_BUS_NOP() defined in core_pkg.sv
 
 //pc and fetch
 logic [31:0] branch_target_address;
@@ -751,7 +718,7 @@ interrupt_ctrl interrupt_ctrl_inst
 always_ff@(posedge clk_i or posedge reset_i)
 	begin
 		if(reset_i) begin
-			ctrl_bus_ie <= ctrl_bus_reset;
+			ctrl_bus_ie <= CTRL_BUS_NOP();
 			pc_ie <= 0;
 			imm_ie <= 0;
 			rs1_forwarded_ie <= 0;
@@ -761,7 +728,7 @@ always_ff@(posedge clk_i or posedge reset_i)
 			stale_ie <= 1'b0;
 		end
 		else if(ie_flush || interrupt_valid) begin
-			ctrl_bus_ie <= ctrl_bus_reset;
+			ctrl_bus_ie <= CTRL_BUS_NOP();
 			pc_ie <= 0;
 			imm_ie <= 0;
 			rs1_forwarded_ie <= 0;
@@ -774,7 +741,7 @@ always_ff@(posedge clk_i or posedge reset_i)
 			// When stale_id is set (1 cycle after trap), the instruction in ID is
 			// leftover from before the trap redirect. Inject NOP to prevent any
 			// side effects (register writes, memory ops, CSR ops) as it flows through.
-			ctrl_bus_ie <= stale_id ? ctrl_bus_reset : ctrl_bus_if_id;
+			ctrl_bus_ie <= stale_id ? CTRL_BUS_NOP() : ctrl_bus_if_id;
 			pc_ie <= pc_id;
 			imm_ie <= imm_id;
 			rs1_forwarded_ie <= rs1_forwarded_id;
@@ -974,13 +941,13 @@ end
 always_ff@(posedge clk_i or posedge reset_i)
 	begin
 		if(reset_i) begin
-			ctrl_bus_imem <= ctrl_bus_reset;
+			ctrl_bus_imem <= CTRL_BUS_NOP();
 			pc_imem <= 0;
 			exec_result_imem <= 0;
 			stale_imem <= 1'b0;
 		end
 		else if(imem_flush) begin
-			ctrl_bus_imem <= ctrl_bus_reset;
+			ctrl_bus_imem <= CTRL_BUS_NOP();
 			pc_imem <= 0;
 			exec_result_imem <= 0;
 			stale_imem <= 1'b0;
@@ -1063,14 +1030,14 @@ assign dmem_port.wdata = ptw_active ? 32'b0 :
 always_ff@(posedge clk_i or posedge reset_i)
 	begin
 		if(reset_i) begin
-			ctrl_bus_iwb <= ctrl_bus_reset;
+			ctrl_bus_iwb <= CTRL_BUS_NOP();
 			pc_iwb <= 0;
 			exec_result_iwb <= 0;
 			readdata_iwb <= 0;
 			stale_iwb <= 1'b0;
 		end
 		else if(iwb_flush) begin
-			ctrl_bus_iwb <= ctrl_bus_reset;
+			ctrl_bus_iwb <= CTRL_BUS_NOP();
 			pc_iwb <= 0;
 			exec_result_iwb <= 0;
 			readdata_iwb <= 0;

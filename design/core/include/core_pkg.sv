@@ -316,4 +316,42 @@ typedef struct {
   onebit_sig_e sfence_vma;        // SFENCE.VMA instruction
 } ctrl_bus_e;
 
+// NOP control bundle — used as pipeline flush/reset value.
+// Defined once here so adding a new field only needs one edit.
+function automatic ctrl_bus_e CTRL_BUS_NOP();
+	CTRL_BUS_NOP.inst_type       = NO_INS;
+	CTRL_BUS_NOP.br_cond         = NO_CONDITION;
+	CTRL_BUS_NOP.load_store_width= NO_WIDTH;
+	CTRL_BUS_NOP.mem_unsigned    = FALSE;
+	CTRL_BUS_NOP.imm_sel         = NO_IMM;
+	CTRL_BUS_NOP.mem_op          = NO_MEM_OP;
+	CTRL_BUS_NOP.operand_a       = NO_OPERAND;
+	CTRL_BUS_NOP.operand_b       = NO_OPERAND;
+	CTRL_BUS_NOP.operand_c       = NO_OPERAND;
+	CTRL_BUS_NOP.alu_op          = NO_ALU_OP;
+	CTRL_BUS_NOP.csr_op          = NO_CSR_OP;
+	CTRL_BUS_NOP.csr_use_immediate = FALSE;
+	CTRL_BUS_NOP.csr_addr        = NO_CSR_REG;
+	CTRL_BUS_NOP.mul_op          = NO_MUL_OP;
+	CTRL_BUS_NOP.amo_op          = NO_AMO_OP;
+	CTRL_BUS_NOP.bit_op          = NO_BIT_OP;
+	CTRL_BUS_NOP.float_op        = NO_FP_OP;
+	CTRL_BUS_NOP.roundmode       = RNE;
+	CTRL_BUS_NOP.exec_result     = NO_EX_RES;
+	CTRL_BUS_NOP.rs1_int         = NO_REG;
+	CTRL_BUS_NOP.rs2_int         = NO_REG;
+	CTRL_BUS_NOP.rs3_int         = NO_REG;
+	CTRL_BUS_NOP.rd_int          = NO_REG;
+	CTRL_BUS_NOP.rs1_float       = NO_REG;
+	CTRL_BUS_NOP.rs2_float       = NO_REG;
+	CTRL_BUS_NOP.rs3_float       = NO_REG;
+	CTRL_BUS_NOP.rd_float        = NO_REG;
+	CTRL_BUS_NOP.wb_sel          = NO_WB;
+	CTRL_BUS_NOP.ebreak          = FALSE;
+	CTRL_BUS_NOP.ecall           = FALSE;
+	CTRL_BUS_NOP.mret            = FALSE;
+	CTRL_BUS_NOP.sret            = FALSE;
+	CTRL_BUS_NOP.sfence_vma      = FALSE;
+endfunction
+
 endpackage
