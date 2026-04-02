@@ -112,12 +112,16 @@ end
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── Post-trap: marks instruction in ID as stale after a trap fires ───────
+// Lasts exactly 1 cycle: the leftover instruction in ID at trap time gets
+// NOP'd when it enters IE. Must clear unconditionally (not gated by
+// if_id_stall) because refetch_after_trap holds the stall high, which
+// would keep post_trap set and incorrectly NOP the handler's first insn.
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i)
         post_trap_o <= 1'b0;
     else if (interrupt_valid_i)
         post_trap_o <= 1'b1;
-    else if (!if_id_stall_o)
+    else
         post_trap_o <= 1'b0;
 end
 assign stale_id_o = post_trap_o;

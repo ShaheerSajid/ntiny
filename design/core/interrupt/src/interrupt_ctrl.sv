@@ -39,6 +39,9 @@ module interrupt_ctrl (
     input        insn_valid_id_i,      // from hazard_unit
     input        debug_ebreak_i,       // dcsr[15] — ebreak enters debug, not trap
 
+    // ── IE-stage CSR invalid (unimplemented CSR accessed) ────────────────
+    input                ie_csr_invalid_i,
+
     // ── IE-stage signals for misalign detection ─────────────────────────
     input mem_op_e       ie_mem_op_i,
     input load_store_width_e ie_ls_width_i,
@@ -79,7 +82,7 @@ wire misalign_store = (ie_mem_op_i == WRITE) && (
 );
 wire misalign_amo = (ie_amo_op_i != NO_AMO_OP) && |ie_addr_lsb_i && !amo_in_progress_i;
 
-assign exception_from_ie_o = misalign_load | misalign_store | misalign_amo;
+assign exception_from_ie_o = misalign_load | misalign_store | misalign_amo | ie_csr_illegal;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ID-stage exception gating (only fire on valid, non-illegal instructions)
@@ -122,9 +125,15 @@ wire m_async_valid = (external_valid | software_valid | timer_valid) & m_ie_glob
 wire s_async_valid = (s_external_valid | s_software_valid | s_timer_valid) & s_ie_global;
 wire async_valid   = m_async_valid | s_async_valid;
 
+// IE-stage CSR invalid: unimplemented CSR accessed → illegal instruction from IE
+// Safe without stale_ie guard: stale instructions have csr_cmd=NOP, so CSR unit
+// won't flag invalid for them.
+wire ie_csr_illegal = ie_csr_invalid_i;
+
 // Sync exception aggregate
 wire sync_exception = misalign_load | misalign_store | misalign_amo |
                       ecall_valid | ebreak_valid | illegal_valid |
+                      ie_csr_illegal |
                       insn_page_fault_i | load_page_fault | store_page_fault;
 
 // Ecall cause depends on current privilege level
@@ -155,6 +164,8 @@ always_comb begin
         cause_code = 8'd4;  epc_out = pc_ie_i; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
     end else if (misalign_store || misalign_amo) begin
         cause_code = 8'd6;  epc_out = pc_ie_i; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
+    end else if (ie_csr_illegal) begin
+        cause_code = 8'd2;  epc_out = pc_ie_i; mtval_out = 32'h0; is_interrupt = 1'b0;
     end else if (insn_page_fault_i) begin
         cause_code = 8'd12; epc_out = pc_for_id; mtval_out = page_fault_addr; is_interrupt = 1'b0;
     end else if (illegal_valid) begin

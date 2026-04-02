@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: BSD-2-Clause
+
+config PLATFORM_NTINY
+	bool "ntiny RISC-V SoC"
+	select IRQCHIP_PLIC
+	select IPI_MSWI
+	select TIMER_MTIMER
+	default y

@@ -40,7 +40,8 @@ module csr_unit (
   output [31:0]mideleg_o,
   output [31:0]satp_o,
 
-	output logic [31:0]csr_value_o
+	output logic [31:0]csr_value_o,
+	output logic       csr_invalid_o  // 1 when accessed CSR address is unimplemented
 	);
 
 	// ── Privilege masks ──────────────────────────────────────────
@@ -311,7 +312,10 @@ module csr_unit (
 `endif
 
 	// ── CSR read mux ─────────────────────────────────────────────
+	wire csr_active = (csr_cmd_i != NO_CSR_OP);
+
 	always_comb begin
+		csr_invalid_o = 1'b0;
 		case (csr_addr_i)
 			FFLAGS:         csr_value_o = {27'b0, _FFLAGS[4:0]};
 			FRM:            csr_value_o = {29'b0, _FRM[2:0]};
@@ -340,6 +344,11 @@ module csr_unit (
 			MCYCLEH:        csr_value_o = _MCYCLEH;
 			MINSTRETH:      csr_value_o = _MINSTRETH;
 			MCOUNTINHIBIT:  csr_value_o = _MCOUNTINHIBIT;
+			MSTATUSH:       csr_value_o = 32'h0;  // RV32 little-endian: MBE=SBE=0, read-only zero
+			MHARTID:        csr_value_o = 32'h0;  // Hart 0 (single-hart)
+			MVENDORID:      csr_value_o = 32'h0;  // Non-commercial
+			MARCHID:        csr_value_o = 32'h0;  // Not assigned
+			MIMPID:         csr_value_o = 32'h0;  // Implementation-specific
 			MEDELEG:        csr_value_o = _MEDELEG;
 			MIDELEG:        csr_value_o = _MIDELEG;
 			MCOUNTEREN:     csr_value_o = _MCOUNTEREN;
@@ -354,7 +363,10 @@ module csr_unit (
 			SBADADDR:       csr_value_o = _STVAL;
 			SIP:            csr_value_o = _MIP & S_INT_MASK;
 			SATP:           csr_value_o = _SATP;
-			default:        csr_value_o = 0;
+			default: begin
+				csr_value_o = 0;
+				csr_invalid_o = csr_active;  // only flag invalid if a CSR op is active
+			end
 		endcase
 	end
 

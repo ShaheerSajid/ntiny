@@ -328,6 +328,7 @@ assign debug_valid =  onebit_sig_e'(resumeack_o);
 // ── Privilege Unit ──────────────────────────────────────────────────────
 // Centralised privilege checks, xRET fire/one-shot, mmu_priv, PLIC protocol.
 wire illegal_mret, illegal_sret, illegal_insn_id;
+wire csr_invalid;  // unimplemented CSR accessed in IE stage
 wire ret_fire, sret_fire;
 logic ret_side_effects_done;
 wire [1:0] mmu_priv;
@@ -627,6 +628,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .ecall_raw_i        (ctrl_bus_if_id.ecall),
   .ebreak_raw_i       (ctrl_bus_if_id.ebreak),
   .illegal_insn_i     (illegal_insn_id),
+  .ie_csr_invalid_i   (csr_invalid),
   .insn_valid_id_i    (insn_valid_id),
   .debug_ebreak_i     (dcsr_ebreak),
   // IE-stage signals for misalign detection (done inside)
@@ -682,10 +684,11 @@ always_ff@(posedge clk_i or posedge reset_i)
 			predicted_pc_ie <= 0;
 		end
 		else if(!ie_stall) begin
-			// When stale_id is set (1 cycle after trap), the instruction in ID is
-			// leftover from before the trap redirect. Inject NOP to prevent any
-			// side effects (register writes, memory ops, CSR ops) as it flows through.
-			ctrl_bus_ie <= stale_id ? CTRL_BUS_NOP() : ctrl_bus_if_id;
+			// No stale NOP injection: the IE flush on interrupt_valid already
+			// handles the leftover instruction. The handler's first insn arrives
+			// in ID 1 cycle after trap and must NOT be NOP'd (it needs to execute,
+			// especially for direct-mode mtvec handlers like OpenSBI).
+			ctrl_bus_ie <= ctrl_bus_if_id;
 			pc_ie <= pc_id;
 			imm_ie <= imm_id;
 			rs1_forwarded_ie <= rs1_forwarded_id;
@@ -797,6 +800,7 @@ csr_unit csr_unit_inst
 	.imm_i					      (imm_ie),
 	.reg_i					      (opA_forwarded_data),
 	.csr_value_o			    (csr_result),
+	.csr_invalid_o        (csr_invalid),
 
   //trap signals (interrupts + exceptions)
   .trap_valid_i         (interrupt_valid),
