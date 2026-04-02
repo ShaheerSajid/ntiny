@@ -927,7 +927,10 @@ amo_unit amo_unit_inst
 	.amo_op_i         (ctrl_bus_ie.amo_op),
 	.addr_i           (alu_result),
 	.rs2_i            (opB_forwarded_data),
-	.flush_i          (ie_flush | interrupt_valid),
+	// Only genuine interrupts/traps should abort an AMO start.
+	// ie_flush from insert_bubble creates a combinational loop with amo_stall
+	// and must NOT suppress the AMO unit's activation.
+	.flush_i          (interrupt_valid),
 	// DBus
 	.dbus_addr_o      (amo_dbus_addr),
 	.dbus_byteenable_o(amo_dbus_byteenable),
