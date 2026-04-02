@@ -33,6 +33,7 @@ module periph_bridge (
     input  logic        timer_sel_i,
     input  logic        crc_sel_i,
     input  logic        plic_sel_i,
+    input  logic        clint_sel_i,
     input  logic        soft_sel_i,
 
     // Peripheral read data inputs
@@ -44,6 +45,7 @@ module periph_bridge (
     input  logic [31:0] timer_rdata_i,
     input  logic [31:0] crc_rdata_i,
     input  logic [31:0] plic_rdata_i,
+    input  logic [31:0] clint_rdata_i,
 
     // Shared outputs to peripherals
     output logic        write_o,
@@ -59,12 +61,14 @@ module periph_bridge (
     output logic        timer_chipsel_o,
     output logic        crc_chipsel_o,
     output logic        plic_chipsel_o,
+    output logic        clint_chipsel_o,
     output logic        soft_chipsel_o
 );
 
     // Any peripheral selected
     wire any_periph_sel = uart_sel_i | spi_sel_i | i2c_sel_i | gpio_sel_i |
-                          pwm_sel_i | timer_sel_i | crc_sel_i | plic_sel_i | soft_sel_i;
+                          pwm_sel_i | timer_sel_i | crc_sel_i | plic_sel_i |
+                          clint_sel_i | soft_sel_i;
 
     // Always ready — peripherals are single-cycle
     assign ready_o = 1'b1;
@@ -83,28 +87,31 @@ module periph_bridge (
     assign timer_chipsel_o = req_i & timer_sel_i;
     assign crc_chipsel_o   = req_i & crc_sel_i;
     assign plic_chipsel_o  = req_i & plic_sel_i;
+    assign clint_chipsel_o = req_i & clint_sel_i;
     assign soft_chipsel_o  = req_i & soft_sel_i;
 
     // ── Read data mux (latched chip-select for 1-cycle read latency) ──
-    logic [8:0] sel_r;  // registered chip-selects
+    logic [9:0] sel_r;  // registered chip-selects
     always_ff @(posedge clk_i or posedge reset_i) begin
         if (reset_i)
-            sel_r <= 9'b0;
+            sel_r <= 10'b0;
         else
             sel_r <= {uart_sel_i, spi_sel_i, i2c_sel_i, gpio_sel_i,
-                      pwm_sel_i, timer_sel_i, crc_sel_i, plic_sel_i, soft_sel_i};
+                      pwm_sel_i, timer_sel_i, crc_sel_i, plic_sel_i,
+                      clint_sel_i, soft_sel_i};
     end
 
     always_comb begin
         case (1'b1)
-            sel_r[8]: rdata_o = uart_rdata_i;
-            sel_r[7]: rdata_o = spi_rdata_i;
-            sel_r[6]: rdata_o = i2c_rdata_i;
-            sel_r[5]: rdata_o = gpio_rdata_i;
-            sel_r[4]: rdata_o = pwm_rdata_i;
-            sel_r[3]: rdata_o = timer_rdata_i;
-            sel_r[2]: rdata_o = crc_rdata_i;
-            sel_r[1]: rdata_o = plic_rdata_i;
+            sel_r[9]: rdata_o = uart_rdata_i;
+            sel_r[8]: rdata_o = spi_rdata_i;
+            sel_r[7]: rdata_o = i2c_rdata_i;
+            sel_r[6]: rdata_o = gpio_rdata_i;
+            sel_r[5]: rdata_o = pwm_rdata_i;
+            sel_r[4]: rdata_o = timer_rdata_i;
+            sel_r[3]: rdata_o = crc_rdata_i;
+            sel_r[2]: rdata_o = plic_rdata_i;
+            sel_r[1]: rdata_o = clint_rdata_i;
             default:  rdata_o = 32'h0;
         endcase
     end

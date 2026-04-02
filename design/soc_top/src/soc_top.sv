@@ -82,6 +82,7 @@ module soc_top
     wire [31:0] i2c_readdata;
     wire [31:0] pwm_readdata;
     wire [31:0] plic_readdata;
+    wire [31:0] clint_readdata;
     wire [31:0] crc_readdata;
 
     // ── Peripheral bridge ───────────────────────────────────
@@ -92,7 +93,7 @@ module soc_top
     logic        periph_rvalid;
     logic        uart_chipsel, spi_chipsel, i2c_chipsel, gpio_chipsel;
     logic        pwm_chipsel, timer_chipsel, crc_chipsel;
-    logic        plic_chipsel, soft_chipsel;
+    logic        plic_chipsel, clint_chipsel, soft_chipsel;
 
     periph_bridge periph_bridge_inst (
         .clk_i          (clk_i),
@@ -115,6 +116,7 @@ module soc_top
         .timer_sel_i    (timer_sel),
         .crc_sel_i      (crc_sel),
         .plic_sel_i     (plic_sel),
+        .clint_sel_i    (clint_sel),
         .soft_sel_i     (soft_sel),
         // Peripheral read data
         .uart_rdata_i   (uart_readdata),
@@ -125,6 +127,7 @@ module soc_top
         .timer_rdata_i  (timer_readdata),
         .crc_rdata_i    (crc_readdata),
         .plic_rdata_i   (plic_readdata),
+        .clint_rdata_i  (clint_readdata),
         // Shared outputs
         .write_o        (periph_write),
         .read_o         (periph_read),
@@ -138,6 +141,7 @@ module soc_top
         .timer_chipsel_o(timer_chipsel),
         .crc_chipsel_o  (crc_chipsel),
         .plic_chipsel_o (plic_chipsel),
+        .clint_chipsel_o(clint_chipsel),
         .soft_chipsel_o (soft_chipsel)
     );
 
@@ -364,6 +368,7 @@ module soc_top
 
     assign plic_addr = dmem_bus.addr[3:2];
 
+    logic timer_periph_irq;  // general-purpose timer interrupt (routed to PLIC, not MIP[7])
     timer_top timer_inst (
         .clk_i      (clk_i),
         .stall_i    (1'b0),
@@ -374,7 +379,7 @@ module soc_top
         .readdata   (timer_readdata),
         .read       (periph_read),
         .chipselect (timer_chipsel),
-        .intr_o     (timer_interrupt)
+        .intr_o     (timer_periph_irq)  // no longer drives MIP[7]; CLINT does
     );
 
     gpio_top gpio_inst (
@@ -467,13 +472,27 @@ module soc_top
         .readdata_o     (crc_readdata)
     );
 
-    // ── Software interrupt register ─────────────────────────
-    always_ff @(posedge clk_i or posedge reset_i) begin
-        if (reset_i)
-            soft_intr <= 1'b0;
-        else if (soft_chipsel && periph_write)
-            soft_intr <= dmem_bus.wdata[0];
-    end
+    // ── CLINT (Core Local Interruptor) ────────────────────────
+    // Drives timer_interrupt (MTIP) and soft_intr (MSIP).
+    // Replaces the old software interrupt register.
+    logic clint_timer_irq, clint_soft_irq;
+
+    clint clint_inst (
+        .clk_i        (clk_i),
+        .reset_i      (reset_i | ndmreset),
+        .chipselect_i (clint_chipsel),
+        .write_i      (periph_write),
+        .read_i       (periph_read),
+        .address_i    (dmem_bus.addr[15:0]),
+        .writedata_i  (dmem_bus.wdata),
+        .readdata_o   (clint_readdata),
+        .timer_irq_o  (clint_timer_irq),
+        .soft_irq_o   (clint_soft_irq)
+    );
+
+    // CLINT drives M-mode timer and software interrupts to the core
+    assign timer_interrupt = clint_timer_irq;
+    assign soft_intr       = clint_soft_irq;
 
     // ── PLIC ────────────────────────────────────────────────
     assign gpio_interrupt = gpio_itr_sig[3:2];
