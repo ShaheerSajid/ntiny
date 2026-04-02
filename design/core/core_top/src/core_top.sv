@@ -40,9 +40,6 @@ module core_top
   input soft_itr_i,
 
 
-  output plic_claim_o,
-  output plic_complete_o,
-
   // Cache control
   output logic fence_i_o              // FENCE.I executed — flush I-cache (and D-cache for coherency)
 );
@@ -351,9 +348,6 @@ privilege_unit privilege_unit_inst (
     .insn_valid_id_i    (insn_valid_id),
     .csr_ret_hazard_i   (csr_ret_hazard),
     .interrupt_valid_i  (interrupt_valid),
-    // PLIC interface
-    .ext_itr_i          (ext_itr_i),
-    .trap_true_i        (trap_true),
     // Illegal instruction outputs
     .illegal_mret_o     (illegal_mret),
     .illegal_sret_o     (illegal_sret),
@@ -364,10 +358,7 @@ privilege_unit privilege_unit_inst (
     .sret_fire_o        (sret_fire),
     .ret_side_effects_done_o(ret_side_effects_done),
     // MMU privilege
-    .mmu_priv_o         (mmu_priv),
-    // PLIC
-    .plic_claim_o       (plic_claim_o),
-    .plic_complete_o    (plic_complete_o)
+    .mmu_priv_o         (mmu_priv)
 );
 
 // exception_from_ie now driven by interrupt_ctrl (misalign detection moved there)

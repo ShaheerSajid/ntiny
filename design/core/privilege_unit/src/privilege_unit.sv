@@ -11,7 +11,6 @@ import core_pkg::*;
 //   - MRET/SRET fire signals and ret_side_effects_done one-shot
 //   - Effective privilege for instruction-side MMU (mmu_priv)
 //   - ret_valid computation
-//   - PLIC claim/complete protocol
 //
 module privilege_unit (
     input  logic        clk_i,
@@ -33,10 +32,6 @@ module privilege_unit (
     input  logic        csr_ret_hazard_i,  // from hazard_unit
     input  onebit_sig_e interrupt_valid_i,  // trap firing
 
-    // ── PLIC interface ──────────────────────────────────────────────────
-    input  logic        ext_itr_i,         // external interrupt pending
-    input  logic        trap_true_i,       // trap condition (for PLIC claim)
-
     // ── Illegal instruction outputs ─────────────────────────────────────
     output logic        illegal_mret_o,
     output logic        illegal_sret_o,
@@ -49,11 +44,7 @@ module privilege_unit (
     output logic        ret_side_effects_done_o,
 
     // ── Effective privilege for instruction-side MMU ─────────────────────
-    output logic [1:0]  mmu_priv_o,
-
-    // ── PLIC claim/complete ─────────────────────────────────────────────
-    output logic        plic_claim_o,
-    output logic        plic_complete_o
+    output logic [1:0]  mmu_priv_o
 );
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -119,20 +110,7 @@ wire [1:0] ret_target_priv = id_mret_i ? status_csr_i[12:11] :   // MRET: MPP
 assign mmu_priv_o = (ret_valid_o && !csr_ret_hazard_i && !ret_side_effects_done_o)
                     ? ret_target_priv : priv_level_i;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// PLIC claim / complete protocol
-// ═══════════════════════════════════════════════════════════════════════════
-logic from_plic;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i)
-        from_plic <= 1'b0;
-    else if (plic_claim_o)
-        from_plic <= 1'b1;
-    else if (plic_complete_o)
-        from_plic <= 1'b0;
-end
-
-assign plic_complete_o = from_plic & id_mret_i & ~illegal_mret_o;
-assign plic_claim_o    = ext_itr_i & trap_true_i;
+// Note: PLIC claim/complete is now fully memory-mapped (no sideband signals).
+// Software reads PLIC claim register to claim, writes to complete.
 
 endmodule

@@ -283,8 +283,6 @@ module soc_top
     logic uart_rx_interrupt;
     logic [31:0] gpio_itr_sig;
     logic [1:0] gpio_interrupt;
-    logic plic_claim, plic_complete;
-    logic [1:0] plic_addr;
 
     // ── Core ────────────────────────────────────────────────
     core_top core_top_inst (
@@ -317,8 +315,6 @@ module soc_top
         .ext_itr_i      (ext_interrupt),
         .timer_itr_i    (timer_interrupt),
         .soft_itr_i     (soft_intr),
-        .plic_claim_o   (plic_claim),
-        .plic_complete_o(plic_complete),
         .fence_i_o      (fence_i_wire)
     );
 
@@ -366,7 +362,7 @@ module soc_top
     wire [7:0] pwm_addr   = dmem_bus.addr[7:2];
     wire [2:0] crc_addr   = dmem_bus.addr[4:2];
 
-    assign plic_addr = dmem_bus.addr[3:2];
+    // (plic_addr removed — new PLIC uses full address)
 
     logic timer_periph_irq;  // general-purpose timer interrupt (routed to PLIC, not MIP[7])
     timer_top timer_inst (
@@ -494,28 +490,25 @@ module soc_top
     assign timer_interrupt = clint_timer_irq;
     assign soft_intr       = clint_soft_irq;
 
-    // ── PLIC ────────────────────────────────────────────────
+    // ── PLIC (spec-compliant, memory-mapped claim/complete) ──
     assign gpio_interrupt = gpio_itr_sig[3:2];
 
-    plic #(
-        .Number_of_Sources(6),
-        .Interrupt_Width  (3),
-        .Number_of_Targets(1)
+    plic_rv #(
+        .NUM_SOURCES   (6),
+        .PRIORITY_BITS (3)
     ) plic_inst (
-        .clk_i              (clk_i),
-        .resetn_i           (reset_i | ndmreset),
-        .write_i            (periph_write),
-        .read_i             (periph_read),
-        .chipselect_i       (plic_chipsel),
-        .writedata_i        (dmem_bus.wdata),
-        .address_i          (plic_addr),
-        .Interrupt          ({i2c_interrupt, spi_interrupt, uart_tx_interrupt,
-                              uart_rx_interrupt, gpio_interrupt}),
-        .ED                 (1'b1),
-        .Interrupt_Claim    (plic_claim),
-        .Interrupt_Complete (plic_complete),
-        .Interrupt_Notification(ext_interrupt),
-        .readdata_o         (plic_readdata)
+        .clk_i        (clk_i),
+        .reset_i      (reset_i | ndmreset),
+        .chipselect_i (plic_chipsel),
+        .write_i      (periph_write),
+        .read_i       (periph_read),
+        .address_i    (dmem_bus.addr[21:0]),
+        .writedata_i  (dmem_bus.wdata),
+        .readdata_o   (plic_readdata),
+        // Sources: 1=uart_rx, 2=uart_tx, 3=spi, 4=i2c, 5=gpio[0], 6=gpio[1]
+        .sources_i    ({gpio_interrupt, i2c_interrupt, spi_interrupt,
+                        uart_tx_interrupt, uart_rx_interrupt}),
+        .ext_irq_o    (ext_interrupt)
     );
 
 endmodule
