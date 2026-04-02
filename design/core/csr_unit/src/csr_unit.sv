@@ -312,7 +312,12 @@ module csr_unit (
 `endif
 
 	// ── CSR read mux ─────────────────────────────────────────────
-	wire csr_active = (csr_cmd_i != NO_CSR_OP);
+	// Only flag invalid for actual CSR read/write ops, not SYSTEM-type
+	// instructions (ecall, ebreak, mret, sret, wfi, sfence.vma) which
+	// share the SYSTEM opcode but are NOT CSR accesses.
+	wire csr_active = (csr_cmd_i == WRITE_CSR ||
+	                   csr_cmd_i == SET_CSR ||
+	                   csr_cmd_i == CLEAR_CSR);
 
 	always_comb begin
 		csr_invalid_o = 1'b0;
