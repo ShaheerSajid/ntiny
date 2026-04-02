@@ -314,6 +314,7 @@ typedef struct {
   onebit_sig_e mret;              // MRET instruction
   onebit_sig_e sret;              // SRET instruction
   onebit_sig_e sfence_vma;        // SFENCE.VMA instruction
+  onebit_sig_e predicted_taken;   // BPU: was this branch predicted taken?
 } ctrl_bus_e;
 
 // NOP control bundle — used as pipeline flush/reset value.
@@ -352,6 +353,7 @@ function automatic ctrl_bus_e CTRL_BUS_NOP();
 	CTRL_BUS_NOP.mret            = FALSE;
 	CTRL_BUS_NOP.sret            = FALSE;
 	CTRL_BUS_NOP.sfence_vma      = FALSE;
+	CTRL_BUS_NOP.predicted_taken = FALSE;
 endfunction
 
 endpackage

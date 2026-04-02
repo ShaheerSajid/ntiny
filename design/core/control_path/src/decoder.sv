@@ -436,6 +436,7 @@ assign ctrl_bus_o.mret = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'h302);
 assign ctrl_bus_o.sret = onebit_sig_e'(csr_op == SYSTEM && csr_addr == 12'h102);
 // SFENCE.VMA: funct7=0001001 (bits[31:25]), funct3=000 (SYSTEM), opcode=0x73
 assign ctrl_bus_o.sfence_vma = onebit_sig_e'(csr_op == SYSTEM && instruction_i[31:25] == 7'b0001001);
+assign ctrl_bus_o.predicted_taken = FALSE; // BPU: static not-taken default (future BTB overrides in core_top)
 
 endmodule
 

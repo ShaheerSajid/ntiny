@@ -70,6 +70,9 @@ logic [31:0] imm_imem;
 logic [31:0] imm_iwb;
 
 onebit_sig_e branch_taken;
+onebit_sig_e bpu_mispredict;       // BPU: prediction != resolution
+logic [31:0] predicted_pc_id;      // BPU: fall-through PC at ID stage
+logic [31:0] predicted_pc_ie;      // BPU: fall-through PC flopped into IE
 onebit_sig_e interrupt_valid;
 onebit_sig_e ret_valid;
 onebit_sig_e debug_valid;
@@ -365,13 +368,15 @@ privilege_unit privilege_unit_inst (
 
 // exception_from_ie now driven by interrupt_ctrl (misalign detection moved there)
 
-// Do NOT gate branch_taken with insn_valid_id: after a trap, c_controller delivers
-// the first mtvec instruction into ID on the very next cycle (N+1), but insn_valid_id
-// is still 0 that cycle (cleared on cycle N). Gating would suppress the JAL redirect,
-// causing the CPU to execute handler entry[1] instead of entry[0].
-// The IE register flush on interrupt_valid already prevents stale pre-trap effects.
-wire branch_taken_valid = branch_taken;
-wire ret_valid_valid    = ret_valid;  // already gated with insn_valid_id in assignment
+// ── BPU: mispredict detection ──────────────────────────────────
+// Mispredict fires when branch resolution disagrees with prediction.
+// Static not-taken: predicted_taken=0, so mispredict = branch_taken.
+// Future BTB also catches: predicted_taken=1 but actually not-taken.
+// Do NOT gate with insn_valid_id (see original comment about trap JAL redirect).
+assign bpu_mispredict = onebit_sig_e'(branch_taken != ctrl_bus_if_id.predicted_taken);
+
+wire branch_taken_valid = bpu_mispredict;  // redirect on mispredict, not raw branch_taken
+wire ret_valid_valid    = ret_valid;
 
 always_comb
 begin
@@ -445,7 +450,11 @@ c_controller c_controller_inst
 	.busy_o                 (c_busy)
 );
 
-//instruction decode stage
+// ── BPU: predicted fall-through PC ──────────────────────────────
+// Static not-taken: predicted_pc is always the sequential address.
+// Future BTB will override this with the predicted target when predicted_taken=1.
+assign predicted_pc_id = pc_id + (c_valid ? 32'd2 : 32'd4);
+
 // ============================================================
 // DECODE STAGE (ID)
 // ============================================================
@@ -660,6 +669,7 @@ always_ff@(posedge clk_i or posedge reset_i)
 			rs3_forwarded_ie <= 0;
 			c_valid_ie <= FALSE;
 			stale_ie <= 1'b0;
+			predicted_pc_ie <= 0;
 		end
 		else if(ie_flush || interrupt_valid) begin
 			ctrl_bus_ie <= CTRL_BUS_NOP();
@@ -670,6 +680,7 @@ always_ff@(posedge clk_i or posedge reset_i)
 			rs3_forwarded_ie <= 0;
 			c_valid_ie <= FALSE;
 			stale_ie <= 1'b0;
+			predicted_pc_ie <= 0;
 		end
 		else if(!ie_stall) begin
 			// When stale_id is set (1 cycle after trap), the instruction in ID is
@@ -681,6 +692,7 @@ always_ff@(posedge clk_i or posedge reset_i)
 			rs1_forwarded_ie <= rs1_forwarded_id;
 			rs2_forwarded_ie <= rs2_forwarded_id;
 			rs3_forwarded_ie <= rs3_forwarded_id;
+			predicted_pc_ie <= predicted_pc_id;
 			c_valid_ie <= c_valid;
 			stale_ie <= stale_id;
 		end

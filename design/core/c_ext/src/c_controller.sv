@@ -18,6 +18,10 @@ import core_pkg::*;
 //   via redirect_i/redirect_addr_i — NO duplicated PC source mux here.
 //   On sequential advance, apc increments by +2 (compressed) or +4 (32-bit).
 //
+// BPU extension point: when a future BTB predicts taken at IF time, core_top
+// will assert redirect_i with the BTB target on redirect_addr_i.  The existing
+// redirect/apc mechanism handles this without any c_controller changes.
+//
 module c_controller (
 	input              clk_i,
 	input              reset_i,
