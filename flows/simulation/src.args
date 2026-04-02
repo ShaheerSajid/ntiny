@@ -49,6 +49,7 @@
 ../../design/core/stall_unit/src/stall_line.sv
 ../../design/core/hazard_unit/src/hazard_unit.sv
 ../../design/core/privilege_unit/src/privilege_unit.sv
+../../design/core/debug_ctrl/src/debug_ctrl.sv
 ../../design/core/branch/src/branch_comp.sv
 ../../design/core/program_counter/src/program_counter.sv
 ../../design/core/forwarding_unit/src/forwarding_logic.sv

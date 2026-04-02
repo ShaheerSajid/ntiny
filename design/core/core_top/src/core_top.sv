@@ -221,96 +221,53 @@ logic [31:0] c2a_writedata;
 // Misaligned access detection (IE stage)
 // misalign detection moved into interrupt_ctrl
 logic exception_from_ie;
-////////////////////////////////debug logic//////////////////////////
+// ── Debug Controller ────────────────────────────────────────────────────
 logic [31:0] dpc;
-logic [31:0] dcsr;
-dcause_e debug_cause;
-onebit_sig_e debug_step;
-onebit_sig_e ar_done_r;
-onebit_sig_e am_done_r;
+logic        dcsr_ebreak, dcsr_stopcount, dcsr_step;
+logic        dbg_rf_override, dbg_mem_override;
 onebit_sig_e c_busy;
-logic [31:0]next_instruction_addr;
-enum logic [1:0] {RUNNING, HALTED, RESUME} pstate, nstate;
-always_ff@(posedge clk_i or posedge reset_i)
-begin
-	if(reset_i)
-		pstate <= RUNNING;
-	else
-		pstate <= nstate;
-end
-always_comb
-begin
-	case(pstate)
-		RUNNING: nstate = (haltreq_i || (ctrl_bus_if_id.ebreak == TRUE && dcsr[15]) || (debug_step && !c_busy))? HALTED : RUNNING;
-		HALTED:	nstate = resumereq_i? RESUME : HALTED;
-		RESUME: nstate = resumereq_i? RESUME : RUNNING;
-		default: nstate = RUNNING;
-	endcase
-end
-assign resumeack_o = onebit_sig_e'(pstate == RESUME);
-assign running_o = onebit_sig_e'(pstate == RUNNING);
-assign halted_o = onebit_sig_e'((pstate == HALTED) || (pstate == RESUME));
+logic [31:0] next_instruction_addr;
 
-//dcsr
-always_ff@(posedge clk_i or posedge reset_i)
-begin
-	if(reset_i)
-		debug_cause <= NO_DBG_CAUSE;
-	else if(pstate == RUNNING && ctrl_bus_if_id.ebreak == TRUE && dcsr[15])
-		debug_cause <= DBG_EBREAK;
-	else if(pstate == RUNNING && haltreq_i)
-		debug_cause <= DBG_HALTREQ;
-	else if(pstate == RUNNING && debug_step)
-		debug_cause <= DBG_STEP;
-end
-assign debug_step = onebit_sig_e'(dcsr[2]);
-always_ff@(posedge clk_i or posedge reset_i)
-begin
-		if(reset_i)
-			dcsr <= 0;
-		else if(ar_en_i && ar_wr_i && (ar_ad_i == 16'h07b0))
-			dcsr <= ar_di_i;//add dcsr
-end
-//dpc
-always_ff@(posedge clk_i or posedge reset_i)
-begin
-	if(reset_i)
-		dpc <= 0;
-	else if(ar_en_i && ar_wr_i && (ar_ad_i == 16'h07b1)) 
-		dpc <= ar_di_i;
-	else if(pstate == RUNNING && ctrl_bus_if_id.ebreak == TRUE && dcsr[15])
-		dpc <= pc_id;
-	else if(pstate == RUNNING && (haltreq_i || debug_step))
-		dpc <= next_instruction_addr;
-end
-//abstract register read logic
-always_ff@(posedge clk_i or posedge reset_i)
-begin
-	if(reset_i) begin
-		ar_do_o <= 0;
-		ar_done_r <= FALSE;
-		am_done_r <= FALSE;
-	end
-	else begin
-		if(ar_ad_i < 32'h1000)
-			case(ar_ad_i)
-				16'h07b0: ar_do_o <= {4'd4, 12'd0, dcsr[15], 1'b0, dcsr[13:9], debug_cause, 1'b0, dcsr[4], 1'b0, dcsr[2], 2'd3};
-				16'h07b1: ar_do_o <= dpc;
-				default:  ar_do_o <= csr_result;
-			endcase
-		else if(ar_ad_i >= 32'h1000 && ar_ad_i <= 32'h101f)
-			ar_do_o <= rs1_int;
-		else if(ar_ad_i >= 32'h1020 && ar_ad_i <= 32'h103f)
-			ar_do_o <= rs1_float;
-
-		ar_done_r <= ar_en_i;
-		am_done_r <= onebit_sig_e'(am_en_i & dmem_port.ready);
-	end
-end
-assign am_do_o = readdata_imem;
-assign ar_done_o = ar_done_r;
-assign am_done_o = am_done_r;
-////////////////////////////////////////////
+debug_ctrl debug_ctrl_inst (
+    .clk_i            (clk_i),
+    .reset_i          (reset_i),
+    // External debug interface
+    .haltreq_i        (haltreq_i),
+    .resumereq_i      (resumereq_i),
+    .ar_en_i          (ar_en_i),
+    .ar_wr_i          (ar_wr_i),
+    .ar_ad_i          (ar_ad_i),
+    .ar_di_i          (ar_di_i),
+    .am_en_i          (am_en_i),
+    .dmem_ready_i     (dmem_port.ready),
+    // Pipeline state
+    .id_ebreak_i      (ctrl_bus_if_id.ebreak),
+    .c_busy_i         (c_busy),
+    .pc_id_i          (pc_id),
+    .next_insn_addr_i (next_instruction_addr),
+    // Read data sources
+    .csr_result_i     (csr_result),
+    .rs1_int_i        (rs1_int),
+    .rs1_float_i      (rs1_float),
+    .readdata_imem_i  (readdata_imem),
+    // Core status
+    .resumeack_o      (resumeack_o),
+    .running_o        (running_o),
+    .halted_o         (halted_o),
+    // Debug CSR bits
+    .dpc_o            (dpc),
+    .dcsr_ebreak_o    (dcsr_ebreak),
+    .dcsr_stopcount_o (dcsr_stopcount),
+    .dcsr_step_o      (dcsr_step),
+    // Abstract register/memory
+    .ar_do_o          (ar_do_o),
+    .ar_done_o        (ar_done_o),
+    .am_do_o          (am_do_o),
+    .am_done_o        (am_done_o),
+    // Override signals
+    .dbg_rf_override_o (dbg_rf_override),
+    .dbg_mem_override_o(dbg_mem_override)
+);
 
 // ── Hazard Unit ─────────────────────────────────────────────────────────
 // Centralised stall / flush / post-trap logic (was inline).
@@ -333,7 +290,7 @@ hazard_unit hazard_unit_inst (
     .resumeack_i        (resumeack_o),
     .exception_from_ie_i(exception_from_ie),
     // Processor state
-    .halted_i           (pstate == HALTED),
+    .halted_i           (halted_o),
     // CSR ret hazard
     .id_mret_i          (ctrl_bus_if_id.mret),
     .id_sret_i          (ctrl_bus_if_id.sret),
@@ -518,7 +475,7 @@ reg_file regfile_inst
 	.write_i	  (rf_wr_en),
 	.wraddr_i	  (rf_wr_addr),
 	.wrdata_i	  (rf_wr_data),
-	.rdaddra_i	(((pstate==HALTED) & ar_en_i)? ar_ad_i[4:0] : ctrl_bus_if_id.rs1_int[4:0]),
+	.rdaddra_i	(dbg_rf_override? ar_ad_i[4:0] : ctrl_bus_if_id.rs1_int[4:0]),
 	.rddataa_o	(rs1_int),
 	.rdaddrb_i	(ctrl_bus_if_id.rs2_int[4:0]),
 	.rddatab_o	(rs2_int),
@@ -534,7 +491,7 @@ reg_file regfile_inst
 		.write_i	  (ctrl_bus_iwb.rd_float != NO_REG),
 		.wraddr_i	  (ctrl_bus_iwb.rd_float[4:0]),	
 		.wrdata_i	  (write_back_data),
-		.rdaddra_i	(((pstate==HALTED) & ar_en_i)? ar_ad_i[4:0] : ctrl_bus_if_id.rs1_float[4:0]),
+		.rdaddra_i	(dbg_rf_override? ar_ad_i[4:0] : ctrl_bus_if_id.rs1_float[4:0]),
 		.rddataa_o	(rs1_float),
 		.rdaddrb_i	(ctrl_bus_if_id.rs2_float[4:0]),
 		.rddatab_o	(rs2_float),
@@ -663,7 +620,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .ebreak_raw_i       (ctrl_bus_if_id.ebreak),
   .illegal_insn_i     (illegal_insn_id),
   .insn_valid_id_i    (insn_valid_id),
-  .debug_ebreak_i     (dcsr[15]),
+  .debug_ebreak_i     (dcsr_ebreak),
   // IE-stage signals for misalign detection (done inside)
   .ie_mem_op_i        (ctrl_bus_ie.mem_op),
   .ie_ls_width_i      (ctrl_bus_ie.load_store_width),
@@ -818,14 +775,14 @@ csr_unit csr_unit_inst
 (
 	.clk_i					      (clk_i),
   .reset_i				      (reset_i),
-	.stop_counters_i	  	(onebit_sig_e'(dcsr[10] & (pstate==HALTED))),
+	.stop_counters_i	  	(onebit_sig_e'(dcsr_stopcount & halted_o)),
 	.float_valid_i			  (onebit_sig_e'(ctrl_bus_ie.float_op != NO_FP_OP && alu_stall == FALSE)),
 	.roundmode_o			    (frm),
 	.float_status_i			  (float_status),
   .csr_instret_trigger_i(onebit_sig_e'(ctrl_bus_ie.inst_type != NO_INS)),
 	.csr_cmd_i				    (ctrl_bus_ie.csr_op),
 	.csr_use_immediate_i	(ctrl_bus_ie.csr_use_immediate),
-	.csr_addr_i				    (((pstate==HALTED) & ar_en_i)? csr_reg_e'(ar_ad_i[11:0]) : ctrl_bus_ie.csr_addr),
+	.csr_addr_i				    (dbg_rf_override? csr_reg_e'(ar_ad_i[11:0]) : ctrl_bus_ie.csr_addr),
 	.imm_i					      (imm_ie),
 	.reg_i					      (opA_forwarded_data),
 	.csr_value_o			    (csr_result),
@@ -946,12 +903,12 @@ core2avl core2avl_inst
 	.clk_i			    	(clk_i),
 	.reset_i		      (reset_i),
 	.stall_i			    (FALSE),
-	.load_store_width	(((pstate==HALTED) & am_en_i)? load_store_width_e'(am_st_i) :  ctrl_bus_ie.load_store_width),
-	.mem_unsigned	  	(((pstate==HALTED) & am_en_i)? FALSE : ctrl_bus_ie.mem_unsigned),
-	.mem_op				    (((pstate==HALTED) & am_en_i)? mem_op_e'({1'b0,am_wr_i}) :
+	.load_store_width	(dbg_mem_override? load_store_width_e'(am_st_i) :  ctrl_bus_ie.load_store_width),
+	.mem_unsigned	  	(dbg_mem_override? FALSE : ctrl_bus_ie.mem_unsigned),
+	.mem_op				    (dbg_mem_override? mem_op_e'({1'b0,am_wr_i}) :
 	                     exception_from_ie ? NO_MEM_OP : ctrl_bus_ie.mem_op),
-	.addr_i			    	(((pstate==HALTED) & am_en_i)? am_ad_i :  alu_result),
-	.data2write_i		  (((pstate==HALTED) & am_en_i)? am_di_i :  opB_forwarded_data),
+	.addr_i			    	(dbg_mem_override? am_ad_i :  alu_result),
+	.data2write_i		  (dbg_mem_override? am_di_i :  opB_forwarded_data),
 	.data2read_o		  (readdata_imem),
 	//avl signals (intermediate, muxed with AMO unit)
 	.readdata_i			  (dmem_port.rdata),
