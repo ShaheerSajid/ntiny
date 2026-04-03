@@ -156,6 +156,13 @@ always @(posedge clk) begin
 	end
 end
 
+// ── Crash trace state ───────────────────────────────────────────
+reg crash_trace_arm;
+reg [31:0] crash_trace_cnt;
+reg [1:0] crash_prev_priv;
+reg [31:0] crash_prev_sscratch;
+initial begin crash_trace_arm = 0; crash_trace_cnt = 0; crash_prev_priv = 3; crash_prev_sscratch = 0; end
+
 // ── Fast simulation console ─────────────────────────────────────
 // Captures UART TX register writes directly from the bus, bypassing
 // the slow bit-by-bit UART serializer. Characters appear immediately.
@@ -203,14 +210,25 @@ always @(posedge clk) begin
 			$fwrite(mmu_fd, "SFENCE: pc_ie=%08h\n",
 				soc_top_inst.core_top_inst.pc_ie);
 
-		// Log data page faults
+		// Log data page faults with PTW state
 		if (soc_top_inst.core_top_inst.mmu_inst.d_fault_o)
-			$fwrite(mmu_fd, "D-FAULT: vaddr=%08h store=%0b priv=%0d sscratch=%08h pc=%08h\n",
+			$fwrite(mmu_fd, "D-FAULT: vaddr=%08h store=%0b priv=%0d ptw_state=%0d ptw_pte=%08h mega=%0b\n",
 				soc_top_inst.core_top_inst.mmu_inst.d_vaddr_i,
 				soc_top_inst.core_top_inst.mmu_inst.d_store_i,
 				soc_top_inst.core_top_inst.mmu_inst.d_eff_priv,
-				soc_top_inst.core_top_inst.csr_unit_inst._SSCRATCH,
-				soc_top_inst.core_top_inst.pc_ie);
+				soc_top_inst.core_top_inst.mmu_inst.ptw_state,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_pte,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_mega);
+
+		// Log PTW faults (when PTW itself causes the fault)
+		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 5)  // PTW_FAULT
+			$fwrite(mmu_fd, "PTW-FAULT: vaddr=%08h pte=%08h mega=%0b perm=%0b priv=%0b for_store=%0b\n",
+				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_pte,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_mega,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_perm_fault,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_priv_fault,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_for_store);
 
 		// Log sret transitions (U-mode return)
 		if (soc_top_inst.core_top_inst.csr_unit_inst.sret_i &&
@@ -230,7 +248,33 @@ always @(posedge clk) begin
 		pc_sample_cnt <= 0;
 	else begin
 		pc_sample_cnt <= pc_sample_cnt + 1;
-		// Trap logging disabled for speed — re-enable for debugging
+		// ── Crash trace: log EVERY priv change and trap near init ──
+		// Always log when: priv changes, trap fires, or sscratch changes
+		// Only active after first SRET to user mode
+		if (soc_top_inst.core_top_inst.csr_unit_inst.sret_i &&
+		    soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'b01 &&
+		    soc_top_inst.core_top_inst.csr_unit_inst._MSTATUS[8] == 1'b0)
+			crash_trace_arm <= 1;
+
+		if (crash_trace_arm) begin
+			// Log on trap, priv change, or sscratch write
+			if (soc_top_inst.core_top_inst.interrupt_valid ||
+			    soc_top_inst.core_top_inst.csr_unit_inst.priv_level != crash_prev_priv ||
+			    soc_top_inst.core_top_inst.csr_unit_inst._SSCRATCH != crash_prev_sscratch) begin
+				$fwrite(mmu_fd, "EV pc_ie=%08h priv=%0d sscratch=%08h scause=%08h sepc=%08h trap=%0b async=%0b ie_type=%0d\n",
+					soc_top_inst.core_top_inst.pc_ie,
+					soc_top_inst.core_top_inst.csr_unit_inst.priv_level,
+					soc_top_inst.core_top_inst.csr_unit_inst._SSCRATCH,
+					soc_top_inst.core_top_inst.csr_unit_inst._SCAUSE,
+					soc_top_inst.core_top_inst.csr_unit_inst._SEPC,
+					soc_top_inst.core_top_inst.interrupt_valid,
+					soc_top_inst.core_top_inst.async_trap,
+					soc_top_inst.core_top_inst.ctrl_bus_ie.inst_type);
+				$fflush(mmu_fd);
+			end
+			crash_prev_priv <= soc_top_inst.core_top_inst.csr_unit_inst.priv_level;
+			crash_prev_sscratch <= soc_top_inst.core_top_inst.csr_unit_inst._SSCRATCH;
+		end
 		if (pc_sample_cnt[19:0] == 20'h0) begin // every ~1M cycles
 			$fwrite(sim_con_fd, "PC[%0d] pc=%08h priv=%0d satp=%08h\n",
 				pc_sample_cnt,
