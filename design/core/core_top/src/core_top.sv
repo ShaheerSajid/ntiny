@@ -139,6 +139,7 @@ onebit_sig_e c_valid;
 onebit_sig_e c_valid_ie;
 
 logic trap_true;
+logic async_trap;   // async interrupt only (for CSR write suppression)
 logic [31:0]ip_csr;
 logic [31:0]ie_csr;
 logic [31:0]vec_csr;
@@ -649,6 +650,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .data_fault_addr_i  (mmu_d_fault_addr),
   // Outputs
   .trap_valid_o       (trap_true),
+  .async_trap_o       (async_trap),
   .trap_to_s_o        (trap_to_s),
   .handler_addr_o     (handler_addr),
   .ecause_o           (ecause_csr),
@@ -798,7 +800,10 @@ csr_unit csr_unit_inst
 	.roundmode_o			    (frm),
 	.float_status_i			  (float_status),
   .csr_instret_trigger_i(onebit_sig_e'(ctrl_bus_ie.inst_type != NO_INS)),
-	.csr_cmd_i				    (ctrl_bus_ie.csr_op),
+	// Suppress CSR writes when an async interrupt fires on the same cycle as
+	// a CSR instruction in IE. The interrupted instruction must not commit.
+	// Sync exceptions (from ID stage) don't affect the IE instruction.
+	.csr_cmd_i				    (async_trap ? NO_CSR_OP : ctrl_bus_ie.csr_op),
 	.csr_use_immediate_i	(ctrl_bus_ie.csr_use_immediate),
 	.csr_addr_i				    (dbg_rf_override? csr_reg_e'(ar_ad_i[11:0]) : ctrl_bus_ie.csr_addr),
 	.imm_i					      (imm_ie),

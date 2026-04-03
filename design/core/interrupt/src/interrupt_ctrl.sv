@@ -60,6 +60,7 @@ module interrupt_ctrl (
     // ── Outputs ─────────────────────────────────────────────────────────
     output       trap_valid_o,
     output       trap_to_s_o,
+    output       async_trap_o,      // async interrupt (not sync exception)
     output [31:0] handler_addr_o,
     output [31:0] ecause_o,
     output [31:0] epc_o,
@@ -191,6 +192,7 @@ end
 // Outputs
 // ═══════════════════════════════════════════════════════════════════════════
 assign trap_valid_o = sync_exception | async_valid;
+assign async_trap_o = async_valid;
 assign epc_o        = epc_out;
 assign ecause_o     = {is_interrupt ? 24'h800000 : 24'h0, cause_code};
 assign mtval_o      = mtval_out;

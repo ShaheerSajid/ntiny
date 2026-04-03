@@ -173,6 +173,56 @@ always @(posedge clk) begin
 	end
 end
 
+// ── TLB/MMU trace for bad_page debugging ────────────────────────
+// Log DTLB fills, sfence flushes, and data accesses to suspicious PFNs
+integer mmu_fd;
+initial mmu_fd = $fopen("mmu_trace.log", "w");
+
+always @(posedge clk) begin
+	if (!reset) begin
+		// Log every DTLB fill
+		if (soc_top_inst.core_top_inst.mmu_inst.tlb_fill &&
+		    !soc_top_inst.core_top_inst.mmu_inst.ptw_for_insn) begin
+			$fwrite(mmu_fd, "DTLB-FILL: vpn1=%03h vpn0=%03h -> ppn1=%03h ppn0=%03h mega=%0b rwx=%0b%0b%0b adu=%0b%0b%0b vaddr=%08h\n",
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.vpn1,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.vpn0,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.ppn1,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.ppn0,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.mega,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.r,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.w,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.x,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.a,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.d,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.u,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr);
+		end
+
+		// Log SFENCE.VMA
+		if (soc_top_inst.core_top_inst.mmu_inst.sfence_i)
+			$fwrite(mmu_fd, "SFENCE: pc_ie=%08h\n",
+				soc_top_inst.core_top_inst.pc_ie);
+
+		// Log data page faults
+		if (soc_top_inst.core_top_inst.mmu_inst.d_fault_o)
+			$fwrite(mmu_fd, "D-FAULT: vaddr=%08h store=%0b priv=%0d sscratch=%08h pc=%08h\n",
+				soc_top_inst.core_top_inst.mmu_inst.d_vaddr_i,
+				soc_top_inst.core_top_inst.mmu_inst.d_store_i,
+				soc_top_inst.core_top_inst.mmu_inst.d_eff_priv,
+				soc_top_inst.core_top_inst.csr_unit_inst._SSCRATCH,
+				soc_top_inst.core_top_inst.pc_ie);
+
+		// Log sret transitions (U-mode return)
+		if (soc_top_inst.core_top_inst.csr_unit_inst.sret_i &&
+		    soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'b01)
+			$fwrite(mmu_fd, "SRET: sepc=%08h sscratch=%08h priv=%0d->%0d\n",
+				soc_top_inst.core_top_inst.csr_unit_inst._SEPC,
+				soc_top_inst.core_top_inst.csr_unit_inst._SSCRATCH,
+				soc_top_inst.core_top_inst.csr_unit_inst.priv_level,
+				soc_top_inst.core_top_inst.csr_unit_inst._MSTATUS[8] ? 1 : 0);
+	end
+end
+
 // ── Lightweight PC sampler (every 1M cycles) ────────────────────
 reg [31:0] pc_sample_cnt;
 always @(posedge clk) begin
