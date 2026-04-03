@@ -172,6 +172,8 @@ module mmu_sv32 (
     logic        ptw_for_store;     // translation is for a store
     logic        ptw_for_insn;      // translation is for instruction fetch
     logic        ptw_mega;          // level-1 leaf = megapage
+    logic [1:0]  ptw_priv;          // latched privilege at PTW start
+    logic        ptw_sum;           // latched SUM bit at PTW start
 
     // PTE fields
     wire pte_v = ptw_pte[0];
@@ -209,15 +211,18 @@ module mmu_sv32 (
 
     // U/S permission check
     logic ptw_priv_fault;
-    wire [1:0] ptw_check_priv = ptw_for_insn ? i_priv_i : d_eff_priv;
+    // Use LATCHED privilege and SUM from when the PTW started, not the
+    // current values — a trap can change priv/SUM mid-walk, causing the
+    // PTW to incorrectly fault on U-pages when checking with S-mode priv.
+    wire [1:0] ptw_check_priv = ptw_for_insn ? ptw_priv : ptw_priv;
+    wire       ptw_check_sum  = ptw_sum;
     always_comb begin
         if (ptw_check_priv == 2'b00)
-            ptw_priv_fault = !pte_u;             // U-mode needs U bit
+            ptw_priv_fault = !pte_u;
         else if (ptw_check_priv == 2'b01)
-            // SUM only applies to data; instruction fetch from U-pages always faults in S-mode
-            ptw_priv_fault = ptw_for_insn ? pte_u : (pte_u && !sum_bit);
+            ptw_priv_fault = ptw_for_insn ? pte_u : (pte_u && !ptw_check_sum);
         else
-            ptw_priv_fault = 1'b0;               // M-mode OK
+            ptw_priv_fault = 1'b0;
     end
 
     // PTW address computation
@@ -236,6 +241,8 @@ module mmu_sv32 (
             ptw_for_store <= 1'b0;
             ptw_for_insn <= 1'b0;
             ptw_mega <= 1'b0;
+            ptw_priv <= 2'b11;
+            ptw_sum <= 1'b0;
             ptw_l1_pte_saved <= '0;
         end else if (flush_i) begin
             // Pipeline flush (trap/interrupt): abort any in-flight PTW walk.
@@ -251,12 +258,16 @@ module mmu_sv32 (
                         ptw_for_store <= d_store_i;
                         ptw_for_insn <= 1'b0;
                         ptw_mega <= 1'b0;
+                        ptw_priv <= d_eff_priv;  // latch priv at walk start
+                        ptw_sum <= sum_bit;      // latch SUM at walk start
                     end else if (i_translate && i_req_i && !itlb_hit) begin
                         ptw_state <= PTW_L1;
                         ptw_vaddr <= i_vaddr_i;
                         ptw_for_store <= 1'b0;
                         ptw_for_insn <= 1'b1;
                         ptw_mega <= 1'b0;
+                        ptw_priv <= i_priv_i;    // latch insn priv at walk start
+                        ptw_sum <= sum_bit;
                     end
                 end
 
