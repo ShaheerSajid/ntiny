@@ -174,6 +174,10 @@ module mmu_sv32 (
     logic        ptw_mega;          // level-1 leaf = megapage
     logic [1:0]  ptw_priv;          // latched privilege at PTW start
     logic        ptw_sum;           // latched SUM bit at PTW start
+    logic        flush_prev;        // 1-cycle delay after flush to suppress stale requests
+    always_ff @(posedge clk_i or posedge reset_i)
+        if (reset_i) flush_prev <= 1'b0;
+        else         flush_prev <= flush_i;
 
     // PTE fields
     wire pte_v = ptw_pte[0];
@@ -244,9 +248,10 @@ module mmu_sv32 (
             ptw_priv <= 2'b11;
             ptw_sum <= 1'b0;
             ptw_l1_pte_saved <= '0;
-        end else if (flush_i) begin
+        end else if (flush_i || flush_prev) begin
             // Pipeline flush (trap/interrupt): abort any in-flight PTW walk.
-            // The PTW was walking a stale virtual address that is no longer relevant.
+            // Also suppress for 1 cycle after flush to prevent stale d_req_i
+            // from starting a new walk with wrong privilege (trap changed priv).
             ptw_state <= PTW_IDLE;
         end else begin
             case (ptw_state)
