@@ -72,16 +72,10 @@ module interrupt_ctrl (
 // ═══════════════════════════════════════════════════════════════════════════
 // Misaligned access detection (IE stage)
 // ═══════════════════════════════════════════════════════════════════════════
-// Temporarily re-enable misalign traps to diagnose bad_page corruption.
-// If Linux boots clean with traps, the HW misalign implementation has a bug.
-wire misalign_load = (ie_mem_op_i == READ) && (
-    (ie_ls_width_i == HALF && ie_addr_lsb_i[0]) ||
-    (ie_ls_width_i == WORD && |ie_addr_lsb_i)
-);
-wire misalign_store = (ie_mem_op_i == WRITE) && (
-    (ie_ls_width_i == HALF && ie_addr_lsb_i[0]) ||
-    (ie_ls_width_i == WORD && |ie_addr_lsb_i)
-);
+// HW misaligned access confirmed NOT the cause of bad_page (same error
+// with SW emulation). Re-enable HW support for performance.
+wire misalign_load  = 1'b0;  // handled in HW (core2avl)
+wire misalign_store = 1'b0;  // handled in HW (core2avl)
 wire misalign_amo = (ie_amo_op_i != NO_AMO_OP) && |ie_addr_lsb_i && !amo_in_progress_i;
 
 assign exception_from_ie_o = misalign_amo | ie_csr_illegal;
