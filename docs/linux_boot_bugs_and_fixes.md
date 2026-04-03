@@ -1,7 +1,162 @@
-# Bugs Found and Fixed During Linux Boot Bring-up
+# Bugs Found and Fixed During ntiny Development
 
-Every issue encountered while booting OpenSBI + Linux on ntiny, with root cause
-analysis and fix details. Ordered chronologically as discovered.
+Every significant bug encountered during ntiny core development, MMU bring-up,
+and Linux boot, with root cause analysis and fix details. Ordered chronologically.
+
+---
+
+## Part A: Pre-Linux Bugs (MMU, FPU, Core Refactor)
+
+---
+
+## 0a. FPU Flag Accumulation During Multi-Cycle Operations
+
+**Symptom**: Spurious FPU exception flags appearing in `fflags` CSR after
+multi-cycle FPU operations (divide, sqrt).
+
+**Root Cause**: `float_valid_i` was not gated by `!alu_stall`, so during
+multi-cycle FPU operations the intermediate/stale flag outputs leaked into
+the CSR accumulator on every cycle the FPU was busy.
+
+**Fix**: Gate `float_valid_i` with `!alu_stall` so flags are only captured
+once when the FPU completes.
+
+**Commit**: `31a0261`
+
+---
+
+## 0b. FP f2i Conversion Clamping and Inexact Flag
+
+**Symptom**: RISCOF F-extension `fcvt.w.s` / `fcvt.wu.s` tests failed for
+NaN, overflow, and negative inputs.
+
+**Root Cause**: `fp_f2i.sv` (PakFPU) had incorrect NaN/overflow/negative
+clamping results and was missing the NX (inexact) flag on non-NV paths.
+
+**Fix**: Corrected clamping values and added NX flag generation.
+
+**Commit**: `31a0261`
+
+---
+
+## 0c. RS2 Forwarding Loss During DTLB Stall
+
+**Symptom**: Store instructions wrote `0x00000000` instead of the correct rs2
+value when a DTLB miss occurred. Broke `vm_A_and_D` RISCOF tests.
+
+**Root Cause**: During a store DTLB miss, the IE stage stalls while the
+forwarding sources (IMEM/IWB stages) continue advancing. When the rs2
+producer completed IWB while the store was stuck in IE, the `FORWARD_IWB`
+signal fired correctly but `ie_stall=1` prevented the IE register from
+latching the forwarded value. By the time the DTLB resolved and the store
+fired, the forwarding source had left the pipeline and `rs2_forwarded_ie`
+held its original stale zero.
+
+**Fix**: Added an else branch to the IE pipeline register `always_ff` that
+captures forwarded operand values (rs1/rs2/rs3) during a stall, before the
+forwarding source leaves the pipeline.
+
+**Commit**: `d516da0`
+
+---
+
+## 0d. Sv32 MMU: SUM Bit Applied to Instruction Fetch
+
+**Symptom**: `vm_sum_set_S_mode` RISCOF test failed — S-mode instruction
+fetch from U-pages succeeded when it should have faulted.
+
+**Root Cause**: The ITLB permission check used the SUM (Supervisor User
+Memory access) bit for instruction fetches. Per RISC-V spec §3.1.6.3,
+SUM only applies to data accesses. S-mode instruction fetch from U-pages
+must ALWAYS fault, regardless of SUM.
+
+**Fix**: Hardcoded the ITLB instruction permission check to reject U-pages
+in S-mode unconditionally (no SUM check for instruction side).
+
+**Commit**: `8721154`
+
+---
+
+## 0e. PTW Address Width Bug
+
+**Symptom**: Page table walks produced wrong physical addresses for L1 PDE
+lookups.
+
+**Root Cause**: `ptw_l1_addr` computation used wrong bit width for
+`satp_ppn` — needed `[19:0]` with 12-bit left shift, was using incorrect
+width causing address truncation.
+
+**Fix**: Corrected `ptw_l1_addr = {satp_ppn[19:0], 12'b0} + {20'b0, vaddr[31:22], 2'b00}`.
+
+**Commit**: `8721154`
+
+---
+
+## 0f. Spurious Page Faults in Bare Mode
+
+**Symptom**: Page fault exceptions fired when MMU was disabled (satp.MODE=0).
+
+**Root Cause**: `i_fault_o` and `d_fault_o` from the MMU were not gated by
+the translation-active signals (`i_translate`, `d_translate`). When the
+MMU was disabled, internal fault logic could still produce spurious outputs.
+
+**Fix**: Gated fault outputs with their respective translate-active signals.
+
+**Commit**: `8721154`
+
+---
+
+## 0g. PTW Stale rvalid from L1 Read Corrupting L0
+
+**Symptom**: L0 PTE read returned the L1 PDE value instead of the actual
+L0 entry.
+
+**Root Cause**: The PTW transitioned directly from L1 read to L0 read. The
+L1 `rvalid` response arrived on the same cycle the L0 request was issued,
+and the stale L1 data was captured as the L0 result.
+
+**Fix**: Added `PTW_L0_WAIT` state — a dead cycle between L1 completion and
+L0 request to drain the stale `rvalid`.
+
+**Commit**: `8721154`
+
+---
+
+## 0h. c_controller SRET Bug (Used MEPC Instead of SEPC)
+
+**Symptom**: `SRET` instruction returned to `mepc` instead of `sepc`.
+
+**Root Cause**: The old c_controller had a duplicated PC source mux with
+8 address inputs. The `RET` case always used `epc` (MEPC) regardless of
+whether the instruction was MRET or SRET.
+
+**Fix**: Refactored c_controller to use 3 signals (`redirect_i`,
+`redirect_addr_i`, `interrupt_i`) instead of duplicating the PC mux.
+The redirect address comes from core_top's `pc_in` which already
+distinguishes MRET (uses mepc) vs SRET (uses sepc).
+
+**Commit**: `3f01f53`
+
+---
+
+## 0i. mtvec Cleared to Zero on Boot
+
+**Symptom**: Any exception during startup (including UART init) jumped to
+address 0 and crashed silently.
+
+**Root Cause**: `init.c` startup code had `csrrw x0, mtvec, x0` which
+wrote zero to mtvec. If any exception fired before main() set mtvec
+properly, the handler address was 0.
+
+**Fix**: Changed startup to set mtvec to the vector table (`_init`) in
+vectored mode: `la t0, _init; ori t0, t0, 1; csrw mtvec, t0`.
+Also added FPU enable (`mstatus.FS = Initial`).
+
+**Commit**: `104fc7e`
+
+---
+
+## Part B: Linux Boot Bugs
 
 ---
 
@@ -264,13 +419,29 @@ Without these, the kernel had no way to output text via the SBI ecall path.
 
 ## Summary Table
 
+### Pre-Linux (MMU, FPU, Core)
+
 | # | Bug | Severity | Where | Root Cause Category |
 |---|-----|----------|-------|-------------------|
-| 1 | AMO flush | Critical | core_top | Pipeline hazard logic |
+| 0a | FPU flag leak | Medium | csr_unit | Missing stall gate |
+| 0b | f2i clamping | Medium | fp_f2i.sv | Incorrect logic |
+| 0c | rs2 forwarding loss | Critical | core_top IE reg wall | Stall vs forwarding race |
+| 0d | SUM on insn fetch | Medium | mmu_sv32 | Spec misread |
+| 0e | PTW address width | Critical | mmu_sv32 | Bit-width error |
+| 0f | Bare-mode faults | Medium | mmu_sv32 | Missing gate |
+| 0g | PTW L1→L0 stale data | Critical | mmu_sv32 | Pipeline timing |
+| 0h | SRET uses MEPC | Critical | c_controller | Duplicated mux logic |
+| 0i | mtvec cleared to 0 | Major | init.c | Boot code error |
+
+### Linux Boot
+
+| # | Bug | Severity | Where | Root Cause Category |
+|---|-----|----------|-------|-------------------|
+| 1 | AMO flush | Critical | core_top | Pipeline hazard loop |
 | 2 | CSR invalid | Critical | csr_unit | Overly broad condition |
 | 3 | Missing CSRs | Critical | csr_unit | Incomplete implementation |
 | 4 | Post-trap NOP | Critical | hazard_unit, core_top | Stall timing |
-| 5 | PLIC bugs | Critical | plic.v | Design flaws (10+ issues) |
+| 5 | PLIC bugs (10+) | Critical | plic.v | Design flaws |
 | 6 | CLINT/PLIC reads | Critical | clint.sv, plic_rv.sv | Bus timing mismatch |
 | 7 | TIME CSR zero | Critical | csr_unit | Missing HW wiring |
 | 8 | No misaligned HW | Major | core2avl, interrupt_ctrl | Missing feature |
@@ -278,3 +449,5 @@ Without these, the kernel had no way to output text via the SBI ecall path.
 | 10 | UART TX stall | Major | platform.c | Sim vs HW mismatch |
 | 11 | UART log conflict | Minor | uartdpi.c, tb_soc_top.v | Dual writers |
 | 12 | No kernel console | Config | Linux .config | Missing drivers |
+
+**Total: 21 bugs found and fixed across 3 development phases.**
