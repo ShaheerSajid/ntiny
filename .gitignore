@@ -27,6 +27,7 @@ flows/simulation/.simvision/
 # Generated hex/text files in simulation dir
 flows/simulation/*.text
 flows/simulation/*.X
+flows/simulation/*.hex
 
 # Software build outputs
 software/build/
