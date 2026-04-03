@@ -315,6 +315,7 @@ module soc_top
         .ext_itr_i      (ext_interrupt),
         .timer_itr_i    (timer_interrupt),
         .soft_itr_i     (soft_intr),
+        .mtime_i        (clint_mtime),
         .fence_i_o      (fence_i_wire)
     );
 
@@ -472,6 +473,7 @@ module soc_top
     // Drives timer_interrupt (MTIP) and soft_intr (MSIP).
     // Replaces the old software interrupt register.
     logic clint_timer_irq, clint_soft_irq;
+    logic [63:0] clint_mtime;
 
     clint clint_inst (
         .clk_i        (clk_i),
@@ -483,7 +485,8 @@ module soc_top
         .writedata_i  (dmem_bus.wdata),
         .readdata_o   (clint_readdata),
         .timer_irq_o  (clint_timer_irq),
-        .soft_irq_o   (clint_soft_irq)
+        .soft_irq_o   (clint_soft_irq),
+        .mtime_o      (clint_mtime)
     );
 
     // CLINT drives M-mode timer and software interrupts to the core

@@ -38,6 +38,7 @@ module core_top
   input ext_itr_i,
   input timer_itr_i,
   input soft_itr_i,
+  input [63:0] mtime_i,       // CLINT mtime for TIME/TIMEH CSRs
 
 
   // Cache control
@@ -112,6 +113,7 @@ logic [31:0] csr_result;
 float_status_e float_status;
 roundmode_e frm;
 onebit_sig_e alu_stall;
+logic        misalign_stall;
 
 logic [31:0] exec_result_ie;
 logic [31:0] exec_result_imem;
@@ -283,6 +285,7 @@ hazard_unit hazard_unit_inst (
     // External stall sources
     .alu_stall_i        (alu_stall),
     .amo_stall_i        (amo_stall),
+    .misalign_stall_i   (misalign_stall),
     .icache_stall_i     (1'b0),          // transparent cache: no stall
     .mmu_i_stall_i      (mmu_i_stall),
     .mmu_d_stall_i      (mmu_d_stall),
@@ -789,6 +792,7 @@ csr_unit csr_unit_inst
 (
 	.clk_i					      (clk_i),
   .reset_i				      (reset_i),
+	.mtime_i				      (mtime_i),
 	.stop_counters_i	  	(onebit_sig_e'(dcsr_stopcount & halted_o)),
 	.float_valid_i			  (onebit_sig_e'(ctrl_bus_ie.float_op != NO_FP_OP && alu_stall == FALSE)),
 	.roundmode_o			    (frm),
@@ -931,7 +935,8 @@ core2avl core2avl_inst
 	.writedata_o		  (c2a_writedata),
 	.byteenable_o		  (c2a_byteenable),
 	.read_o				    (c2a_read),
-	.write_o			    (c2a_write)
+	.write_o			    (c2a_write),
+	.misalign_stall_o (misalign_stall)
 );
 
 // ── AMO unit ──────────────────────────────────────────────────

@@ -55,9 +55,8 @@ void* uartdpi_create(const char *name) {
 
   fcntl(obj->master, F_SETFL, fcntl(obj->master, F_GETFL, 0) | O_NONBLOCK);
 
-  obj->logfile = fopen("uart.log", "w");
-  if (obj->logfile)
-    setvbuf(obj->logfile, NULL, _IONBF, 0);
+  /* File logging disabled — testbench fast console writes to uart.log instead */
+  obj->logfile = NULL;
 
   return (void*) obj;
 }

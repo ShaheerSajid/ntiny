@@ -17,6 +17,7 @@ module hazard_unit (
     // ── External stall sources ──────────────────────────────────────────
     input  onebit_sig_e alu_stall_i,       // MUL/DIV in progress
     input  onebit_sig_e amo_stall_i,       // atomic memory op FSM
+    input  logic        misalign_stall_i,  // misaligned access in progress
     input  logic        icache_stall_i,     // I-cache fill in progress
     input  onebit_sig_e mmu_i_stall_i,     // instruction TLB / PTW
     input  onebit_sig_e mmu_d_stall_i,     // data TLB / PTW
@@ -75,7 +76,8 @@ wire dmem_busy = dmem_req_i & ~dmem_ready_i;
 assign iwb_stall_o  = onebit_sig_e'(1'b0);
 assign imem_stall_o = onebit_sig_e'(iwb_stall_o);
 assign ie_stall_o   = onebit_sig_e'(imem_stall_o | alu_stall_i | dmem_busy |
-                                     amo_stall_i  | mmu_d_stall_i);
+                                     amo_stall_i  | mmu_d_stall_i |
+                                     misalign_stall_i);
 
 // CSR read-after-write hazard: mret/sret in ID reads epc, but preceding
 // CSR write in IE hasn't committed yet.

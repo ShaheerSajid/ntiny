@@ -7,6 +7,8 @@ module csr_unit (
 	input clk_i,
   input reset_i,
 
+	input [63:0] mtime_i,        // CLINT mtime for TIME/TIMEH CSRs
+
 	input csr_op_e csr_cmd_i,
 	input csr_reg_e csr_addr_i,
 	input onebit_sig_e csr_use_immediate_i,
@@ -326,10 +328,10 @@ module csr_unit (
 			FRM:            csr_value_o = {29'b0, _FRM[2:0]};
 			FCSR:           csr_value_o = {24'b0, _FRM[2:0], _FFLAGS[4:0]};
 			CYCLE:          csr_value_o = _MCYCLE;
-			TIME:           csr_value_o = 0;
+			TIME:           csr_value_o = mtime_i[31:0];
 			INSTRET:        csr_value_o = _MINSTRET;
 			CYCLEH:         csr_value_o = _MCYCLEH;
-			TIMEH:          csr_value_o = 0;
+			TIMEH:          csr_value_o = mtime_i[63:32];
 			INSTRETH:       csr_value_o = _MINSTRETH;
 			MSTATUS:        csr_value_o = {mstatus_sd, _MSTATUS[30:0]};
 `ifdef FPU

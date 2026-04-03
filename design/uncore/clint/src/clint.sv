@@ -29,7 +29,8 @@ module clint #(
 
     // Interrupt outputs (directly to core)
     output logic                  timer_irq_o,
-    output logic                  soft_irq_o
+    output logic                  soft_irq_o,
+    output logic [63:0]           mtime_o         // for TIME/TIMEH CSRs
 );
 
 // ── Registers ────────────────────────────────────────────────────
@@ -47,6 +48,7 @@ localparam ADDR_MTIME_HI     = 16'hBFFC;
 // ── Interrupt generation ─────────────────────────────────────────
 assign timer_irq_o = (mtime >= mtimecmp);
 assign soft_irq_o  = msip_reg;
+assign mtime_o     = mtime;
 
 // ── Write logic ──────────────────────────────────────────────────
 always_ff @(posedge clk_i or posedge reset_i) begin
@@ -72,17 +74,18 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     end
 end
 
-// ── Read logic (combinational) ───────────────────────────────────
-always_comb begin
-    readdata_o = '0;
+// ── Read logic (registered) ──────────────────────────────────────
+// Register the read data so it's stable when periph_bridge samples it
+// 1 cycle after the request (matches periph_bridge sel_r timing).
+always_ff @(posedge clk_i) begin
     if (chipselect_i && read_i) begin
         case (address_i)
-            ADDR_MSIP:        readdata_o = {31'd0, msip_reg};
-            ADDR_MTIMECMP_LO: readdata_o = mtimecmp[31:0];
-            ADDR_MTIMECMP_HI: readdata_o = mtimecmp[63:32];
-            ADDR_MTIME_LO:    readdata_o = mtime[31:0];
-            ADDR_MTIME_HI:    readdata_o = mtime[63:32];
-            default:          readdata_o = '0;
+            ADDR_MSIP:        readdata_o <= {31'd0, msip_reg};
+            ADDR_MTIMECMP_LO: readdata_o <= mtimecmp[31:0];
+            ADDR_MTIMECMP_HI: readdata_o <= mtimecmp[63:32];
+            ADDR_MTIME_LO:    readdata_o <= mtime[31:0];
+            ADDR_MTIME_HI:    readdata_o <= mtime[63:32];
+            default:          readdata_o <= '0;
         endcase
     end
 end

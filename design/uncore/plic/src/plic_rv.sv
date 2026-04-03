@@ -125,19 +125,21 @@ always_ff @(posedge clk_i or posedge reset_i) begin
 end
 
 // ── Register reads ───────────────────────────────────────────────
-always_comb begin
-    readdata_o = 32'h0;
+// Registered read output — matches periph_bridge 1-cycle sel_r latency
+always_ff @(posedge clk_i) begin
     if (chipselect_i && read_i) begin
         if (in_priority && src_index <= NUM_SOURCES)
-            readdata_o = {29'd0, priority_reg[src_index]};
+            readdata_o <= {29'd0, priority_reg[src_index]};
         else if (in_pending)
-            readdata_o = {{(32-NUM_SOURCES-1){1'b0}}, pending};
+            readdata_o <= {{(32-NUM_SOURCES-1){1'b0}}, pending};
         else if (in_enable)
-            readdata_o = {{(32-NUM_SOURCES-1){1'b0}}, enable};
+            readdata_o <= {{(32-NUM_SOURCES-1){1'b0}}, enable};
         else if (is_threshold)
-            readdata_o = {29'd0, threshold};
+            readdata_o <= {29'd0, threshold};
         else if (is_claim)
-            readdata_o = {{(32-$clog2(NUM_SOURCES+1)){1'b0}}, claim_id};
+            readdata_o <= {{(32-$clog2(NUM_SOURCES+1)){1'b0}}, claim_id};
+        else
+            readdata_o <= 32'h0;
     end
 end
 
