@@ -208,6 +208,9 @@ typedef enum logic[11:0] {
 	MCYCLEH 		= 12'hb80,
 	MINSTRETH 		= 12'hb82,
 	MCOUNTINHIBIT 	= 12'h320,
+	MENVCFG			= 12'h30A,
+	MENVCFGH		= 12'h31A,
+	MCONFIGPTR		= 12'hF15,
 	DCSR			= 12'h7b0,
 	DPC 			= 12'h7b1,
 	//Supervisor Mode
@@ -215,6 +218,7 @@ typedef enum logic[11:0] {
    	SIE         	= 12'h104,
     STVEC       	= 12'h105,
     SCOUNTEREN  	= 12'h106,
+    SENVCFG			= 12'h10A,
     SSCRATCH    	= 12'h140,
     SEPC        	= 12'h141,
     SCAUSE      	= 12'h142,

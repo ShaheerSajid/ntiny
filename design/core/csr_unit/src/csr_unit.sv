@@ -87,6 +87,9 @@ module csr_unit (
 	logic [31:0] _MIDELEG;
 	logic [31:0] _MCOUNTEREN;
 	logic [31:0] _SCOUNTEREN;
+	logic [31:0] _MENVCFG;
+	logic [31:0] _MENVCFGH;
+	logic [31:0] _SENVCFG;
 	// Privilege level (2'b11=M, 2'b01=S, 2'b00=U)
 	logic [1:0]  priv_level;
 
@@ -105,6 +108,7 @@ module csr_unit (
 	logic SATP_sel;
 	logic MEDELEG_sel, MIDELEG_sel;
 	logic MCOUNTEREN_sel, SCOUNTEREN_sel;
+	logic MENVCFG_sel, MENVCFGH_sel, SENVCFG_sel;
 
 	assign MSTATUS_sel      = csr_addr_i == MSTATUS;
 	assign SSTATUS_sel      = csr_addr_i == SSTATUS;
@@ -135,6 +139,9 @@ module csr_unit (
 	assign MIDELEG_sel      = csr_addr_i == MIDELEG;
 	assign MCOUNTEREN_sel   = csr_addr_i == MCOUNTEREN;
 	assign SCOUNTEREN_sel   = csr_addr_i == SCOUNTEREN;
+	assign MENVCFG_sel      = csr_addr_i == MENVCFG;
+	assign MENVCFGH_sel     = csr_addr_i == MENVCFGH;
+	assign SENVCFG_sel      = csr_addr_i == SENVCFG;
 
 	// ── CSR write data ───────────────────────────────────────────
 	logic [31:0] csr_data;
@@ -289,7 +296,15 @@ module csr_unit (
 	csr_register_32 #(32'h0) csr_scounteren (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(SCOUNTEREN_sel),
 	                                          .wdata(csr_data),.update(_SCOUNTEREN), .csr(_SCOUNTEREN));
 
-	// ── SATP (placeholder for Sv32 MMU, Phase 3) ─────────────────
+	// ── Environment configuration (menvcfg, menvcfgh, senvcfg) ──
+	csr_register_32 #(32'h0) csr_menvcfg    (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MENVCFG_sel),
+	                                          .wdata(csr_data),.update(_MENVCFG), .csr(_MENVCFG));
+	csr_register_32 #(32'h0) csr_menvcfgh   (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(MENVCFGH_sel),
+	                                          .wdata(csr_data),.update(_MENVCFGH), .csr(_MENVCFGH));
+	csr_register_32 #(32'h0) csr_senvcfg    (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(SENVCFG_sel),
+	                                          .wdata(csr_data),.update(_SENVCFG), .csr(_SENVCFG));
+
+	// ── SATP (Sv32 MMU) ──────────────────────────────────────────
 	csr_register_32 #(32'h0) csr_satp       (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(SATP_sel),
 	                                          .wdata(csr_data),.update(_SATP), .csr(_SATP));
 
@@ -351,11 +366,15 @@ module csr_unit (
 			MCYCLEH:        csr_value_o = _MCYCLEH;
 			MINSTRETH:      csr_value_o = _MINSTRETH;
 			MCOUNTINHIBIT:  csr_value_o = _MCOUNTINHIBIT;
-			MSTATUSH:       csr_value_o = 32'h0;  // RV32 little-endian: MBE=SBE=0, read-only zero
+			MSTATUSH:       csr_value_o = 32'h0;  // RV32 little-endian: MBE=SBE=0
 			MHARTID:        csr_value_o = 32'h0;  // Hart 0 (single-hart)
 			MVENDORID:      csr_value_o = 32'h0;  // Non-commercial
 			MARCHID:        csr_value_o = 32'h0;  // Not assigned
 			MIMPID:         csr_value_o = 32'h0;  // Implementation-specific
+			MENVCFG:        csr_value_o = _MENVCFG;
+			MENVCFGH:       csr_value_o = _MENVCFGH;
+			MCONFIGPTR:     csr_value_o = 32'h0;  // No config data structure
+			SENVCFG:        csr_value_o = _SENVCFG;
 			MEDELEG:        csr_value_o = _MEDELEG;
 			MIDELEG:        csr_value_o = _MIDELEG;
 			MCOUNTEREN:     csr_value_o = _MCOUNTEREN;
