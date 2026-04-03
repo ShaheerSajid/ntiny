@@ -37,8 +37,9 @@ static volatile void *uart_base;
 
 static void ntiny_uart_putc(char c)
 {
-    while (readl(uart_base + UART_STATUS) & UART_STATUS_TXFULL)
-        ;
+    /* Don't poll TXFULL — the simulated UART DPI receives bit-by-bit at
+       baud rate, and polling would stall for ~4340 cycles per character.
+       Just write directly; the DPI captures every write. */
     writel(c, uart_base + UART_TX);
 }
 

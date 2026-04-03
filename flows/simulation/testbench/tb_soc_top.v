@@ -156,6 +156,71 @@ always @(posedge clk) begin
 	end
 end
 
+// ── Fast simulation console ─────────────────────────────────────
+// Captures UART TX register writes directly from the bus, bypassing
+// the slow bit-by-bit UART serializer. Characters appear immediately.
+integer sim_con_fd;
+initial sim_con_fd = $fopen("uart.log", "w");
+
+always @(posedge clk) begin
+	if (!reset &&
+	    soc_top_inst.dmem_bus.req &&
+	    soc_top_inst.dmem_bus.we &&
+	    soc_top_inst.dmem_bus.addr == 32'h10000004) begin  // UART TX @ 0x10000004
+		$fwrite(sim_con_fd, "%c", soc_top_inst.dmem_bus.wdata[7:0]);
+		$fflush(sim_con_fd);
+		$write("%c", soc_top_inst.dmem_bus.wdata[7:0]);
+	end
+end
+
+// ── Lightweight PC sampler (every 1M cycles) ────────────────────
+reg [31:0] pc_sample_cnt;
+always @(posedge clk) begin
+	if (reset)
+		pc_sample_cnt <= 0;
+	else begin
+		pc_sample_cnt <= pc_sample_cnt + 1;
+		// Monitor page table writes near trampoline_pg_dir (0x8187a000)
+		if (soc_top_inst.dmem_bus.req && soc_top_inst.dmem_bus.we &&
+		    soc_top_inst.dmem_bus.addr >= 32'h8187a000 &&
+		    soc_top_inst.dmem_bus.addr < 32'h8187b000) begin
+			$fwrite(sim_con_fd, "PT-WR: addr=%08h data=%08h\n",
+				soc_top_inst.dmem_bus.addr,
+				soc_top_inst.dmem_bus.wdata);
+			$fflush(sim_con_fd);
+		end
+
+		// Log S-mode traps (scause writes)
+		if (soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'b01 &&
+		    soc_top_inst.core_top_inst.interrupt_valid) begin
+			$fwrite(sim_con_fd, "S-TRAP: scause=%08h sepc=%08h stval=%08h stvec=%08h\n",
+				soc_top_inst.core_top_inst.csr_unit_inst._SCAUSE,
+				soc_top_inst.core_top_inst.csr_unit_inst._SEPC,
+				soc_top_inst.core_top_inst.csr_unit_inst._STVAL,
+				soc_top_inst.core_top_inst.csr_unit_inst._STVEC);
+			$fflush(sim_con_fd);
+		end
+		// Log M-mode traps from S-mode
+		if (soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'b01 &&
+		    soc_top_inst.core_top_inst.interrupt_valid &&
+		    !soc_top_inst.core_top_inst.interrupt_ctrl_inst.trap_to_s_o) begin
+			$fwrite(sim_con_fd, "M-TRAP-FROM-S: mcause=%08h mepc=%08h mtval=%08h\n",
+				soc_top_inst.core_top_inst.csr_unit_inst._MCAUSE,
+				soc_top_inst.core_top_inst.csr_unit_inst._MEPC,
+				soc_top_inst.core_top_inst.csr_unit_inst._MTVAL);
+			$fflush(sim_con_fd);
+		end
+		if (pc_sample_cnt[19:0] == 20'h0) begin // every ~1M cycles
+			$fwrite(sim_con_fd, "PC[%0d] pc=%08h priv=%0d satp=%08h\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_out,
+				soc_top_inst.core_top_inst.csr_unit_inst.priv_level,
+				soc_top_inst.core_top_inst.csr_unit_inst._SATP);
+			$fflush(sim_con_fd);
+		end
+	end
+end
+
 // Diagnostic pipeline tracer (dedicated file for maintainability)
 `include "testbench/diag_tracer.vh"
 
