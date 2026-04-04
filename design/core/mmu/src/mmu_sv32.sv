@@ -445,7 +445,7 @@ module mmu_sv32 (
     wire        d_pmp_read  = ptw_in_read ? 1'b1        : (d_req_i && !d_store_i);
     wire        d_pmp_write = ptw_in_read ? 1'b0        : (d_req_i && d_store_i);
 
-    logic d_pmp_fault;
+    logic d_pmp_fault_comb;
     pmp_checker pmp_d_check (
         .addr_i     (d_pmp_addr),
         .priv_i     (d_pmp_priv),
@@ -454,8 +454,17 @@ module mmu_sv32 (
         .is_exec_i  (1'b0),
         .pmpcfg_i   (pmpcfg_i),
         .pmpaddr_i  (pmpaddr_i),
-        .fault_o    (d_pmp_fault)
+        .fault_o    (d_pmp_fault_comb)
     );
+
+    // Register d_pmp_fault to break combinational loop through Verilator's
+    // UNOPTFLAT resolution (d_pmp_fault → ptw_active → flush_i → settles wrong).
+    // 1-cycle latency: PTW PMP denial fires next cycle, acceptable because
+    // PTW L1/L0 states wait for !ptw_stall_i anyway.
+    logic d_pmp_fault;
+    always_ff @(posedge clk_i or posedge reset_i)
+        if (reset_i) d_pmp_fault <= 1'b0;
+        else         d_pmp_fault <= d_pmp_fault_comb;
 
     // PTW PMP denial — block PTW read and go to FAULT
     wire ptw_pmp_denied = d_pmp_fault && ptw_in_read;

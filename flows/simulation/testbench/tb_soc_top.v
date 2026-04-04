@@ -222,6 +222,27 @@ always @(posedge clk) begin
 				soc_top_inst.core_top_inst.mmu_inst.ptw_pte,
 				soc_top_inst.core_top_inst.mmu_inst.ptw_mega);
 
+		// Log PMP check during all PTW reads
+		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 1 ||
+		    soc_top_inst.core_top_inst.mmu_inst.ptw_state == 3)
+			$fwrite(mmu_fd, "PTW-PMP: state=%0d vaddr=%08h addr=%08h addr_g=%08h priv=%0d d_pmp_fault=%0b ptw_pmp_denied=%0b match0=%0b match1=%0b pmpaddr0=%08h pmpaddr1=%08h pmpcfg0=%08h\n",
+				soc_top_inst.core_top_inst.mmu_inst.ptw_state,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_addr_o,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_addr_o[31:2],
+				soc_top_inst.core_top_inst.mmu_inst.d_pmp_priv,
+				soc_top_inst.core_top_inst.mmu_inst.d_pmp_fault,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_pmp_denied,
+				soc_top_inst.core_top_inst.mmu_inst.pmp_d_check.match[0],
+				soc_top_inst.core_top_inst.mmu_inst.pmp_d_check.match[1],
+				soc_top_inst.core_top_inst.mmu_inst.pmpaddr_i[0],
+				soc_top_inst.core_top_inst.mmu_inst.pmpaddr_i[1],
+				soc_top_inst.core_top_inst.mmu_inst.pmpcfg_i[0]);
+			// Also dump the checker's internal fault
+			$fwrite(mmu_fd, "  CHK: fault_o=%0b priv_i=%0b\n",
+				soc_top_inst.core_top_inst.mmu_inst.pmp_d_check.fault_o,
+				soc_top_inst.core_top_inst.mmu_inst.pmp_d_check.priv_i);
+
 		// Log PTW faults (when PTW itself causes the fault)
 		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 5)  // PTW_FAULT
 			$fwrite(mmu_fd, "PTW-FAULT: vaddr=%08h pte=%08h mega=%0b perm=%0b priv_fault=%0b for_store=%0b ptw_priv=%0d ptw_sum=%0b live_priv=%0d live_sum=%0b\n",
