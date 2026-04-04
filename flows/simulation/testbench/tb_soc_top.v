@@ -330,6 +330,60 @@ always @(posedge clk) begin
 	end
 end
 
+// ── Late-stage crash trace ──────────────────────────────────────
+// Logs the last 64 instructions to crash_trace.log when the sim ends.
+// Useful for debugging Verilator convergence failures during Linux init.
+integer crash_fd;
+integer crash_idx;
+reg [31:0] crash_pc   [0:63];
+reg [1:0]  crash_priv [0:63];
+reg [31:0] crash_insn [0:63];
+reg [31:0] crash_cause[0:63];
+reg        crash_trap [0:63];
+reg [5:0]  crash_ptr;
+reg        crash_u_seen;   // set when U-mode first entered
+
+initial begin
+    crash_ptr = 0;
+    crash_u_seen = 0;
+end
+
+always @(posedge clk) begin
+    if (!reset) begin
+        // Record every retired instruction
+        crash_pc[crash_ptr]    <= soc_top_inst.core_top_inst.pc_out;
+        crash_priv[crash_ptr]  <= soc_top_inst.core_top_inst.csr_unit_inst.priv_level;
+        crash_insn[crash_ptr]  <= soc_top_inst.core_top_inst.ctrl_bus_ie.inst_type;
+        crash_cause[crash_ptr] <= soc_top_inst.core_top_inst.csr_unit_inst._MCAUSE;
+        crash_trap[crash_ptr]  <= soc_top_inst.core_top_inst.interrupt_valid;
+        crash_ptr <= crash_ptr + 1;
+
+        // Detect first U-mode entry
+        if (soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'b00 && !crash_u_seen) begin
+            crash_u_seen <= 1;
+            $fwrite(sim_con_fd, ">>> U-mode entered at pc=%08h cycle=%0d\n",
+                soc_top_inst.core_top_inst.pc_out, pc_sample_cnt);
+            $fflush(sim_con_fd);
+        end
+    end
+end
+
+// Dump crash trace on $finish
+final begin
+    crash_fd = $fopen("crash_trace.log", "w");
+    $fwrite(crash_fd, "# Last 64 instructions before exit\n");
+    $fwrite(crash_fd, "# idx  pc        priv  trap  cause\n");
+    for (crash_idx = 0; crash_idx < 64; crash_idx = crash_idx + 1) begin
+        $fwrite(crash_fd, "%02d  %08h  %0d     %0d     %08h\n",
+            crash_idx,
+            crash_pc[(crash_ptr + crash_idx) & 63],
+            crash_priv[(crash_ptr + crash_idx) & 63],
+            crash_trap[(crash_ptr + crash_idx) & 63],
+            crash_cause[(crash_ptr + crash_idx) & 63]);
+    end
+    $fclose(crash_fd);
+end
+
 // Diagnostic pipeline tracer (dedicated file for maintainability)
 `include "testbench/diag_tracer.vh"
 

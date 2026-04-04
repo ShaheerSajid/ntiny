@@ -715,11 +715,11 @@ interrupt_ctrl interrupt_ctrl_inst
   // MMU page faults
   .insn_page_fault_i  (mmu_i_fault_r),
   .insn_fault_addr_i  (mmu_i_fault_addr_r),
-  // Combinational, gated by !flush_i in MMU — no loop since d_fault_o
-  // is suppressed during flush, preventing oscillation.
-  .data_page_fault_i  (mmu_d_fault),
+  // Registered to break combinational loop (d_fault → trap → flush → d_fault).
+  // Stale faults during flush are discarded by interrupt_valid priority clear.
+  .data_page_fault_i  (mmu_d_fault_r),
   .data_fault_is_store_i(d_store_for_mmu),
-  .data_fault_addr_i  (mmu_d_fault_addr),
+  .data_fault_addr_i  (mmu_d_fault_addr_r),
   // PMP access faults
   .insn_access_fault_i       (mmu_i_access_fault_r),
   .insn_access_fault_addr_i  (mmu_i_access_fault_addr_r),

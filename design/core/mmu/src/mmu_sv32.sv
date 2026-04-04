@@ -510,10 +510,11 @@ module mmu_sv32 (
     assign d_paddr_o = d_paddr_out;
     assign d_stall_o = d_translate && d_req_i && (!dtlb_hit || ptw_active_o);
     // Page faults (cause 13/15)
-    // TLB-hit path gated by !flush_i to suppress stale pipeline faults during trap.
-    // No combinational loop: d_fault_o is registered in core_top before reaching trap_valid.
-    // PTW fault path is already registered (ptw_state is FF).
-    assign d_fault_o = (!flush_i && d_translate && d_req_i && dtlb_hit && !d_perm_ok) ||
+    // NO !flush_i gate — d_fault_o is fully registered in core_top (mmu_d_fault_r)
+    // and the registered path has `if (interrupt_valid) clear` priority, so stale
+    // faults during flush are discarded (interrupt_valid is already high from the
+    // real trap that caused the flush). IE stall holds the faulting instruction.
+    assign d_fault_o = (d_translate && d_req_i && dtlb_hit && !d_perm_ok) ||
                        (d_translate && ptw_state == PTW_FAULT && !ptw_for_insn && !ptw_pmp_fault_r);
     assign d_fault_addr_o = (ptw_state == PTW_FAULT && !ptw_for_insn) ? ptw_vaddr : d_vaddr_i;
     // Access faults (cause 5/7): PMP denial on data access or PTW PMP fault for data

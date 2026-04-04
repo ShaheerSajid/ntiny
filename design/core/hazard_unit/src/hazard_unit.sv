@@ -79,7 +79,8 @@ assign iwb_stall_o  = onebit_sig_e'(1'b0);
 assign imem_stall_o = onebit_sig_e'(iwb_stall_o);
 assign ie_stall_o   = onebit_sig_e'(imem_stall_o | alu_stall_i | dmem_busy |
                                      amo_stall_i  | mmu_d_stall_i |
-                                     misalign_stall_i | pmp_d_fault_i);
+                                     misalign_stall_i | pmp_d_fault_i |
+                                     d_page_fault_i);
 
 // CSR read-after-write hazard: mret/sret in ID reads epc, but preceding
 // CSR write in IE hasn't committed yet.
