@@ -438,7 +438,10 @@ module mmu_sv32 (
     // Data/PTW PMP check (shared — PTW and data are mutually exclusive)
     wire [31:0] d_paddr_out = d_translate ? d_paddr_tlb : d_vaddr_i;
     wire [31:0] d_pmp_addr  = ptw_in_read ? ptw_addr_o : d_paddr_out;
-    wire [1:0]  d_pmp_priv  = ptw_in_read ? 2'b11      : d_eff_priv;
+    // PTW implicit reads use the privilege that initiated the walk (S or U mode),
+    // NOT M-mode. Per RISC-V spec §3.7.1, PMP checks on page table accesses use
+    // the effective privilege of the access that triggered the translation.
+    wire [1:0]  d_pmp_priv  = ptw_in_read ? ptw_priv   : d_eff_priv;
     wire        d_pmp_read  = ptw_in_read ? 1'b1        : (d_req_i && !d_store_i);
     wire        d_pmp_write = ptw_in_read ? 1'b0        : (d_req_i && d_store_i);
 

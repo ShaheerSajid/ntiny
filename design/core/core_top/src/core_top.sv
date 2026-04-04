@@ -514,7 +514,21 @@ wire jalr_fault_wr = interrupt_valid & mmu_i_fault_r & insn_valid_id &
                      (ctrl_bus_if_id.inst_type == JUMP || ctrl_bus_if_id.inst_type == JUMP_R) &
                      (ctrl_bus_if_id.rd_int != NO_REG);
 
-wire        rf_wr_en   = jalr_fault_wr | (ctrl_bus_iwb.rd_int != NO_REG);
+// Track PMP data fault through pipeline to suppress writeback at IWB
+logic pmp_d_fault_imem, pmp_d_fault_iwb;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        pmp_d_fault_imem <= 1'b0;
+        pmp_d_fault_iwb  <= 1'b0;
+    end else begin
+        if (imem_flush)       pmp_d_fault_imem <= 1'b0;
+        else if (!imem_stall) pmp_d_fault_imem <= mmu_d_access_fault;
+        if (iwb_flush)        pmp_d_fault_iwb <= 1'b0;
+        else if (!iwb_stall)  pmp_d_fault_iwb <= pmp_d_fault_imem;
+    end
+end
+
+wire        rf_wr_en   = jalr_fault_wr | (ctrl_bus_iwb.rd_int != NO_REG && !pmp_d_fault_iwb);
 wire [4:0]  rf_wr_addr = jalr_fault_wr ? ctrl_bus_if_id.rd_int[4:0] : ctrl_bus_iwb.rd_int[4:0];
 wire [31:0] rf_wr_data = jalr_fault_wr ? (pc_id + 32'd4)            : write_back_data;
 
@@ -966,10 +980,6 @@ always_ff@(posedge clk_i or posedge reset_i)
 		end
 		else if(!imem_stall) begin
 			ctrl_bus_imem <= ctrl_bus_ie;
-			// PMP data access fault: suppress writeback to prevent stale
-			// load data from reaching register file before trap flush
-			if (mmu_d_access_fault)
-				ctrl_bus_imem.wb_sel <= NO_WB;
 			pc_imem <= c_valid_ie? pc_ie + 2 : pc_ie + 4;
 			exec_result_imem <= exec_result_ie;
 			stale_imem <= stale_ie;
