@@ -112,10 +112,11 @@ module mmu_sv32 (
         end
     end
 
-    // ITLB physical address construction
-    wire [31:0] i_paddr_tlb = itlb_entry.mega
+    // ITLB physical address construction — 34-bit Sv32
+    wire [33:0] i_paddr_tlb_34 = itlb_entry.mega
         ? {itlb_entry.ppn1, i_vpn0, i_vaddr_i[11:0]}          // megapage: PPN[1] + VPN[0] + offset
         : {itlb_entry.ppn1, itlb_entry.ppn0, i_vaddr_i[11:0]}; // 4KB: PPN[1:0] + offset
+    wire [31:0] i_paddr_tlb = i_paddr_tlb_34[31:0];  // bus address (32-bit)
 
     // ITLB permission check
     // NOTE: SUM (mstatus[18]) only applies to DATA accesses. Instruction fetches from
@@ -153,10 +154,11 @@ module mmu_sv32 (
         end
     end
 
-    // DTLB physical address construction
-    wire [31:0] d_paddr_tlb = dtlb_entry.mega
+    // DTLB physical address construction — 34-bit Sv32
+    wire [33:0] d_paddr_tlb_34 = dtlb_entry.mega
         ? {dtlb_entry.ppn1, d_vpn0, d_vaddr_i[11:0]}
         : {dtlb_entry.ppn1, dtlb_entry.ppn0, d_vaddr_i[11:0]};
+    wire [31:0] d_paddr_tlb = d_paddr_tlb_34[31:0];  // bus address (32-bit)
 
     // DTLB permission check
     wire d_read_ok  = dtlb_entry.r || (mxr_bit && dtlb_entry.x);  // MXR allows X as R
@@ -240,9 +242,13 @@ module mmu_sv32 (
             ptw_priv_fault = 1'b0;
     end
 
-    // PTW address computation
-    wire [31:0] ptw_l1_addr = {satp_ppn[19:0], 12'b0} + {20'b0, ptw_vaddr[31:22], 2'b00};
-    wire [31:0] ptw_l0_addr = {pte_ppn1, pte_ppn0, 12'b0} + {20'b0, ptw_vaddr[21:12], 2'b00};
+    // PTW address computation — full 34-bit Sv32 physical addresses
+    // satp_ppn is 22 bits → addr[33:12], plus VPN index gives 34-bit PTE address
+    wire [33:0] ptw_l1_addr_34 = {satp_ppn, 12'b0} + {22'b0, ptw_vaddr[31:22], 2'b00};
+    wire [33:0] ptw_l0_addr_34 = {pte_ppn1, pte_ppn0, 12'b0} + {22'b0, ptw_vaddr[21:12], 2'b00};
+    // Bus address is 32-bit (RAM is below 4GB); PMP uses full 34-bit
+    wire [31:0] ptw_l1_addr = ptw_l1_addr_34[31:0];
+    wire [31:0] ptw_l0_addr = ptw_l0_addr_34[31:0];
 
     // Latched L1 PTE for address construction during L0
     logic [31:0] ptw_l1_pte_saved;
@@ -421,11 +427,12 @@ module mmu_sv32 (
     // ── PMP checkers ───────────────────────────────────────────────
 
     // Instruction-side PMP check (always on physical address, even when MMU off)
+    // Instruction physical address is 32-bit; zero-extend to 34-bit for PMP
     logic i_pmp_fault;
     wire [31:0] i_paddr_out = i_translate ? i_paddr_tlb : i_vaddr_i;
 
     pmp_checker pmp_i_check (
-        .addr_i     (i_paddr_out),
+        .addr_i     (i_translate ? i_paddr_tlb_34 : {2'b0, i_vaddr_i}),  // 34-bit
         .priv_i     (i_priv_i),
         .is_read_i  (1'b0),
         .is_write_i (1'b0),
@@ -436,8 +443,13 @@ module mmu_sv32 (
     );
 
     // Data/PTW PMP check (shared — PTW and data are mutually exclusive)
+    // PTW uses full 34-bit address from Sv32 page table walk;
+    // normal data uses 32-bit zero-extended to 34-bit.
     wire [31:0] d_paddr_out = d_translate ? d_paddr_tlb : d_vaddr_i;
-    wire [31:0] d_pmp_addr  = ptw_in_read ? ptw_addr_o : d_paddr_out;
+    wire [33:0] ptw_pmp_addr_34 = (ptw_state == PTW_L1) ? ptw_l1_addr_34 :
+                                  (ptw_state == PTW_L0) ? ptw_l0_addr_34 : 34'd0;
+    wire [33:0] d_pmp_addr  = ptw_in_read ? ptw_pmp_addr_34 :
+                              d_translate ? d_paddr_tlb_34 : {2'b0, d_vaddr_i};
     // PTW implicit reads use the privilege that initiated the walk (S or U mode),
     // NOT M-mode. Per RISC-V spec §3.7.1, PMP checks on page table accesses use
     // the effective privilege of the access that triggered the translation.

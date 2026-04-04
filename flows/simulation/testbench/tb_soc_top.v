@@ -189,6 +189,23 @@ initial mmu_fd = $fopen("mmu_trace.log", "w");
 
 always @(posedge clk) begin
 	if (!reset) begin
+		// Log every ITLB fill
+		if (soc_top_inst.core_top_inst.mmu_inst.tlb_fill &&
+		    soc_top_inst.core_top_inst.mmu_inst.ptw_for_insn) begin
+			$fwrite(mmu_fd, "ITLB-FILL: vpn1=%03h vpn0=%03h -> ppn1=%03h ppn0=%03h mega=%0b rwx=%0b%0b%0b adu=%0b%0b%0b vaddr=%08h\n",
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.vpn1,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.vpn0,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.ppn1,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.ppn0,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.mega,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.r,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.w,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.x,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.a,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.d,
+				soc_top_inst.core_top_inst.mmu_inst.fill_entry.u,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr);
+		end
 		// Log every DTLB fill
 		if (soc_top_inst.core_top_inst.mmu_inst.tlb_fill &&
 		    !soc_top_inst.core_top_inst.mmu_inst.ptw_for_insn) begin

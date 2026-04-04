@@ -8,13 +8,13 @@
 // S/U-mode: denied if no match.
 
 module pmp_checker (
-    input  logic [31:0] addr_i,         // physical address to check
+    input  logic [33:0] addr_i,         // 34-bit Sv32 physical address
     input  logic [1:0]  priv_i,         // effective privilege (11=M, 01=S, 00=U)
     input  logic        is_read_i,      // load / PTW read
     input  logic        is_write_i,     // store
     input  logic        is_exec_i,      // instruction fetch
     input  logic [31:0] pmpcfg_i  [4],  // pmpcfg0-3
-    input  logic [31:0] pmpaddr_i [16], // pmpaddr0-15
+    input  logic [31:0] pmpaddr_i [16], // pmpaddr0-15 (each holds addr[33:2])
     output logic        fault_o         // 1 = access denied
 );
 
@@ -43,15 +43,16 @@ module pmp_checker (
         end
     endgenerate
 
-    // Granule address: addr[31:2] (30 bits, 4-byte granularity)
-    wire [29:0] addr_g = addr_i[31:2];
+    // Granule address: addr[33:2] (32 bits for Sv32 34-bit physical address)
+    wire [31:0] addr_g = addr_i[33:2];
 
     // Address matching for each entry
     generate
         for (genvar i = 0; i < 16; i++) begin : gen_match
             // Previous entry's pmpaddr (entry 0 lower bound = 0)
-            wire [29:0] prev_addr = (i == 0) ? 30'd0 : pmpaddr_i[i-1][29:0];
-            wire [29:0] this_addr = pmpaddr_i[i][29:0];
+            // pmpaddr holds addr[33:2] — full 32-bit register for Sv32
+            wire [31:0] prev_addr = (i == 0) ? 32'd0 : pmpaddr_i[i-1];
+            wire [31:0] this_addr = pmpaddr_i[i];
 
             // TOR: addr_g >= prev_addr && addr_g < this_addr
             wire tor_match = (addr_g >= prev_addr) && (addr_g < this_addr);
@@ -62,8 +63,8 @@ module pmp_checker (
             // NAPOT: XOR trick to decode region
             // pmpaddr stores: base[33:2] | (size/8 - 1)
             // napot_ones = trailing 1s mask + 1 more bit
-            wire [29:0] napot_ones = pmpaddr_i[i][29:0] ^ (pmpaddr_i[i][29:0] + 30'd1);
-            wire napot_match = ((addr_g ^ this_addr) & ~napot_ones) == 30'd0;
+            wire [31:0] napot_ones = pmpaddr_i[i] ^ (pmpaddr_i[i] + 32'd1);
+            wire napot_match = ((addr_g ^ this_addr) & ~napot_ones) == 32'd0;
 
             // Select match based on mode
             always_comb begin
