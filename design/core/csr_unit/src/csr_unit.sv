@@ -41,6 +41,8 @@ module csr_unit (
   output [31:0]medeleg_o,
   output [31:0]mideleg_o,
   output [31:0]satp_o,
+  output logic [31:0] pmpcfg_o  [4],
+  output logic [31:0] pmpaddr_o [16],
 
 	output logic [31:0]csr_value_o,
 	output logic       csr_invalid_o  // 1 when accessed CSR address is unimplemented
@@ -90,6 +92,9 @@ module csr_unit (
 	logic [31:0] _MENVCFG;
 	logic [31:0] _MENVCFGH;
 	logic [31:0] _SENVCFG;
+	// PMP CSRs
+	logic [31:0] _PMPCFG  [4];
+	logic [31:0] _PMPADDR [16];
 	// Privilege level (2'b11=M, 2'b01=S, 2'b00=U)
 	logic [1:0]  priv_level;
 
@@ -142,6 +147,7 @@ module csr_unit (
 	assign MENVCFG_sel      = csr_addr_i == MENVCFG;
 	assign MENVCFGH_sel     = csr_addr_i == MENVCFGH;
 	assign SENVCFG_sel      = csr_addr_i == SENVCFG;
+
 
 	// ── CSR write data ───────────────────────────────────────────
 	logic [31:0] csr_data;
@@ -308,6 +314,73 @@ module csr_unit (
 	csr_register_32 #(32'h0) csr_satp       (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(SATP_sel),
 	                                          .wdata(csr_data),.update(_SATP), .csr(_SATP));
 
+	// ── PMP CSRs (with WARL mask and lock enforcement) ──────────
+	// WARL: bits [6:5] of each config byte hardwired to zero
+	localparam [7:0] CFG_WARL = 8'h9F;
+
+	// Helper: check if pmpaddr[i] is locked
+	// Locked if own cfg.L=1, or if next entry is locked with TOR mode
+	function automatic logic pmp_addr_locked(int i,
+	    logic [31:0] pcfg [4]);
+		logic l_self = pcfg[i/4][(i%4)*8 + 7];
+		if (l_self) return 1'b1;
+		if (i < 15) begin
+			int n = i + 1;
+			logic l_next = pcfg[n/4][(n%4)*8 + 7];
+			logic [1:0] a_next = pcfg[n/4][(n%4)*8+4 -: 2];
+			if (l_next && a_next == 2'b01) return 1'b1; // next is locked TOR
+		end
+		return 1'b0;
+	endfunction
+
+	// Compute new value after CSR write/set/clear
+	function automatic logic [31:0] pmp_apply_cmd(
+	    logic [31:0] old_val, logic [31:0] wdata, csr_op_e cmd);
+		case (cmd)
+			WRITE_CSR: return wdata;
+			SET_CSR:   return old_val | wdata;
+			CLEAR_CSR: return old_val & ~wdata;
+			default:   return old_val;
+		endcase
+	endfunction
+
+	// pmpcfg write logic
+	always_ff @(posedge clk_i or posedge reset_i) begin
+		if (reset_i) begin
+			for (int i = 0; i < 4; i++) _PMPCFG[i] <= 32'h0;
+		end else if (csr_active) begin
+			for (int r = 0; r < 4; r++) begin
+				if (csr_addr_i == csr_reg_e'(12'h3A0 + r[11:0])) begin
+					logic [31:0] new_val;
+					new_val = pmp_apply_cmd(_PMPCFG[r], csr_data, csr_cmd_i);
+					// Per-byte: apply WARL mask and respect lock
+					for (int b = 0; b < 4; b++) begin
+						if (!_PMPCFG[r][b*8+7]) // only write unlocked bytes
+							_PMPCFG[r][b*8 +: 8] <= new_val[b*8 +: 8] & {CFG_WARL};
+					end
+				end
+			end
+		end
+	end
+
+	// pmpaddr write logic
+	always_ff @(posedge clk_i or posedge reset_i) begin
+		if (reset_i) begin
+			for (int i = 0; i < 16; i++) _PMPADDR[i] <= 32'h0;
+		end else if (csr_active) begin
+			for (int i = 0; i < 16; i++) begin
+				if (csr_addr_i == csr_reg_e'(12'h3B0 + i[11:0])) begin
+					if (!pmp_addr_locked(i, _PMPCFG))
+						_PMPADDR[i] <= pmp_apply_cmd(_PMPADDR[i], csr_data, csr_cmd_i);
+				end
+			end
+		end
+	end
+
+	// PMP output assignments
+	assign pmpcfg_o  = _PMPCFG;
+	assign pmpaddr_o = _PMPADDR;
+
 	// ── FPU CSRs (unchanged) ─────────────────────────────────────
 	wire [4:0] new_fflags = {float_status_i.NV, float_status_i.DZ, float_status_i.OF, float_status_i.UF, float_status_i.NX};
 	wire [31:0] fflags_accumulate = (float_valid_i == TRUE) ? (_FFLAGS | {27'b0, new_fflags}) : _FFLAGS;
@@ -389,6 +462,27 @@ module csr_unit (
 			SBADADDR:       csr_value_o = _STVAL;
 			SIP:            csr_value_o = _MIP & S_INT_MASK;
 			SATP:           csr_value_o = _SATP;
+			// PMP CSRs
+			PMPCFG0:        csr_value_o = _PMPCFG[0];
+			PMPCFG1:        csr_value_o = _PMPCFG[1];
+			PMPCFG2:        csr_value_o = _PMPCFG[2];
+			PMPCFG3:        csr_value_o = _PMPCFG[3];
+			PMPADDR0:       csr_value_o = _PMPADDR[0];
+			PMPADDR1:       csr_value_o = _PMPADDR[1];
+			PMPADDR2:       csr_value_o = _PMPADDR[2];
+			PMPADDR3:       csr_value_o = _PMPADDR[3];
+			PMPADDR4:       csr_value_o = _PMPADDR[4];
+			PMPADDR5:       csr_value_o = _PMPADDR[5];
+			PMPADDR6:       csr_value_o = _PMPADDR[6];
+			PMPADDR7:       csr_value_o = _PMPADDR[7];
+			PMPADDR8:       csr_value_o = _PMPADDR[8];
+			PMPADDR9:       csr_value_o = _PMPADDR[9];
+			PMPADDR10:      csr_value_o = _PMPADDR[10];
+			PMPADDR11:      csr_value_o = _PMPADDR[11];
+			PMPADDR12:      csr_value_o = _PMPADDR[12];
+			PMPADDR13:      csr_value_o = _PMPADDR[13];
+			PMPADDR14:      csr_value_o = _PMPADDR[14];
+			PMPADDR15:      csr_value_o = _PMPADDR[15];
 			default: begin
 				csr_value_o = 0;
 				csr_invalid_o = csr_active;  // only flag invalid if a CSR op is active

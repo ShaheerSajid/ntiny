@@ -156,12 +156,16 @@ logic [31:0]medeleg;
 logic [31:0]mideleg;
 logic       trap_to_s;
 logic [31:0]satp_csr;
+logic [31:0] pmpcfg_csr  [4];
+logic [31:0] pmpaddr_csr [16];
 
 // MMU signals
 logic [31:0] i_paddr, d_paddr;
 logic        mmu_i_stall, mmu_d_stall;
 logic        mmu_i_fault, mmu_d_fault;
 logic [31:0] mmu_i_fault_addr, mmu_d_fault_addr;
+logic        mmu_i_access_fault, mmu_d_access_fault;
+logic [31:0] mmu_i_access_fault_addr, mmu_d_access_fault_addr;
 logic [31:0] ptw_addr;
 logic        ptw_req, ptw_active;
 logic        d_store_for_mmu;
@@ -198,6 +202,22 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     end else begin
         mmu_i_fault_r      <= mmu_i_fault;
         mmu_i_fault_addr_r <= mmu_i_fault_addr;
+    end
+end
+
+// Registered instruction PMP access fault (same pattern as page fault)
+logic        mmu_i_access_fault_r;
+logic [31:0] mmu_i_access_fault_addr_r;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        mmu_i_access_fault_r      <= 1'b0;
+        mmu_i_access_fault_addr_r <= 32'b0;
+    end else if (interrupt_valid) begin
+        mmu_i_access_fault_r      <= 1'b0;
+        mmu_i_access_fault_addr_r <= 32'b0;
+    end else begin
+        mmu_i_access_fault_r      <= mmu_i_access_fault;
+        mmu_i_access_fault_addr_r <= mmu_i_access_fault_addr;
     end
 end
 
@@ -648,6 +668,12 @@ interrupt_ctrl interrupt_ctrl_inst
   .data_page_fault_i  (mmu_d_fault),
   .data_fault_is_store_i(d_store_for_mmu),
   .data_fault_addr_i  (mmu_d_fault_addr),
+  // PMP access faults
+  .insn_access_fault_i       (mmu_i_access_fault_r),
+  .insn_access_fault_addr_i  (mmu_i_access_fault_addr_r),
+  .data_access_fault_i       (mmu_d_access_fault),
+  .data_access_fault_is_store_i(d_store_for_mmu),
+  .data_access_fault_addr_i  (mmu_d_access_fault_addr),
   // Outputs
   .trap_valid_o       (trap_true),
   .async_trap_o       (async_trap),
@@ -830,7 +856,9 @@ csr_unit csr_unit_inst
   .priv_o               (priv_level),
   .medeleg_o            (medeleg),
   .mideleg_o            (mideleg),
-  .satp_o               (satp_csr)
+  .satp_o               (satp_csr),
+  .pmpcfg_o             (pmpcfg_csr),
+  .pmpaddr_o            (pmpaddr_csr)
 );
 
 // ── Sv32 MMU ─────────────────────────────────────────────────
@@ -854,6 +882,7 @@ mmu_sv32 mmu_inst (
   // Data translation
   .d_vaddr_i      (d_vaddr_pre),
   .d_req_i        (d_req_for_mmu),
+  .d_req_raw_i    (d_req_raw),
   .d_store_i      (d_store_for_mmu),
   .d_paddr_o      (d_paddr),
   .d_stall_o      (mmu_d_stall),
@@ -864,7 +893,14 @@ mmu_sv32 mmu_inst (
   .ptw_req_o      (ptw_req),
   .ptw_data_i     (dmem_port.rdata),
   .ptw_stall_i    (ptw_req ? ~ptw_rvalid : ~dmem_port.ready),
-  .ptw_active_o   (ptw_active)
+  .ptw_active_o   (ptw_active),
+  // PMP
+  .pmpcfg_i              (pmpcfg_csr),
+  .pmpaddr_i             (pmpaddr_csr),
+  .i_access_fault_o      (mmu_i_access_fault),
+  .i_access_fault_addr_o (mmu_i_access_fault_addr),
+  .d_access_fault_o      (mmu_d_access_fault),
+  .d_access_fault_addr_o (mmu_d_access_fault_addr)
 );
 
 alu alu_inst
@@ -976,15 +1012,21 @@ amo_unit amo_unit_inst
 wire [31:0] d_vaddr_pre = amo_active ? amo_dbus_addr : c2a_address;
 assign d_store_for_mmu = amo_active ? amo_dbus_write : c2a_write;
 wire d_req_for_mmu = amo_active ? (amo_dbus_read | amo_dbus_write) : (c2a_read | c2a_write);
+// Raw data request from pipeline — not gated by exception_from_ie or PMP faults.
+// Used by MMU PMP checker to avoid combinational loop through d_req → PMP → trap → suppression → d_req.
+wire d_req_raw = amo_active ? (amo_dbus_read | amo_dbus_write) :
+                 (ctrl_bus_ie.mem_op != NO_MEM_OP);
 
 // PTW takes over D-port when walking page table; otherwise use translated address
 assign dmem_port.addr  = ptw_active ? ptw_addr : d_paddr;
 assign dmem_port.be    = ptw_active ? 4'b1111 :
                          amo_active ? amo_dbus_byteenable : c2a_byteenable;
 assign dmem_port.req   = ptw_active ? ptw_req :
+                         mmu_d_access_fault ? 1'b0 :  // PMP: suppress bus request
                          amo_active ? (amo_dbus_read | amo_dbus_write) :
                                       (c2a_read | c2a_write);
 assign dmem_port.we    = ptw_active ? 1'b0 :
+                         mmu_d_access_fault ? 1'b0 :  // PMP: suppress bus write
                          amo_active ? amo_dbus_write : c2a_write;
 assign dmem_port.wdata = ptw_active ? 32'b0 :
                          amo_active ? amo_dbus_writedata  : c2a_writedata;

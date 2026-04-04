@@ -140,11 +140,13 @@ task dump_signature;
 	end
 endtask
 
+// Only trigger tohost in M-mode (bare-metal tests), not during Linux (S/U-mode)
 always @(posedge clk) begin
 	if (!reset &&
 	    soc_top_inst.dmem_bus.req &&
 	    soc_top_inst.dmem_bus.we &&
-	    soc_top_inst.dmem_bus.addr == `TOHOST_ADDR) begin
+	    soc_top_inst.dmem_bus.addr == `TOHOST_ADDR &&
+	    soc_top_inst.core_top_inst.priv_level == 2'b11) begin
 		dump_signature;
 		if (soc_top_inst.dmem_bus.wdata == 32'h1) begin
 			$display("TEST PASSED");
@@ -222,13 +224,17 @@ always @(posedge clk) begin
 
 		// Log PTW faults (when PTW itself causes the fault)
 		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 5)  // PTW_FAULT
-			$fwrite(mmu_fd, "PTW-FAULT: vaddr=%08h pte=%08h mega=%0b perm=%0b priv=%0b for_store=%0b\n",
+			$fwrite(mmu_fd, "PTW-FAULT: vaddr=%08h pte=%08h mega=%0b perm=%0b priv_fault=%0b for_store=%0b ptw_priv=%0d ptw_sum=%0b live_priv=%0d live_sum=%0b\n",
 				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr,
 				soc_top_inst.core_top_inst.mmu_inst.ptw_pte,
 				soc_top_inst.core_top_inst.mmu_inst.ptw_mega,
 				soc_top_inst.core_top_inst.mmu_inst.ptw_perm_fault,
 				soc_top_inst.core_top_inst.mmu_inst.ptw_priv_fault,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_for_store);
+				soc_top_inst.core_top_inst.mmu_inst.ptw_for_store,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_priv,
+				soc_top_inst.core_top_inst.mmu_inst.ptw_sum,
+				soc_top_inst.core_top_inst.mmu_inst.d_eff_priv,
+				soc_top_inst.core_top_inst.mmu_inst.sum_bit);
 
 		// Log sret transitions (U-mode return)
 		if (soc_top_inst.core_top_inst.csr_unit_inst.sret_i &&

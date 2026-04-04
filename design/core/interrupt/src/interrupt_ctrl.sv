@@ -57,6 +57,13 @@ module interrupt_ctrl (
     input        data_fault_is_store_i,// d_store_for_mmu
     input [31:0] data_fault_addr_i,    // mmu_d_fault_addr
 
+    // ── PMP access faults ───────────────────────────────────────────────
+    input        insn_access_fault_i,     // registered mmu_i_access_fault_r
+    input [31:0] insn_access_fault_addr_i,
+    input        data_access_fault_i,     // mmu_d_access_fault (combinational)
+    input        data_access_fault_is_store_i,
+    input [31:0] data_access_fault_addr_i,
+
     // ── Outputs ─────────────────────────────────────────────────────────
     output       trap_valid_o,
     output       trap_to_s_o,
@@ -94,10 +101,15 @@ wire illegal_valid = illegal_insn_i & insn_valid_id_i;
 wire load_page_fault  = data_page_fault_i & ~data_fault_is_store_i;
 wire store_page_fault = data_page_fault_i &  data_fault_is_store_i;
 
+// PMP access fault separation (load vs store)
+wire load_access_fault  = data_access_fault_i & ~data_access_fault_is_store_i;
+wire store_access_fault = data_access_fault_i &  data_access_fault_is_store_i;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // PC for exception: instruction faults use saved fault address
 // ═══════════════════════════════════════════════════════════════════════════
-wire [31:0] pc_for_id = insn_page_fault_i ? insn_fault_addr_i : pc_id_i;
+wire [31:0] pc_for_id = insn_page_fault_i  ? insn_fault_addr_i :
+                        insn_access_fault_i ? insn_access_fault_addr_i : pc_id_i;
 
 // Page fault address: data fault has priority over instruction fault
 wire [31:0] page_fault_addr = data_page_fault_i ? data_fault_addr_i : insn_fault_addr_i;
@@ -131,7 +143,8 @@ wire ie_csr_illegal = ie_csr_invalid_i;
 wire sync_exception = misalign_load | misalign_store | misalign_amo |
                       ecall_valid | ebreak_valid | illegal_valid |
                       ie_csr_illegal |
-                      insn_page_fault_i | load_page_fault | store_page_fault;
+                      insn_page_fault_i | load_page_fault | store_page_fault |
+                      insn_access_fault_i | load_access_fault | store_access_fault;
 
 // Ecall cause depends on current privilege level
 logic [7:0] ecall_cause;
@@ -153,7 +166,12 @@ logic [31:0] epc_out;
 logic [31:0] mtval_out;
 
 always_comb begin
-    if (load_page_fault) begin
+    // IE-stage data access faults (PMP) — highest priority
+    if (load_access_fault) begin
+        cause_code = 8'd5;  epc_out = pc_ie_i; mtval_out = data_access_fault_addr_i; is_interrupt = 1'b0;
+    end else if (store_access_fault) begin
+        cause_code = 8'd7;  epc_out = pc_ie_i; mtval_out = data_access_fault_addr_i; is_interrupt = 1'b0;
+    end else if (load_page_fault) begin
         cause_code = 8'd13; epc_out = pc_ie_i; mtval_out = page_fault_addr; is_interrupt = 1'b0;
     end else if (store_page_fault) begin
         cause_code = 8'd15; epc_out = pc_ie_i; mtval_out = page_fault_addr; is_interrupt = 1'b0;
@@ -163,6 +181,9 @@ always_comb begin
         cause_code = 8'd6;  epc_out = pc_ie_i; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
     end else if (ie_csr_illegal) begin
         cause_code = 8'd2;  epc_out = pc_ie_i; mtval_out = 32'h0; is_interrupt = 1'b0;
+    // IF/ID-stage instruction access fault (PMP) — before page fault
+    end else if (insn_access_fault_i) begin
+        cause_code = 8'd1;  epc_out = pc_for_id; mtval_out = insn_access_fault_addr_i; is_interrupt = 1'b0;
     end else if (insn_page_fault_i) begin
         cause_code = 8'd12; epc_out = pc_for_id; mtval_out = page_fault_addr; is_interrupt = 1'b0;
     end else if (illegal_valid) begin

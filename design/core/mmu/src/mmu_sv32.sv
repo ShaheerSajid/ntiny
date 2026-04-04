@@ -30,7 +30,8 @@ module mmu_sv32 (
 
     // Data address translation
     input  logic [31:0] d_vaddr_i,    // virtual address from ALU/AMO
-    input  logic        d_req_i,      // load or store active
+    input  logic        d_req_i,      // load or store active (from core2avl, post-suppression)
+    input  logic        d_req_raw_i,  // raw pipeline data request (pre-suppression, for PMP)
     input  logic        d_store_i,    // 1=store, 0=load
     output logic [31:0] d_paddr_o,    // translated physical address
     output logic        d_stall_o,    // stall data access (TLB miss)
@@ -42,7 +43,17 @@ module mmu_sv32 (
     output logic        ptw_req_o,    // PTE read request active
     input  logic [31:0] ptw_data_i,   // PTE data from memory
     input  logic        ptw_stall_i,  // memory stall for PTW read
-    output logic        ptw_active_o  // PTW is using dbus
+    output logic        ptw_active_o, // PTW is using dbus
+
+    // PMP configuration from CSR unit
+    input  logic [31:0] pmpcfg_i  [4],
+    input  logic [31:0] pmpaddr_i [16],
+
+    // PMP access fault outputs (cause 1/5/7)
+    output logic        i_access_fault_o,
+    output logic [31:0] i_access_fault_addr_o,
+    output logic        d_access_fault_o,
+    output logic [31:0] d_access_fault_addr_o
 );
 
     // ── Translation enable ───────────────────────────────────────
@@ -218,7 +229,7 @@ module mmu_sv32 (
     // Use LATCHED privilege and SUM from when the PTW started, not the
     // current values — a trap can change priv/SUM mid-walk, causing the
     // PTW to incorrectly fault on U-pages when checking with S-mode priv.
-    wire [1:0] ptw_check_priv = ptw_for_insn ? ptw_priv : ptw_priv;
+    wire [1:0] ptw_check_priv = ptw_priv;
     wire       ptw_check_sum  = ptw_sum;
     always_comb begin
         if (ptw_check_priv == 2'b00)
@@ -277,7 +288,9 @@ module mmu_sv32 (
                 end
 
                 PTW_L1: begin
-                    if (!ptw_stall_i) begin
+                    if (ptw_pmp_denied) begin
+                        ptw_state <= PTW_FAULT;
+                    end else if (!ptw_stall_i) begin
                         ptw_pte <= ptw_data_i;
                         ptw_l1_pte_saved <= ptw_data_i;
                         // Check PTE next cycle
@@ -308,7 +321,9 @@ module mmu_sv32 (
                 end
 
                 PTW_L0: begin
-                    if (!ptw_stall_i) begin
+                    if (ptw_pmp_denied) begin
+                        ptw_state <= PTW_FAULT;
+                    end else if (!ptw_stall_i) begin
                         ptw_pte <= ptw_data_i;
                         if (!ptw_data_i[0] || (!ptw_data_i[1] && ptw_data_i[2])) begin
                             ptw_state <= PTW_FAULT;
@@ -343,8 +358,9 @@ module mmu_sv32 (
         end
     end
 
-    // PTW memory interface
-    assign ptw_active_o = (ptw_state == PTW_L1) || (ptw_state == PTW_L0);
+    // PTW memory interface — suppress request on PMP denial
+    wire ptw_in_read = (ptw_state == PTW_L1) || (ptw_state == PTW_L0);
+    assign ptw_active_o = ptw_in_read && !ptw_pmp_denied;
     assign ptw_req_o    = ptw_active_o;
     assign ptw_addr_o   = (ptw_state == PTW_L1) ? ptw_l1_addr :
                           (ptw_state == PTW_L0) ? ptw_l0_addr : 32'b0;
@@ -402,22 +418,80 @@ module mmu_sv32 (
         end
     end
 
+    // ── PMP checkers ───────────────────────────────────────────────
+
+    // Instruction-side PMP check (always on physical address, even when MMU off)
+    logic i_pmp_fault;
+    wire [31:0] i_paddr_out = i_translate ? i_paddr_tlb : i_vaddr_i;
+
+    pmp_checker pmp_i_check (
+        .addr_i     (i_paddr_out),
+        .priv_i     (i_priv_i),
+        .is_read_i  (1'b0),
+        .is_write_i (1'b0),
+        .is_exec_i  (1'b1),
+        .pmpcfg_i   (pmpcfg_i),
+        .pmpaddr_i  (pmpaddr_i),
+        .fault_o    (i_pmp_fault)
+    );
+
+    // Data/PTW PMP check (shared — PTW and data are mutually exclusive)
+    wire [31:0] d_paddr_out = d_translate ? d_paddr_tlb : d_vaddr_i;
+    wire [31:0] d_pmp_addr  = ptw_in_read ? ptw_addr_o : d_paddr_out;
+    wire [1:0]  d_pmp_priv  = ptw_in_read ? 2'b11      : d_eff_priv;
+    wire        d_pmp_read  = ptw_in_read ? 1'b1        : (d_req_i && !d_store_i);
+    wire        d_pmp_write = ptw_in_read ? 1'b0        : (d_req_i && d_store_i);
+
+    logic d_pmp_fault;
+    pmp_checker pmp_d_check (
+        .addr_i     (d_pmp_addr),
+        .priv_i     (d_pmp_priv),
+        .is_read_i  (d_pmp_read),
+        .is_write_i (d_pmp_write),
+        .is_exec_i  (1'b0),
+        .pmpcfg_i   (pmpcfg_i),
+        .pmpaddr_i  (pmpaddr_i),
+        .fault_o    (d_pmp_fault)
+    );
+
+    // PTW PMP denial — block PTW read and go to FAULT
+    wire ptw_pmp_denied = d_pmp_fault && ptw_in_read;
+
+    // Track if PTW fault was caused by PMP (for access fault vs page fault distinction)
+    logic ptw_pmp_fault_r;
+    always_ff @(posedge clk_i or posedge reset_i)
+        if (reset_i)                     ptw_pmp_fault_r <= 1'b0;
+        else if (ptw_state == PTW_IDLE)  ptw_pmp_fault_r <= 1'b0;
+        else if (ptw_pmp_denied)         ptw_pmp_fault_r <= 1'b1;
+
     // ── Output logic ─────────────────────────────────────────────
 
     // Instruction side
-    assign i_paddr_o = i_translate ? i_paddr_tlb : i_vaddr_i;
+    assign i_paddr_o = i_paddr_out;
     assign i_stall_o = i_translate && i_req_i && (!itlb_hit || ptw_active_o);
-    assign i_fault_o = (i_translate && i_req_i && itlb_hit && !i_perm_ok) ||
-                       (i_translate && ptw_state == PTW_FAULT && ptw_for_insn);
-    // Fault address: PTW fault uses the address that was being walked, not current i_vaddr
+    // Page faults (cause 12): TLB permission fail or PTW fault (not PMP-caused)
+    assign i_fault_o = (!flush_i && i_translate && i_req_i && itlb_hit && !i_perm_ok) ||
+                       (i_translate && ptw_state == PTW_FAULT && ptw_for_insn && !ptw_pmp_fault_r);
     assign i_fault_addr_o = (ptw_state == PTW_FAULT && ptw_for_insn) ? ptw_vaddr : i_vaddr_i;
+    // Access faults (cause 1): PMP denial on fetch or PTW PMP fault for insn
+    // Instruction PMP fault is registered (mmu_i_access_fault_r in core_top), no comb loop risk
+    assign i_access_fault_o = (i_req_i && i_pmp_fault) ||
+                              (ptw_state == PTW_FAULT && ptw_for_insn && ptw_pmp_fault_r);
+    assign i_access_fault_addr_o = (ptw_state == PTW_FAULT && ptw_for_insn) ? ptw_vaddr : i_vaddr_i;
 
     // Data side
-    assign d_paddr_o = d_translate ? d_paddr_tlb : d_vaddr_i;
+    assign d_paddr_o = d_paddr_out;
     assign d_stall_o = d_translate && d_req_i && (!dtlb_hit || ptw_active_o);
-    assign d_fault_o = (d_translate && d_req_i && dtlb_hit && !d_perm_ok) ||
-                       (d_translate && ptw_state == PTW_FAULT && !ptw_for_insn);
-    // Fault address: PTW fault uses the address that was being walked
+    // Page faults (cause 13/15)
+    assign d_fault_o = (!flush_i && d_translate && d_req_i && dtlb_hit && !d_perm_ok) ||
+                       (d_translate && ptw_state == PTW_FAULT && !ptw_for_insn && !ptw_pmp_fault_r);
     assign d_fault_addr_o = (ptw_state == PTW_FAULT && !ptw_for_insn) ? ptw_vaddr : d_vaddr_i;
+    // Access faults (cause 5/7): PMP denial on data access or PTW PMP fault for data
+    // Data PMP fault: uses d_req_raw_i (pipeline's raw request) to avoid
+    // combinational loop: d_req_i comes from core2avl which is downstream
+    // of the bus suppression that this fault triggers.
+    assign d_access_fault_o = (d_req_raw_i && !ptw_in_read && d_pmp_fault) ||
+                              (ptw_state == PTW_FAULT && !ptw_for_insn && ptw_pmp_fault_r);
+    assign d_access_fault_addr_o = (ptw_state == PTW_FAULT && !ptw_for_insn) ? ptw_vaddr : d_vaddr_i;
 
 endmodule
