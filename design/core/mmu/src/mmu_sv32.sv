@@ -497,8 +497,9 @@ module mmu_sv32 (
     // Data side
     assign d_paddr_o = d_paddr_out;
     assign d_stall_o = d_translate && d_req_i && (!dtlb_hit || ptw_active_o);
-    // Page faults (cause 13/15)
-    assign d_fault_o = (!flush_i && d_translate && d_req_i && dtlb_hit && !d_perm_ok) ||
+    // Page faults (cause 13/15) — TLB hit path is combinational, registered in core_top.
+    // PTW fault path is already registered (ptw_state is FF).
+    assign d_fault_o = (d_translate && d_req_i && dtlb_hit && !d_perm_ok) ||
                        (d_translate && ptw_state == PTW_FAULT && !ptw_for_insn && !ptw_pmp_fault_r);
     assign d_fault_addr_o = (ptw_state == PTW_FAULT && !ptw_for_insn) ? ptw_vaddr : d_vaddr_i;
     // Access faults (cause 5/7): PMP denial on data access or PTW PMP fault for data

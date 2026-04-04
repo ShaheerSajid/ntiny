@@ -239,6 +239,22 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     end
 end
 
+// Registered data page fault — same pattern, breaks d_fault combinational loop
+logic        mmu_d_fault_r;
+logic [31:0] mmu_d_fault_addr_r;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        mmu_d_fault_r      <= 1'b0;
+        mmu_d_fault_addr_r <= 32'b0;
+    end else if (interrupt_valid) begin
+        mmu_d_fault_r      <= 1'b0;
+        mmu_d_fault_addr_r <= 32'b0;
+    end else begin
+        mmu_d_fault_r      <= mmu_d_fault;
+        mmu_d_fault_addr_r <= mmu_d_fault_addr;
+    end
+end
+
 // insn_valid_id, post_trap, stale_id — now driven by hazard_unit
 logic insn_valid_id;
 logic stale_id, stale_ie, stale_imem, stale_iwb;
@@ -329,6 +345,7 @@ hazard_unit hazard_unit_inst (
     .mmu_i_stall_i      (mmu_i_stall),
     .mmu_d_stall_i      (mmu_d_stall),
     .pmp_d_fault_i      (mmu_d_access_fault),  // stall IE 1 cycle for registered trap
+    .d_page_fault_i     (mmu_d_fault),         // stall IE 1 cycle for registered trap
     .dmem_req_i         (dmem_port.req),
     .dmem_ready_i       (dmem_port.ready),
     .insert_bubble_i    (insert_bubble),
@@ -698,9 +715,9 @@ interrupt_ctrl interrupt_ctrl_inst
   // MMU page faults
   .insn_page_fault_i  (mmu_i_fault_r),
   .insn_fault_addr_i  (mmu_i_fault_addr_r),
-  .data_page_fault_i  (mmu_d_fault),
+  .data_page_fault_i  (mmu_d_fault_r),
   .data_fault_is_store_i(d_store_for_mmu),
-  .data_fault_addr_i  (mmu_d_fault_addr),
+  .data_fault_addr_i  (mmu_d_fault_addr_r),
   // PMP access faults
   .insn_access_fault_i       (mmu_i_access_fault_r),
   .insn_access_fault_addr_i  (mmu_i_access_fault_addr_r),
@@ -1058,11 +1075,11 @@ assign dmem_port.addr  = ptw_active ? ptw_addr : d_paddr;
 assign dmem_port.be    = ptw_active ? 4'b1111 :
                          amo_active ? amo_dbus_byteenable : c2a_byteenable;
 assign dmem_port.req   = ptw_active ? ptw_req :
-                         mmu_d_access_fault ? 1'b0 :  // PMP: suppress bus request
+                         (mmu_d_access_fault || mmu_d_fault) ? 1'b0 :  // PMP/page fault: suppress bus
                          amo_active ? (amo_dbus_read | amo_dbus_write) :
                                       (c2a_read | c2a_write);
 assign dmem_port.we    = ptw_active ? 1'b0 :
-                         mmu_d_access_fault ? 1'b0 :  // PMP: suppress bus write
+                         (mmu_d_access_fault || mmu_d_fault) ? 1'b0 :  // PMP/page fault: suppress bus
                          amo_active ? amo_dbus_write : c2a_write;
 assign dmem_port.wdata = ptw_active ? 32'b0 :
                          amo_active ? amo_dbus_writedata  : c2a_writedata;

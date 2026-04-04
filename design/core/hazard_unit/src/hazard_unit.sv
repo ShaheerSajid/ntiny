@@ -22,6 +22,7 @@ module hazard_unit (
     input  onebit_sig_e mmu_i_stall_i,     // instruction TLB / PTW
     input  onebit_sig_e mmu_d_stall_i,     // data TLB / PTW
     input  logic        pmp_d_fault_i,     // PMP data fault (stall IE 1 cycle for registered trap)
+    input  logic        d_page_fault_i,    // data page fault (stall IE 1 cycle for registered trap)
     input  logic        dmem_req_i,        // data-bus request pending
     input  logic        dmem_ready_i,      // data-bus ready
     input  onebit_sig_e insert_bubble_i,   // structural hazard (stall_line)
@@ -78,7 +79,8 @@ assign iwb_stall_o  = onebit_sig_e'(1'b0);
 assign imem_stall_o = onebit_sig_e'(iwb_stall_o);
 assign ie_stall_o   = onebit_sig_e'(imem_stall_o | alu_stall_i | dmem_busy |
                                      amo_stall_i  | mmu_d_stall_i |
-                                     misalign_stall_i | pmp_d_fault_i);
+                                     misalign_stall_i | pmp_d_fault_i |
+                                     d_page_fault_i);
 
 // CSR read-after-write hazard: mret/sret in ID reads epc, but preceding
 // CSR write in IE hasn't committed yet.
