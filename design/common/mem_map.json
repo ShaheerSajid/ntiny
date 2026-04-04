@@ -10,9 +10,9 @@
             "BOOT_SIZE_BYTES":"0x00001000"
         },
         "riscof": {
-            "_comment": "RISCOF compliance testing — large RAM for vm_sv32 page tables",
+            "_comment": "RISCOF compliance testing — large RAM for vm_sv32 page tables + PMP tests",
             "RAM_BASE":       "0x80000000",
-            "RAM_SIZE_BYTES": "0x01000000",
+            "RAM_SIZE_BYTES": "0x02000000",
             "BOOT_BASE":      "0x00001000",
             "BOOT_SIZE_BYTES":"0x00001000"
         },
