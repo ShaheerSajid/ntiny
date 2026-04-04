@@ -881,10 +881,9 @@ csr_unit csr_unit_inst
 	.roundmode_o			    (frm),
 	.float_status_i			  (float_status),
   .csr_instret_trigger_i(onebit_sig_e'(ctrl_bus_ie.inst_type != NO_INS)),
-	// Suppress CSR writes when an async interrupt fires on the same cycle as
-	// a CSR instruction in IE. The interrupted instruction must not commit.
-	// Sync exceptions (from ID stage) don't affect the IE instruction.
-	.csr_cmd_i				    (async_trap ? NO_CSR_OP : ctrl_bus_ie.csr_op),
+	// Let CSR writes complete — interrupts fire after instruction commits.
+	// (Ibex: "interrupts taken as soon as whatever instruction in ID finishes")
+	.csr_cmd_i				    (ctrl_bus_ie.csr_op),
 	.csr_use_immediate_i	(ctrl_bus_ie.csr_use_immediate),
 	.csr_addr_i				    (dbg_rf_override? csr_reg_e'(ar_ad_i[11:0]) : ctrl_bus_ie.csr_addr),
 	.imm_i					      (imm_ie),
