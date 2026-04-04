@@ -221,6 +221,24 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     end
 end
 
+// Registered data PMP access fault — breaks combinational loop through
+// d_access_fault → trap_valid → interrupt_valid → flush/stall feedback.
+// 1-cycle delay is acceptable: the trap fires next cycle, same as page faults.
+logic        mmu_d_access_fault_r;
+logic [31:0] mmu_d_access_fault_addr_r;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        mmu_d_access_fault_r      <= 1'b0;
+        mmu_d_access_fault_addr_r <= 32'b0;
+    end else if (interrupt_valid) begin
+        mmu_d_access_fault_r      <= 1'b0;
+        mmu_d_access_fault_addr_r <= 32'b0;
+    end else begin
+        mmu_d_access_fault_r      <= mmu_d_access_fault;
+        mmu_d_access_fault_addr_r <= mmu_d_access_fault_addr;
+    end
+end
+
 // insn_valid_id, post_trap, stale_id — now driven by hazard_unit
 logic insn_valid_id;
 logic stale_id, stale_ie, stale_imem, stale_iwb;
@@ -948,6 +966,10 @@ always_ff@(posedge clk_i or posedge reset_i)
 		end
 		else if(!imem_stall) begin
 			ctrl_bus_imem <= ctrl_bus_ie;
+			// PMP data access fault: suppress writeback to prevent stale
+			// load data from reaching register file before trap flush
+			if (mmu_d_access_fault)
+				ctrl_bus_imem.wb_sel <= NO_WB;
 			pc_imem <= c_valid_ie? pc_ie + 2 : pc_ie + 4;
 			exec_result_imem <= exec_result_ie;
 			stale_imem <= stale_ie;
