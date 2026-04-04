@@ -45,6 +45,7 @@
 ../../design/core/mmu/src/pmp_checker.sv
 ../../design/core/mmu/src/mmu_sv32.sv
 ../../design/core/core_top/src/core_top.sv
+../../design/core/rng/src/rng_seed.sv
 ../../design/core/csr_unit/src/csr_unit.sv
 ../../design/core/regfile/src/reg_file.sv
 ../../design/uncore/gpio/src/gpio_top.sv

@@ -394,6 +394,20 @@ module csr_unit (
 
 	assign roundmode_o = roundmode_e'(_FRM[2:0]);
 
+	// ── Zkr Seed CSR (entropy source) ───────────────────────────
+	wire        seed_read  = csr_active && (csr_addr_i == SEED);
+	wire        seed_write = (csr_cmd_i == WRITE_CSR) && (csr_addr_i == SEED);
+	wire [31:0] seed_value;
+
+	rng_seed rng_seed_inst (
+	    .clk_i   (clk_i),
+	    .reset_i (reset_i),
+	    .read_i  (seed_read),
+	    .write_i (seed_write),
+	    .wdata_i (csr_data),
+	    .seed_o  (seed_value)
+	);
+
 	// ── SD bit (read-only, computed) ─────────────────────────────
 `ifdef FPU
 	wire mstatus_sd = (_MSTATUS[14:13] == 2'b11);
@@ -415,6 +429,7 @@ module csr_unit (
 			FFLAGS:         csr_value_o = {27'b0, _FFLAGS[4:0]};
 			FRM:            csr_value_o = {29'b0, _FRM[2:0]};
 			FCSR:           csr_value_o = {24'b0, _FRM[2:0], _FFLAGS[4:0]};
+			SEED:           csr_value_o = seed_value;  // Zkr: {OPST, 14'b0, entropy[15:0]}
 			CYCLE:          csr_value_o = _MCYCLE;
 			TIME:           csr_value_o = mtime_i[31:0];
 			INSTRET:        csr_value_o = _MINSTRET;

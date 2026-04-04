@@ -185,16 +185,18 @@ wire ptw_rvalid = dmem_port.rvalid & ptw_req_prev;
 //   i_fault_o → trap_valid → interrupt_valid → mmu_priv → i_translate → i_fault_o
 // Also naturally gives correct priority: data faults from IE (combinational) are processed
 // before instruction faults from IF (delayed 1 cycle by register).
+// All registered faults clear on any pipeline flush (trap, branch, MRET/SRET).
+// Critical: prevents stale faults from firing after PC redirect, which would
+// overwrite sepc/scause with wrong values and corrupt trap entry context.
+wire flush_any = interrupt_valid | (~if_id_stall & (branch_taken_valid | ret_valid));
+
 logic        mmu_i_fault_r;
 logic [31:0] mmu_i_fault_addr_r;
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
         mmu_i_fault_r      <= 1'b0;
         mmu_i_fault_addr_r <= 32'b0;
-    end else if (interrupt_valid | (~if_id_stall & (branch_taken_valid | ret_valid))) begin
-        // Clear on any pipeline flush (trap, branch, MRET/SRET).
-        // Critical: ret_valid clears stale i_fault_r that would otherwise
-        // fire on the same cycle as SRET, overwriting sepc with the fault address.
+    end else if (flush_any) begin
         mmu_i_fault_r      <= 1'b0;
         mmu_i_fault_addr_r <= 32'b0;
     end else begin
@@ -210,7 +212,7 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
         mmu_i_access_fault_r      <= 1'b0;
         mmu_i_access_fault_addr_r <= 32'b0;
-    end else if (interrupt_valid) begin
+    end else if (flush_any) begin
         mmu_i_access_fault_r      <= 1'b0;
         mmu_i_access_fault_addr_r <= 32'b0;
     end else begin
@@ -221,14 +223,13 @@ end
 
 // Registered data PMP access fault — breaks combinational loop through
 // d_access_fault → trap_valid → interrupt_valid → flush/stall feedback.
-// 1-cycle delay is acceptable: the trap fires next cycle, same as page faults.
 logic        mmu_d_access_fault_r;
 logic [31:0] mmu_d_access_fault_addr_r;
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
         mmu_d_access_fault_r      <= 1'b0;
         mmu_d_access_fault_addr_r <= 32'b0;
-    end else if (interrupt_valid) begin
+    end else if (flush_any) begin
         mmu_d_access_fault_r      <= 1'b0;
         mmu_d_access_fault_addr_r <= 32'b0;
     end else begin
@@ -244,7 +245,9 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
         mmu_d_fault_r      <= 1'b0;
         mmu_d_fault_addr_r <= 32'b0;
-    end else if (interrupt_valid) begin
+    end else if (flush_any) begin
+        // Clear on any pipeline flush (trap, branch, MRET/SRET).
+        // Prevents stale d_fault_r from firing on wrong instruction after redirect.
         mmu_d_fault_r      <= 1'b0;
         mmu_d_fault_addr_r <= 32'b0;
     end else begin

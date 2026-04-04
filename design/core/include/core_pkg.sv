@@ -179,6 +179,7 @@ typedef enum logic[11:0] {
 	FFLAGS			= 12'h001,
 	FRM 			= 12'h002,
 	FCSR 			= 12'h003,
+	SEED			= 12'h015,  // Zkr: entropy source CSR
 	CYCLE 			= 12'hc00,
 	TIME 			= 12'hc01,
 	INSTRET 		= 12'hc02,
