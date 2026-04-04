@@ -466,15 +466,18 @@ module mmu_sv32 (
         if (reset_i) d_pmp_fault <= 1'b0;
         else         d_pmp_fault <= d_pmp_fault_comb;
 
-    // PTW PMP denial — block PTW read and go to FAULT
-    wire ptw_pmp_denied = d_pmp_fault && ptw_in_read;
+    // PTW PMP denial — use COMBINATIONAL d_pmp_fault_comb for immediate blocking.
+    // This doesn't create a loop: ptw_pmp_denied → ptw_active_o → d_stall_o/bus_mux
+    // are all downstream and don't feed back to PMP checker inputs.
+    wire ptw_pmp_denied = d_pmp_fault_comb && ptw_in_read;
 
     // Track if PTW fault was caused by PMP (for access fault vs page fault distinction)
+    // Track if PTW fault was caused by PMP (uses combinational ptw_pmp_denied)
     logic ptw_pmp_fault_r;
     always_ff @(posedge clk_i or posedge reset_i)
-        if (reset_i)                     ptw_pmp_fault_r <= 1'b0;
-        else if (ptw_state == PTW_IDLE)  ptw_pmp_fault_r <= 1'b0;
-        else if (ptw_pmp_denied)         ptw_pmp_fault_r <= 1'b1;
+        if (reset_i)                                      ptw_pmp_fault_r <= 1'b0;
+        else if (ptw_state == PTW_IDLE)                   ptw_pmp_fault_r <= 1'b0;
+        else if (d_pmp_fault_comb && ptw_in_read)         ptw_pmp_fault_r <= 1'b1;
 
     // ── Output logic ─────────────────────────────────────────────
 
@@ -502,7 +505,9 @@ module mmu_sv32 (
     // Data PMP fault: uses d_req_raw_i (pipeline's raw request) to avoid
     // combinational loop: d_req_i comes from core2avl which is downstream
     // of the bus suppression that this fault triggers.
-    assign d_access_fault_o = (d_req_raw_i && !ptw_in_read && d_pmp_fault) ||
+    // Use combinational d_pmp_fault_comb for immediate fault detection.
+    // The registered d_pmp_fault is used only for interrupt_ctrl (via core_top).
+    assign d_access_fault_o = (d_req_raw_i && !ptw_in_read && d_pmp_fault_comb) ||
                               (ptw_state == PTW_FAULT && !ptw_for_insn && ptw_pmp_fault_r);
     assign d_access_fault_addr_o = (ptw_state == PTW_FAULT && !ptw_for_insn) ? ptw_vaddr : d_vaddr_i;
 

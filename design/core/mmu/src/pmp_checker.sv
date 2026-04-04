@@ -82,13 +82,22 @@ module pmp_checker (
         end
     endgenerate
 
+    // Check if any PMP entry is active (A ≠ OFF)
+    // When no entries are active, PMP has no effect (as if not implemented).
+    logic any_active;
+    always_comb begin
+        any_active = 1'b0;
+        for (int i = 0; i < 16; i++)
+            if (mode[i] != 2'b00) any_active = 1'b1;
+    end
+
     // Priority encoder: first matching entry wins
     always_comb begin
         fault_o = 1'b0;
 
-        // Default: no match
-        // M-mode: full access; S/U-mode: denied
-        if (priv_i != 2'b11)
+        // Default when PMP entries are active:
+        // M-mode: full access; S/U-mode: denied (spec §3.7)
+        if (any_active && priv_i != 2'b11)
             fault_o = 1'b1;  // S/U default deny
 
         // Scan entries 0-15 in priority order

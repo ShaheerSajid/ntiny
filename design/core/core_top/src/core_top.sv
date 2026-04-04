@@ -328,6 +328,7 @@ hazard_unit hazard_unit_inst (
     .icache_stall_i     (1'b0),          // transparent cache: no stall
     .mmu_i_stall_i      (mmu_i_stall),
     .mmu_d_stall_i      (mmu_d_stall),
+    .pmp_d_fault_i      (mmu_d_access_fault),  // stall IE 1 cycle for registered trap
     .dmem_req_i         (dmem_port.req),
     .dmem_ready_i       (dmem_port.ready),
     .insert_bubble_i    (insert_bubble),
@@ -705,7 +706,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .insn_access_fault_addr_i  (mmu_i_access_fault_addr_r),
   // Use registered version to break combinational loop:
   // d_pmp_fault → trap_valid → interrupt_valid → flush_i → settles wrong.
-  // Bus suppression uses combinational mmu_d_access_fault (downstream, no loop).
+  // Registered path — IE stall holds the faulting instruction for 1 cycle
   .data_access_fault_i       (mmu_d_access_fault_r),
   .data_access_fault_is_store_i(d_store_for_mmu),
   .data_access_fault_addr_i  (mmu_d_access_fault_addr_r),
@@ -1001,7 +1002,7 @@ core2avl core2avl_inst
 	.load_store_width	(dbg_mem_override? load_store_width_e'(am_st_i) :  ctrl_bus_ie.load_store_width),
 	.mem_unsigned	  	(dbg_mem_override? FALSE : ctrl_bus_ie.mem_unsigned),
 	.mem_op				    (dbg_mem_override? mem_op_e'({1'b0,am_wr_i}) :
-	                     (exception_from_ie || mmu_d_access_fault) ? NO_MEM_OP : ctrl_bus_ie.mem_op),
+	                     exception_from_ie ? NO_MEM_OP : ctrl_bus_ie.mem_op),
 	.addr_i			    	(dbg_mem_override? am_ad_i :  alu_result),
 	.data2write_i		  (dbg_mem_override? am_di_i :  opB_forwarded_data),
 	.data2read_o		  (readdata_imem),
