@@ -37,7 +37,8 @@
 /* ── Physical layout ────────────────────────────────────────── */
 .equ PT_L1,          0x80004000
 .equ PT_L0_KERN,     0x80005000   /* L0 for kernel VPN1=0x300 */
-.equ PT_L0_USER,     0x80006000   /* L0 for user VPN1=0x000 */
+.equ PT_L0_USER,     0x80006000   /* L0 for user VPN1=0x000 (physical) */
+.equ PT_L0_USER_V,   0xC0006000   /* virtual address of L0_USER (via kernel megapage) */
 .equ UCODE_PAGE,     0x80007000   /* U-mode code+data */
 .equ STACK_TOP,      0x80008000
 
@@ -91,7 +92,7 @@ _init:
      * PTE  = (0x80000000 >> 12) << 10 | flags = 0x20000000 | PTE_LEAF
      */
     li      t0, PT_L1 + (0x300 * 4)
-    li      t2, (0x20000 << 10) | PTE_LEAF
+    li      t2, (0x80000 << 10) | PTE_LEAF
     sw      t2, 0(t0)
 
     /*
@@ -99,7 +100,7 @@ _init:
      * Needed so MRET target (physical addr) works before kernel relocates
      */
     li      t0, PT_L1 + (0x200 * 4)
-    li      t2, (0x20000 << 10) | PTE_LEAF
+    li      t2, (0x80000 << 10) | PTE_LEAF
     sw      t2, 0(t0)
 
     /*
@@ -108,7 +109,7 @@ _init:
      * PTE = (0x10000000 >> 12) << 10 | PTE_LEAF (no U bit — S-mode only)
      */
     li      t0, PT_L1 + (0x040 * 4)
-    li      t2, (0x04000 << 10) | PTE_LEAF
+    li      t2, (0x10000 << 10) | PTE_LEAF
     sw      t2, 0(t0)
 
     /*
@@ -116,7 +117,7 @@ _init:
      * VPN1 = 0x02000000 >> 22 = 0x008
      */
     li      t0, PT_L1 + (0x008 * 4)
-    li      t2, (0x00800 << 10) | PTE_LEAF
+    li      t2, (0x02000 << 10) | PTE_LEAF
     sw      t2, 0(t0)
 
     /*
@@ -344,7 +345,7 @@ handle_pgfault:
     /* Map the page: install PTE at L0_USER[0x007] */
     la      a0, str_pgfault
     call    uart_puts
-    li      t0, PT_L0_USER + (0x007 * 4)
+    li      t0, PT_L0_USER_V + (0x007 * 4)
     li      t2, ((UCODE_PAGE + 0x1000) >> 12) << 10 | PTE_ULEAF
     sw      t2, 0(t0)
     sfence.vma
@@ -392,7 +393,7 @@ do_mmap:
     call    uart_puts
 
     /* Install PTE for USER_DATA_VA (L0_USER[0x007]) */
-    li      t0, PT_L0_USER + (0x007 * 4)
+    li      t0, PT_L0_USER_V + (0x007 * 4)
     li      t2, ((UCODE_PAGE + 0x1000) >> 12) << 10 | PTE_ULEAF
     sw      t2, 0(t0)
     sfence.vma
@@ -404,7 +405,7 @@ do_munmap:
     call    uart_puts
 
     /* Clear PTE for USER_DATA_VA */
-    li      t0, PT_L0_USER + (0x007 * 4)
+    li      t0, PT_L0_USER_V + (0x007 * 4)
     sw      zero, 0(t0)
     sfence.vma
     j       trap_return
@@ -415,12 +416,7 @@ do_exit:
     call    uart_puts
 
     /* Restore kernel context and jump to kernel_resume */
-    la      t0, kernel_resume
-    /* Convert to virtual: offset from 0x80000000 + 0xC0000000 */
-    li      t1, KERN_VBASE
-    li      t2, 0x80000000
-    sub     t0, t0, t2
-    add     t0, t0, t1
+    la      t0, kernel_resume    /* PC-relative: already virtual (0xC0000xxx) */
     csrw    sepc, t0
     /* SPP = S-mode */
     li      t0, (1 << 8)

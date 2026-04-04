@@ -191,12 +191,10 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
         mmu_i_fault_r      <= 1'b0;
         mmu_i_fault_addr_r <= 32'b0;
-    end else if (interrupt_valid) begin
-        // Clear when a trap fires (pipeline redirects to handler).
-        // Do NOT clear on branch/ret: if the branch/ret TARGET itself faults
-        // (e.g., page without A bit), the fault is real and must propagate.
-        // Speculative faults (pc+4 past page boundary) are prevented by
-        // flush_i aborting the PTW before it reaches FAULT state.
+    end else if (interrupt_valid | (~if_id_stall & (branch_taken_valid | ret_valid))) begin
+        // Clear on any pipeline flush (trap, branch, MRET/SRET).
+        // Critical: ret_valid clears stale i_fault_r that would otherwise
+        // fire on the same cycle as SRET, overwriting sepc with the fault address.
         mmu_i_fault_r      <= 1'b0;
         mmu_i_fault_addr_r <= 32'b0;
     end else begin
