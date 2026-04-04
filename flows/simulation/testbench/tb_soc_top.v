@@ -184,8 +184,14 @@ end
 
 // ── TLB/MMU trace for bad_page debugging ────────────────────────
 // Log DTLB fills, sfence flushes, and data accesses to suspicious PFNs
+// Disabled by default to prevent disk-filling on long Linux runs.
+// Enable with +define+DV_MMU_TRACE
 integer mmu_fd;
+`ifdef DV_MMU_TRACE
 initial mmu_fd = $fopen("mmu_trace.log", "w");
+`else
+initial mmu_fd = 0;
+`endif
 
 always @(posedge clk) begin
 	if (!reset) begin

@@ -183,89 +183,44 @@ wire ptw_rvalid = dmem_port.rvalid & ptw_req_prev;
 
 // Registered instruction page fault — breaks the combinational loop:
 //   i_fault_o → trap_valid → interrupt_valid → mmu_priv → i_translate → i_fault_o
-// Also naturally gives correct priority: data faults from IE (combinational) are processed
-// before instruction faults from IF (delayed 1 cycle by register).
-// All registered faults clear on any pipeline flush (trap, branch, MRET/SRET).
-// Critical: prevents stale faults from firing after PC redirect, which would
-// overwrite sepc/scause with wrong values and corrupt trap entry context.
-// Clear registered faults on ANY redirect — NOT gated by ~if_id_stall.
-// During ITLB-miss stalls after SRET, ret_valid stays high for multiple cycles.
-// The stall prevents flush_i from firing, but the stale fault must still be cleared.
-wire flush_any = interrupt_valid | (~if_id_stall & (branch_taken_valid | ret_valid));
-// i_fault_r needs extra clearing: ret_valid stays high during ITLB-miss stalls
-// after SRET, but flush_any is blocked by if_id_stall. The stale i_fault from
-// the pre-SRET fetch path survives and fires on the wrong instruction.
-// Only SRET needs the extra clearing (S-mode fetch generates stale i_fault
-// during ITLB-miss stall). MRET doesn't: M-mode has no ITLB (xlate off).
-wire sret_active = ret_valid && (ctrl_bus_if_id.sret == TRUE);
-wire flush_any_ifault = flush_any | sret_active;
+// ── Trap Sequencer ──────────────────────────────────────────────
+// Centralized fault registration with proper clearing policies:
+// - i_fault_r: clears on trap + branch/ret + SRET ITLB stall (FSM)
+// - d_fault_r, i_access_fault_r, d_access_fault_r: clear on trap ONLY
+logic        mmu_i_fault_r,      mmu_d_fault_r;
+logic [31:0] mmu_i_fault_addr_r, mmu_d_fault_addr_r;
+logic        mmu_i_access_fault_r,      mmu_d_access_fault_r;
+logic [31:0] mmu_i_access_fault_addr_r, mmu_d_access_fault_addr_r;
 
-logic        mmu_i_fault_r;
-logic [31:0] mmu_i_fault_addr_r;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i) begin
-        mmu_i_fault_r      <= 1'b0;
-        mmu_i_fault_addr_r <= 32'b0;
-    end else if (flush_any_ifault) begin
-        // ret_valid clears stale i_fault even during ITLB-miss stalls
-        mmu_i_fault_r      <= 1'b0;
-        mmu_i_fault_addr_r <= 32'b0;
-    end else begin
-        mmu_i_fault_r      <= mmu_i_fault;
-        mmu_i_fault_addr_r <= mmu_i_fault_addr;
-    end
-end
-
-// Registered instruction PMP access fault (same pattern as page fault)
-logic        mmu_i_access_fault_r;
-logic [31:0] mmu_i_access_fault_addr_r;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i) begin
-        mmu_i_access_fault_r      <= 1'b0;
-        mmu_i_access_fault_addr_r <= 32'b0;
-    end else if (flush_any) begin
-        mmu_i_access_fault_r      <= 1'b0;
-        mmu_i_access_fault_addr_r <= 32'b0;
-    end else begin
-        mmu_i_access_fault_r      <= mmu_i_access_fault;
-        mmu_i_access_fault_addr_r <= mmu_i_access_fault_addr;
-    end
-end
-
-// Registered data PMP access fault — breaks combinational loop through
-// d_access_fault → trap_valid → interrupt_valid → flush/stall feedback.
-logic        mmu_d_access_fault_r;
-logic [31:0] mmu_d_access_fault_addr_r;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i) begin
-        mmu_d_access_fault_r      <= 1'b0;
-        mmu_d_access_fault_addr_r <= 32'b0;
-    end else if (flush_any) begin
-        mmu_d_access_fault_r      <= 1'b0;
-        mmu_d_access_fault_addr_r <= 32'b0;
-    end else begin
-        mmu_d_access_fault_r      <= mmu_d_access_fault;
-        mmu_d_access_fault_addr_r <= mmu_d_access_fault_addr;
-    end
-end
-
-// Registered data page fault — same pattern, breaks d_fault combinational loop
-logic        mmu_d_fault_r;
-logic [31:0] mmu_d_fault_addr_r;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i) begin
-        mmu_d_fault_r      <= 1'b0;
-        mmu_d_fault_addr_r <= 32'b0;
-    end else if (flush_any) begin
-        // Clear on any pipeline flush (trap, branch, MRET/SRET).
-        // Prevents stale d_fault_r from firing on wrong instruction after redirect.
-        mmu_d_fault_r      <= 1'b0;
-        mmu_d_fault_addr_r <= 32'b0;
-    end else begin
-        mmu_d_fault_r      <= mmu_d_fault;
-        mmu_d_fault_addr_r <= mmu_d_fault_addr;
-    end
-end
+trap_sequencer trap_seq_inst (
+    .clk_i              (clk_i),
+    .reset_i            (reset_i),
+    // Pipeline events
+    .interrupt_valid_i  (interrupt_valid),
+    .ret_valid_i        (ret_valid),
+    .sret_i             (ctrl_bus_if_id.sret == TRUE),
+    .branch_taken_i     (branch_taken_valid),
+    .if_id_stall_i      (if_id_stall),
+    .mmu_i_stall_i      (mmu_i_stall),
+    // Raw faults from MMU
+    .mmu_i_fault_i              (mmu_i_fault),
+    .mmu_i_fault_addr_i         (mmu_i_fault_addr),
+    .mmu_d_fault_i              (mmu_d_fault),
+    .mmu_d_fault_addr_i         (mmu_d_fault_addr),
+    .mmu_i_access_fault_i       (mmu_i_access_fault),
+    .mmu_i_access_fault_addr_i  (mmu_i_access_fault_addr),
+    .mmu_d_access_fault_i       (mmu_d_access_fault),
+    .mmu_d_access_fault_addr_i  (mmu_d_access_fault_addr),
+    // Registered faults (to interrupt_ctrl)
+    .i_fault_r_o                (mmu_i_fault_r),
+    .i_fault_addr_r_o           (mmu_i_fault_addr_r),
+    .d_fault_r_o                (mmu_d_fault_r),
+    .d_fault_addr_r_o           (mmu_d_fault_addr_r),
+    .i_access_fault_r_o         (mmu_i_access_fault_r),
+    .i_access_fault_addr_r_o    (mmu_i_access_fault_addr_r),
+    .d_access_fault_r_o         (mmu_d_access_fault_r),
+    .d_access_fault_addr_r_o    (mmu_d_access_fault_addr_r)
+);
 
 // insn_valid_id, post_trap, stale_id — now driven by hazard_unit
 logic insn_valid_id;
