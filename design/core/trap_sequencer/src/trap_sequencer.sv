@@ -81,19 +81,22 @@ module trap_sequencer (
         state_next = state;
         case (state)
             IDLE: begin
-                if (ret_valid_i && sret_i && mmu_i_stall_i)
-                    // SRET fires but ITLB misses for target → enter suppression
+                if (ret_valid_i && sret_i)
+                    // SRET fires → enter suppression regardless of stall state.
+                    // mmu_i_stall might not be high yet on the first SRET cycle
+                    // (PTW hasn't started). Stay in SRET_WAIT until the target
+                    // address is resolved.
                     state_next = SRET_WAIT;
-                // trap and branch don't need multi-cycle states —
-                // single-cycle clear is sufficient
             end
 
             SRET_WAIT: begin
                 if (interrupt_valid_i)
-                    // Nested interrupt during SRET stall → abort SRET, handle trap
+                    // Nested interrupt → abort SRET, handle trap
                     state_next = IDLE;
-                else if (!mmu_i_stall_i)
-                    // ITLB resolved → target fetched, resume normal
+                else if (!mmu_i_stall_i && !ret_valid_i)
+                    // ITLB resolved AND SRET no longer in ID → resume normal.
+                    // The !ret_valid_i check prevents exiting too early when
+                    // SRET is still stalled in ID (ret_valid stays high).
                     state_next = IDLE;
             end
 
@@ -115,7 +118,7 @@ module trap_sequencer (
     wire sret_start = ret_valid_i && sret_i;
     wire clear_ifault = clear_on_trap |
                         (~if_id_stall_i & (branch_taken_i | ret_valid_i)) |
-                        (state == SRET_WAIT && mmu_i_stall_i) |  // only while PTW still walking
+                        (state == SRET_WAIT) |  // suppress stale faults for entire SRET transition
                         sret_start;
 
     // Data page fault, instruction PMP, data PMP: clear on trap ONLY.

@@ -337,8 +337,8 @@ always @(posedge clk) begin
 end
 
 // ── Late-stage crash trace ──────────────────────────────────────
-// Logs the last 64 instructions to crash_trace.log when the sim ends.
-// Useful for debugging Verilator convergence failures during Linux init.
+// Enable with +define+DV_CRASH_TRACE
+`ifdef DV_CRASH_TRACE
 integer crash_fd;
 integer crash_idx;
 reg [31:0] crash_pc   [0:63];
@@ -389,6 +389,8 @@ final begin
     end
     $fclose(crash_fd);
 end
+
+`endif // DV_CRASH_TRACE
 
 // Diagnostic pipeline tracer (dedicated file for maintainability)
 `include "testbench/diag_tracer.vh"
