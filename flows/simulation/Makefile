@@ -61,8 +61,7 @@ VERILATOR_SRCS = \
 	--exe testbench/main.cpp
 
 VERILATOR_RISCOF_DEFINES = \
-	+define+RAM_SIZE_BYTES=$(RISCOF_RAM_SIZE) \
-	+define+DV_DIAG_TRACE
+	+define+RAM_SIZE_BYTES=$(RISCOF_RAM_SIZE)
 
 # --- Init ---
 mem_init:
