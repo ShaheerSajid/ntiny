@@ -115,7 +115,7 @@ module trap_sequencer (
     wire sret_start = ret_valid_i && sret_i;
     wire clear_ifault = clear_on_trap |
                         (~if_id_stall_i & (branch_taken_i | ret_valid_i)) |
-                        (state == SRET_WAIT) |
+                        (state == SRET_WAIT && mmu_i_stall_i) |  // only while PTW still walking
                         sret_start;
 
     // Data page fault, instruction PMP, data PMP: clear on trap ONLY.

@@ -70,13 +70,13 @@ _init:
     li      t2, (0x10000 << 10) | PTE_LEAF
     sw      t2, 0(t0)
 
-    /* User page at 0x00006000 */
+    /* User L1 pointer — but L0 entries intentionally NOT mapped.
+     * The U-mode code page at 0x00006000 will cause a demand-paging
+     * exec page fault, exactly like Linux init. */
     li      t0, PT_L1
     li      t2, (PT_L0_USER >> 12) << 10 | PTE_V
     sw      t2, 0(t0)
-    li      t0, PT_L0_USER + (0x006 * 4)
-    li      t2, (UCODE_PAGE >> 12) << 10 | PTE_ULEAF
-    sw      t2, 0(t0)
+    /* L0_USER[0x006] intentionally left as 0 (unmapped) */
 
     /* U-mode code: set tp to user value, then ecall */
     li      t0, UCODE_PAGE
@@ -197,6 +197,8 @@ _save_context:
     csrr    t0, scause
     li      t1, 8              /* ecall from U-mode */
     beq     t0, t1, handle_ecall
+    li      t1, 12             /* exec page fault (demand paging) */
+    beq     t0, t1, handle_exec_pgfault
 
     /* Other trap — print cause and fail */
     la      a0, str_trap
@@ -214,6 +216,26 @@ _save_context:
     la      a0, str_nl
     call    uart_puts
     j       fail
+
+handle_exec_pgfault:
+    la      a0, str_pgfault
+    call    uart_puts
+
+    /* Map the faulting page: install PTE at L0_USER[0x006] */
+    /* Use virtual address for PT_L0_USER (0xC0006000 via kernel megapage) */
+    li      t0, 0xC0006000 + (0x006 * 4)   /* L0_USER[6] virtual */
+    li      t2, (UCODE_PAGE >> 12) << 10 | PTE_ULEAF
+    sw      t2, 0(t0)
+    sfence.vma
+
+    /* Restore context and retry the faulting instruction (sepc unchanged) */
+    lw      ra,  0(sp)
+    lw      t0,  4(sp)
+    lw      t1,  8(sp)
+    lw      a0, 12(sp)
+    addi    sp, sp, 32
+    csrw    sscratch, sp       /* save kernel sp */
+    sret                       /* retry the fetch */
 
 handle_ecall:
     la      a0, str_ecall_ok
@@ -309,6 +331,7 @@ str_ecall_ok:   .asciz "  ecall handled OK\n"
 str_tp_ok:      .asciz "  tp correct after csrrw\n"
 str_tp_wrong:   .asciz "  FAIL: tp after csrrw = "
 str_all_pass:   .asciz "ALL PASS\n"
+str_pgfault:    .asciz "  demand-page: mapping U-mode code\n"
 str_fail:       .asciz "FAIL\n"
 str_trap:       .asciz "  trap cause="
 str_at:         .asciz " epc="
