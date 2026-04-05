@@ -192,6 +192,17 @@ module mmu_sv32 (
         if (reset_i) flush_prev <= 1'b0;
         else         flush_prev <= flush_i;
 
+    // Suppress stale TLB-hit i_faults after flush until the ITLB resolves.
+    // After a redirect (SRET/branch/trap), the old ITLB entry may still match
+    // the old address. Suppress TLB-hit faults while the fetch is stalled
+    // (PTW walking for the new target). Once the stall clears, the ITLB has
+    // the correct entry and TLB-hit faults are real.
+    logic flush_ifault_suppress;
+    always_ff @(posedge clk_i or posedge reset_i)
+        if (reset_i)                          flush_ifault_suppress <= 1'b0;
+        else if (flush_i)                     flush_ifault_suppress <= 1'b1;   // start suppression
+        else if (!i_stall_o && !flush_prev)   flush_ifault_suppress <= 1'b0;   // stall resolved
+
     // PTE fields
     wire pte_v = ptw_pte[0];
     wire pte_r = ptw_pte[1];
@@ -497,7 +508,9 @@ module mmu_sv32 (
     assign i_paddr_o = i_paddr_out;
     assign i_stall_o = i_translate && i_req_i && (!itlb_hit || ptw_active_o);
     // Page faults (cause 12): TLB permission fail or PTW fault (not PMP-caused)
-    assign i_fault_o = (!flush_i && i_translate && i_req_i && itlb_hit && !i_perm_ok) ||
+    // Suppress TLB-hit faults for 2 cycles after flush (flush_i || flush_prev)
+    // to prevent stale faults from the old fetch path after redirects.
+    assign i_fault_o = (!flush_i && !flush_ifault_suppress && i_translate && i_req_i && itlb_hit && !i_perm_ok) ||
                        (i_translate && ptw_state == PTW_FAULT && ptw_for_insn && !ptw_pmp_fault_r);
     assign i_fault_addr_o = (ptw_state == PTW_FAULT && ptw_for_insn) ? ptw_vaddr : i_vaddr_i;
     // Access faults (cause 1): PMP denial on fetch or PTW PMP fault for insn
