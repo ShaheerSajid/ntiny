@@ -2,12 +2,19 @@
 `include "mem_map.svh"
 module tb_soc_top(
 `ifdef VERILATOR_SIM
-    	input clk,reset,trst
+    	input clk,reset,trst,
+    	output [31:0] pc_id_o,
+    	output [1:0]  priv_level_o
 
 );
 `else
 );
 reg clk,reset,trst;
+`endif
+
+`ifdef VERILATOR_SIM
+assign pc_id_o      = soc_top_inst.core_top_inst.pc_id;
+assign priv_level_o = soc_top_inst.core_top_inst.priv_level;
 `endif
 
 	  initial begin
@@ -158,13 +165,6 @@ always @(posedge clk) begin
 	end
 end
 
-// ── Crash trace state ───────────────────────────────────────────
-reg crash_trace_arm;
-reg [31:0] crash_trace_cnt;
-reg [1:0] crash_prev_priv;
-reg [31:0] crash_prev_sscratch;
-initial begin crash_trace_arm = 0; crash_trace_cnt = 0; crash_prev_priv = 3; crash_prev_sscratch = 0; end
-
 // ── Fast simulation console ─────────────────────────────────────
 // Captures UART TX register writes directly from the bus, bypassing
 // the slow bit-by-bit UART serializer. Characters appear immediately.
@@ -182,149 +182,14 @@ always @(posedge clk) begin
 	end
 end
 
-// ── TLB/MMU trace for bad_page debugging ────────────────────────
-// Log DTLB fills, sfence flushes, and data accesses to suspicious PFNs
-// Disabled by default to prevent disk-filling on long Linux runs.
-// Enable with +define+DV_MMU_TRACE
-integer mmu_fd;
-`ifdef DV_MMU_TRACE
-initial mmu_fd = $fopen("mmu_trace.log", "w");
-`else
-initial mmu_fd = 0;
-`endif
-
-always @(posedge clk) begin
-	if (!reset) begin
-		// Log every ITLB fill
-		if (soc_top_inst.core_top_inst.mmu_inst.tlb_fill &&
-		    soc_top_inst.core_top_inst.mmu_inst.ptw_for_insn) begin
-			$fwrite(mmu_fd, "ITLB-FILL: vpn1=%03h vpn0=%03h -> ppn1=%03h ppn0=%03h mega=%0b rwx=%0b%0b%0b adu=%0b%0b%0b vaddr=%08h\n",
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.vpn1,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.vpn0,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.ppn1,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.ppn0,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.mega,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.r,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.w,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.x,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.a,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.d,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.u,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr);
-		end
-		// Log every DTLB fill
-		if (soc_top_inst.core_top_inst.mmu_inst.tlb_fill &&
-		    !soc_top_inst.core_top_inst.mmu_inst.ptw_for_insn) begin
-			$fwrite(mmu_fd, "DTLB-FILL: vpn1=%03h vpn0=%03h -> ppn1=%03h ppn0=%03h mega=%0b rwx=%0b%0b%0b adu=%0b%0b%0b vaddr=%08h\n",
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.vpn1,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.vpn0,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.ppn1,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.ppn0,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.mega,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.r,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.w,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.x,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.a,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.d,
-				soc_top_inst.core_top_inst.mmu_inst.fill_entry.u,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr);
-		end
-
-		// Log SFENCE.VMA
-		if (soc_top_inst.core_top_inst.mmu_inst.sfence_i)
-			$fwrite(mmu_fd, "SFENCE: pc_ie=%08h\n",
-				soc_top_inst.core_top_inst.pc_ie);
-
-		// Log data page faults with PTW state
-		if (soc_top_inst.core_top_inst.mmu_inst.d_fault_o)
-			$fwrite(mmu_fd, "D-FAULT: vaddr=%08h store=%0b priv=%0d ptw_state=%0d ptw_pte=%08h mega=%0b\n",
-				soc_top_inst.core_top_inst.mmu_inst.d_vaddr_i,
-				soc_top_inst.core_top_inst.mmu_inst.d_store_i,
-				soc_top_inst.core_top_inst.mmu_inst.d_eff_priv,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_state,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_pte,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_mega);
-
-		// Log PMP check during all PTW reads
-		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 1 ||
-		    soc_top_inst.core_top_inst.mmu_inst.ptw_state == 3)
-			$fwrite(mmu_fd, "PTW-PMP: state=%0d vaddr=%08h addr=%08h addr_g=%08h priv=%0d d_pmp_fault=%0b ptw_pmp_denied=%0b match0=%0b match1=%0b pmpaddr0=%08h pmpaddr1=%08h pmpcfg0=%08h\n",
-				soc_top_inst.core_top_inst.mmu_inst.ptw_state,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_addr_o,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_addr_o[31:2],
-				soc_top_inst.core_top_inst.mmu_inst.d_pmp_priv,
-				soc_top_inst.core_top_inst.mmu_inst.d_pmp_fault,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_pmp_denied,
-				soc_top_inst.core_top_inst.mmu_inst.pmp_d_check.match[0],
-				soc_top_inst.core_top_inst.mmu_inst.pmp_d_check.match[1],
-				soc_top_inst.core_top_inst.mmu_inst.pmpaddr_i[0],
-				soc_top_inst.core_top_inst.mmu_inst.pmpaddr_i[1],
-				soc_top_inst.core_top_inst.mmu_inst.pmpcfg_i[0]);
-			// Also dump the checker's internal fault
-			$fwrite(mmu_fd, "  CHK: fault_o=%0b priv_i=%0b\n",
-				soc_top_inst.core_top_inst.mmu_inst.pmp_d_check.fault_o,
-				soc_top_inst.core_top_inst.mmu_inst.pmp_d_check.priv_i);
-
-		// Log PTW faults (when PTW itself causes the fault)
-		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 5)  // PTW_FAULT
-			$fwrite(mmu_fd, "PTW-FAULT: vaddr=%08h pte=%08h mega=%0b perm=%0b priv_fault=%0b for_store=%0b ptw_priv=%0d ptw_sum=%0b live_priv=%0d live_sum=%0b\n",
-				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_pte,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_mega,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_perm_fault,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_priv_fault,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_for_store,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_priv,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_sum,
-				soc_top_inst.core_top_inst.mmu_inst.d_eff_priv,
-				soc_top_inst.core_top_inst.mmu_inst.sum_bit);
-
-		// Log sret transitions (U-mode return)
-		if (soc_top_inst.core_top_inst.csr_unit_inst.sret_i &&
-		    soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'b01)
-			$fwrite(mmu_fd, "SRET: sepc=%08h sscratch=%08h priv=%0d->%0d\n",
-				soc_top_inst.core_top_inst.csr_unit_inst._SEPC,
-				soc_top_inst.core_top_inst.csr_unit_inst._SSCRATCH,
-				soc_top_inst.core_top_inst.csr_unit_inst.priv_level,
-				soc_top_inst.core_top_inst.csr_unit_inst._MSTATUS[8] ? 1 : 0);
-	end
-end
-
 // ── Lightweight PC sampler (every 1M cycles) ────────────────────
+// Useful for finding cycle numbers to feed --vcd-start-cycle / --vcd-stop-cycle.
 reg [31:0] pc_sample_cnt;
 always @(posedge clk) begin
 	if (reset)
 		pc_sample_cnt <= 0;
 	else begin
 		pc_sample_cnt <= pc_sample_cnt + 1;
-		// ── Crash trace: log EVERY priv change and trap near init ──
-		// Always log when: priv changes, trap fires, or sscratch changes
-		// Only active after first SRET to user mode
-		if (soc_top_inst.core_top_inst.csr_unit_inst.sret_i &&
-		    soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'b01 &&
-		    soc_top_inst.core_top_inst.csr_unit_inst._MSTATUS[8] == 1'b0)
-			crash_trace_arm <= 1;
-
-		if (crash_trace_arm) begin
-			// Log on trap, priv change, or sscratch write
-			if (soc_top_inst.core_top_inst.interrupt_valid ||
-			    soc_top_inst.core_top_inst.csr_unit_inst.priv_level != crash_prev_priv ||
-			    soc_top_inst.core_top_inst.csr_unit_inst._SSCRATCH != crash_prev_sscratch) begin
-				$fwrite(mmu_fd, "EV pc_ie=%08h priv=%0d sscratch=%08h scause=%08h sepc=%08h trap=%0b async=%0b ie_type=%0d\n",
-					soc_top_inst.core_top_inst.pc_ie,
-					soc_top_inst.core_top_inst.csr_unit_inst.priv_level,
-					soc_top_inst.core_top_inst.csr_unit_inst._SSCRATCH,
-					soc_top_inst.core_top_inst.csr_unit_inst._SCAUSE,
-					soc_top_inst.core_top_inst.csr_unit_inst._SEPC,
-					soc_top_inst.core_top_inst.interrupt_valid,
-					soc_top_inst.core_top_inst.async_trap,
-					soc_top_inst.core_top_inst.ctrl_bus_ie.inst_type);
-				$fflush(mmu_fd);
-			end
-			crash_prev_priv <= soc_top_inst.core_top_inst.csr_unit_inst.priv_level;
-			crash_prev_sscratch <= soc_top_inst.core_top_inst.csr_unit_inst._SSCRATCH;
-		end
 		if (pc_sample_cnt[19:0] == 20'h0) begin // every ~1M cycles
 			$fwrite(sim_con_fd, "PC[%0d] pc=%08h priv=%0d satp=%08h\n",
 				pc_sample_cnt,
@@ -335,131 +200,6 @@ always @(posedge clk) begin
 		end
 	end
 end
-
-// ── Late-stage crash trace ──────────────────────────────────────
-// Enable with +define+DV_CRASH_TRACE
-`ifdef DV_CRASH_TRACE
-integer crash_fd;
-integer crash_idx;
-reg [31:0] crash_pc   [0:63];
-reg [1:0]  crash_priv [0:63];
-reg [31:0] crash_insn [0:63];
-reg [31:0] crash_cause[0:63];
-reg        crash_trap [0:63];
-reg [5:0]  crash_ptr;
-reg        crash_u_seen;   // set when U-mode first entered
-
-initial begin
-    crash_ptr = 0;
-    crash_u_seen = 0;
-end
-
-always @(posedge clk) begin
-    if (!reset) begin
-        // Record every retired instruction
-        crash_pc[crash_ptr]    <= soc_top_inst.core_top_inst.pc_out;
-        crash_priv[crash_ptr]  <= soc_top_inst.core_top_inst.csr_unit_inst.priv_level;
-        crash_insn[crash_ptr]  <= soc_top_inst.core_top_inst.ctrl_bus_ie.inst_type;
-        crash_cause[crash_ptr] <= soc_top_inst.core_top_inst.csr_unit_inst._MCAUSE;
-        crash_trap[crash_ptr]  <= soc_top_inst.core_top_inst.interrupt_valid;
-        crash_ptr <= crash_ptr + 1;
-
-        // Detect first U-mode entry
-        if (soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'b00 && !crash_u_seen) begin
-            crash_u_seen <= 1;
-            $fwrite(sim_con_fd, ">>> U-mode entered at pc=%08h cycle=%0d\n",
-                soc_top_inst.core_top_inst.pc_out, pc_sample_cnt);
-            $fflush(sim_con_fd);
-        end
-    end
-end
-
-// Dump crash trace on $finish
-final begin
-    crash_fd = $fopen("crash_trace.log", "w");
-    $fwrite(crash_fd, "# Last 64 instructions before exit\n");
-    $fwrite(crash_fd, "# idx  pc        priv  trap  cause\n");
-    for (crash_idx = 0; crash_idx < 64; crash_idx = crash_idx + 1) begin
-        $fwrite(crash_fd, "%02d  %08h  %0d     %0d     %08h\n",
-            crash_idx,
-            crash_pc[(crash_ptr + crash_idx) & 63],
-            crash_priv[(crash_ptr + crash_idx) & 63],
-            crash_trap[(crash_ptr + crash_idx) & 63],
-            crash_cause[(crash_ptr + crash_idx) & 63]);
-    end
-    $fclose(crash_fd);
-end
-
-`endif // DV_CRASH_TRACE
-
-// Diagnostic pipeline tracer (dedicated file for maintainability)
-`include "testbench/diag_tracer.vh"
-
-// Debug: trace page faults and PTW activity
-`ifdef DV_MMU_TRACE
-always @(posedge clk) begin
-	if (!reset) begin
-		// Instruction page fault
-		if (soc_top_inst.core_top_inst.mmu_i_fault)
-			$display("MMU: I-FAULT vaddr=%08h paddr=%08h pc_id=%08h priv=%0d",
-				soc_top_inst.core_top_inst.mmu_inst.i_vaddr_i,
-				soc_top_inst.core_top_inst.mmu_inst.i_paddr_o,
-				soc_top_inst.core_top_inst.pc_id,
-				soc_top_inst.core_top_inst.priv_level);
-		// Data page fault
-		if (soc_top_inst.core_top_inst.mmu_d_fault)
-			$display("MMU: D-FAULT vaddr=%08h store=%0b pc_ie=%08h priv=%0d d_eff_priv=%0d",
-				soc_top_inst.core_top_inst.mmu_inst.d_vaddr_i,
-				soc_top_inst.core_top_inst.mmu_inst.d_store_i,
-				soc_top_inst.core_top_inst.pc_ie,
-				soc_top_inst.core_top_inst.priv_level,
-				soc_top_inst.core_top_inst.mmu_inst.d_eff_priv);
-		// PTW state transitions
-		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 5 /* PTW_FAULT */)
-			$display("MMU: PTW-FAULT vaddr=%08h for_insn=%0b for_store=%0b pte=%08h mega=%0b",
-				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_for_insn,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_for_store,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_pte,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_mega);
-		// PTW reading PTE
-		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 1 /* PTW_L1 */ && !soc_top_inst.core_top_inst.mmu_inst.ptw_stall_i)
-			$display("MMU: PTW-L1 addr=%08h data=%08h vaddr=%08h",
-				soc_top_inst.core_top_inst.mmu_inst.ptw_addr_o,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_data_i,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr);
-		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 3 /* PTW_L0 */ && !soc_top_inst.core_top_inst.mmu_inst.ptw_stall_i)
-			$display("MMU: PTW-L0 addr=%08h data=%08h vaddr=%08h",
-				soc_top_inst.core_top_inst.mmu_inst.ptw_addr_o,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_data_i,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr);
-		// PTW FILL (permission check)
-		if (soc_top_inst.core_top_inst.mmu_inst.ptw_state == 4 /* PTW_FILL */)
-			$display("MMU: PTW-FILL vaddr=%08h pte=%08h perm_fault=%0b priv_fault=%0b for_insn=%0b for_store=%0b mega=%0b",
-				soc_top_inst.core_top_inst.mmu_inst.ptw_vaddr,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_pte,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_perm_fault,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_priv_fault,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_for_insn,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_for_store,
-				soc_top_inst.core_top_inst.mmu_inst.ptw_mega);
-		// DTLB hit with fault
-		if (soc_top_inst.core_top_inst.mmu_inst.d_translate &&
-		    soc_top_inst.core_top_inst.mmu_inst.d_req_i &&
-		    soc_top_inst.core_top_inst.mmu_inst.dtlb_hit &&
-		    !soc_top_inst.core_top_inst.mmu_inst.d_perm_ok)
-			$display("MMU: DTLB-FAULT vaddr=%08h store=%0b entry: r=%0b w=%0b x=%0b d=%0b a=%0b u=%0b",
-				soc_top_inst.core_top_inst.mmu_inst.d_vaddr_i,
-				soc_top_inst.core_top_inst.mmu_inst.d_store_i,
-				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.r,
-				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.w,
-				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.x,
-				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.d,
-				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.a,
-				soc_top_inst.core_top_inst.mmu_inst.dtlb_entry.u);
-	end
-end
-`endif
 
 `ifndef VERILATOR_SIM
 	always begin
