@@ -39,6 +39,6 @@ echo "OpenSBI: $OPENSBI_BIN"
 echo "Timeout: $TIMEOUT cycles"
 
 python3 ../../software/tools/hex_text.py "$OPENSBI_BIN" ram.hex
-rm -f uart.log crash_trace.log mmu_trace.log diag_trace.log
+rm -f uart.log
 ./Vtb_soc_top --timeout "$TIMEOUT" > /dev/null 2>&1 &
 echo "PID: $! — monitor: tail -f uart.log"

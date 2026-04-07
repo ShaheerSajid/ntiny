@@ -146,7 +146,7 @@ verilator_build:
 	-DDV_TRACER \
 	$(VERILATOR_INCDIRS) \
 	$(VERILATOR_SRCS)
-	make -j -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
+	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
 	mv obj_dir/Vtb_soc_top ./
 
 # Run simulation (no waveform by default)
@@ -195,106 +195,19 @@ verilator_test: clean mem_init verilator_build
 	fi; \
 	exit $$EXIT_CODE
 
-# --- RISCOF targets ---
-RISCOF_DIR = ../../verification/riscof
-RISCOF_SUITE = $(RISCOF_DIR)/riscv-arch-test/riscv-test-suite/
-RISCOF_ENV = $(RISCOF_DIR)/riscv-arch-test/riscv-test-suite/env
-RISCOF_VENV = $(HOME)/Software/riscof_env/bin/activate
-RISCOF_WORK = riscof_work
-
-# Build Verilator model for RISCOF (16MB RAM, with DV_DIAG_TRACE)
-verilator_build_riscof:
-	verilator $(VERILATOR_COMMON) \
-	$(VERILATOR_RISCOF_DEFINES) \
-	$(VERILATOR_INCDIRS) \
-	$(VERILATOR_SRCS)
-	make -j -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
-	cp obj_dir/Vtb_soc_top ./
-
-.PHONY: riscof
-riscof: clean verilator_build_riscof
-	@echo "--- Running RISCOF compliance tests ---"
-	cd $(RISCOF_DIR) && source $(RISCOF_VENV) && \
-	riscof run --config=config.ini \
-		--suite=$(realpath $(RISCOF_SUITE)) \
-		--env=$(realpath $(RISCOF_ENV))
-
-# Build Verilator model for RISCOF with FPU enabled
-verilator_build_riscof_fpu:
-	verilator $(VERILATOR_COMMON) \
-	-DFPU \
-	$(VERILATOR_RISCOF_DEFINES) \
-	$(VERILATOR_INCDIRS) \
-	$(VERILATOR_SRCS)
-	make -j -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
-	cp obj_dir/Vtb_soc_top ./
-
-.PHONY: riscof_fpu
-riscof_fpu: clean verilator_build_riscof_fpu
-	@echo "--- Running RISCOF F-extension compliance tests ---"
-	cd $(RISCOF_DIR) && source $(RISCOF_VENV) && \
-	riscof run --config=config_fpu.ini \
-		--suite=$(realpath $(RISCOF_SUITE)) \
-		--env=$(realpath $(RISCOF_ENV))
-
-# Print a pass/fail summary by comparing DUT signatures against Spike references.
-# Run after 'make riscof' (or standalone if riscof_work already exists).
-.PHONY: riscof_summary
+# --- Verification (RISCOF / riscv-dv) ---
+# These have moved to their own Makefiles:
+#   RISCOF:   make -C ../../verification/riscof run
+#   riscv-dv: make -C ../../verification/riscv-dv run
+#
+# Legacy aliases (forward to new locations):
+.PHONY: riscof_run riscof_fpu_run riscof_summary
+riscof_run:
+	$(MAKE) -C ../../verification/riscof run
+riscof_fpu_run:
+	$(MAKE) -C ../../verification/riscof run_fpu
 riscof_summary:
-	@echo ""; \
-	echo "========================================"; \
-	echo " RISCOF Signature Comparison Summary"; \
-	echo "========================================"; \
-	pass=0; fail=0; missing=0; \
-	for ref in $$(find $(RISCOF_WORK) -name "Reference-spike.signature" 2>/dev/null | sort); do \
-		testdir=$$(dirname "$$ref"); \
-		suite=$$(echo "$$testdir" | sed 's|.*/riscof_work/||' | sed 's|/ref$$||' | sed 's|/src/||' | tr '/' ' '); \
-		testname=$$(basename $$(dirname "$$testdir")); \
-		dutsig="$$(dirname "$$testdir")/dut/DUT-ntiny.signature"; \
-		if [ ! -f "$$dutsig" ]; then \
-			printf "  %-55s  MISSING\n" "$$testname"; \
-			missing=$$((missing+1)); \
-		elif diff -q "$$dutsig" "$$ref" > /dev/null 2>&1; then \
-			printf "  %-55s  PASS\n" "$$testname"; \
-			pass=$$((pass+1)); \
-		else \
-			ndiff=$$(diff "$$dutsig" "$$ref" | grep -c '^[<>]' || true); \
-			printf "  %-55s  FAIL  ($$ndiff differing lines)\n" "$$testname"; \
-			fail=$$((fail+1)); \
-		fi; \
-	done; \
-	echo "========================================"; \
-	echo "  PASS: $$pass   FAIL: $$fail   MISSING: $$missing   TOTAL: $$((pass+fail+missing))"; \
-	echo "========================================"
-
-# Full run + summary in one command
-.PHONY: riscof_run
-riscof_run: clean verilator_build_riscof
-	@echo "--- Running RISCOF compliance tests ---"
-	cd $(RISCOF_DIR) && source $(RISCOF_VENV) && \
-	riscof run --config=config.ini \
-		--suite=$(realpath $(RISCOF_SUITE)) \
-		--env=$(realpath $(RISCOF_ENV)) \
-		--work-dir=$(realpath .)/$(RISCOF_WORK) || true
-	@$(MAKE) riscof_summary
-
-# Full FPU run + summary in one command
-.PHONY: riscof_fpu_run
-riscof_fpu_run: clean verilator_build_riscof_fpu
-	@echo "--- Running RISCOF F-extension compliance tests ---"
-	cd $(RISCOF_DIR) && source $(RISCOF_VENV) && \
-	riscof run --config=config_fpu.ini \
-		--suite=$(realpath $(RISCOF_SUITE)) \
-		--env=$(realpath $(RISCOF_ENV)) \
-		--work-dir=$(realpath .)/$(RISCOF_WORK) || true
-	@$(MAKE) riscof_summary
-
-.PHONY: riscof_testlist
-riscof_testlist:
-	cd $(RISCOF_DIR) && source $(RISCOF_VENV) && \
-	riscof testlist --config=config.ini \
-		--suite=$(realpath $(RISCOF_SUITE)) \
-		--env=$(realpath $(RISCOF_ENV))
+	$(MAKE) -C ../../verification/riscof summary
 
 .PHONY: clean
 clean:

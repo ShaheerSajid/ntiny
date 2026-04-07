@@ -30,10 +30,45 @@ synth: # Run Synthesis -> argument: tool=synthesizer (Available: genus)
 physical: # Run Physical -> argument: tool=layout (Available: innovus)
 	make -C flows/physical_design/config $(tool)
 
-.PHON: clean
-clean: 
+# ── Verification ─────────────────────────────────────────────────────────────
+
+.PHONY: riscof
+riscof: # Run RISCOF compliance suite (build + run + summary)
+	make -C verification/riscof run
+
+.PHONY: riscof_fpu
+riscof_fpu: # Run RISCOF F-extension compliance suite
+	make -C verification/riscof run_fpu
+
+.PHONY: riscof_summary
+riscof_summary: # Print RISCOF pass/fail summary
+	make -C verification/riscof summary
+
+.PHONY: dv
+dv: # Run all riscv-dv random tests (build + gen + spike + dut + compare)
+	make -C verification/riscv-dv verilator
+	make -C verification/riscv-dv run
+
+.PHONY: dv_test
+dv_test: # Run one riscv-dv test -> argument: TEST=test_name SEED=N (optional)
+	make -C verification/riscv-dv verilator
+	make -C verification/riscv-dv run TEST=$(TEST) $(if $(SEED),SEED=$(SEED))
+
+.PHONY: dv_list
+dv_list: # List available riscv-dv tests
+	make -C verification/riscv-dv list
+
+# ── Clean ────────────────────────────────────────────────────────────────────
+
+.PHONY: clean
+clean:
 	make -i -C software/mem_init/tests clean
 	make -i -C flows/simulation clean
-	make -i -C flows/synthesis/fpga/quartus clean proj=$(proj) 
+	make -i -C flows/synthesis/fpga/quartus clean proj=$(proj)
 	make -i -C flows/synthesis/genus/script clean
 	make -i -C flows/physical_design/config clean
+
+.PHONY: clean_verif
+clean_verif: # Clean all verification artifacts
+	make -C verification/riscof clean
+	make -C verification/riscv-dv clean
