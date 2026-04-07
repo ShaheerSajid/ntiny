@@ -32,12 +32,16 @@ module trap_sequencer (
     input  logic        reset_i,
 
     // ── Pipeline events ────────────────────────────────────────
-    input  logic        interrupt_valid_i,  // trap fires (sync or async)
-    input  logic        ret_valid_i,        // MRET or SRET in ID stage
-    input  logic        sret_i,             // 1 = SRET, 0 = MRET
-    input  logic        branch_taken_i,     // branch redirect
-    input  logic        if_id_stall_i,      // IF/ID stall (includes ITLB miss)
-    input  logic        mmu_i_stall_i,      // instruction TLB/PTW stall specifically
+    input  logic        interrupt_valid_i,        // trap fires (sync or async)
+    input  logic        ret_valid_i,              // MRET or SRET in ID stage
+    input  logic        sret_i,                   // 1 = SRET, 0 = MRET
+    input  logic        ret_side_effects_done_i,  // SRET CSR side effects committed
+                                                  // (priv has transitioned — any
+                                                  //  new i_fault is legitimate, not
+                                                  //  stale, so SRET_WAIT must release)
+    input  logic        branch_taken_i,           // branch redirect
+    input  logic        if_id_stall_i,            // IF/ID stall (includes ITLB miss)
+    input  logic        mmu_i_stall_i,            // instruction TLB/PTW stall specifically
 
     // ── Raw faults from MMU (combinational) ────────────────────
     input  logic        mmu_i_fault_i,
@@ -77,15 +81,29 @@ module trap_sequencer (
             state <= state_next;
     end
 
+    // SRET pre-commit window: from the cycle SRET enters ID until the cycle
+    // it commits its CSR side effects (priv transitions). This is the only
+    // window where fault suppression is needed — any fault before commit is
+    // potentially stale (from the OLD privilege fetch path); any fault AFTER
+    // commit is from the NEW privilege and must propagate to the kernel.
+    //
+    // Without the `!ret_side_effects_done_i` gate, ret_valid_i stays high
+    // forever in the cold-ITLB SRET-to-U case (because the c_controller's
+    // instruction_o keeps emitting SRET from stale ins_buffer after the apc
+    // bypass), which makes sret_pre_commit stuck high → all faults suppressed
+    // → kernel never sees the demand-page fault on the user binary's first
+    // instruction → deadlock.
+    wire sret_pre_commit = ret_valid_i && sret_i && !ret_side_effects_done_i;
+
     always_comb begin
         state_next = state;
         case (state)
             IDLE: begin
-                if (ret_valid_i && sret_i)
-                    // SRET fires → enter suppression regardless of stall state.
-                    // mmu_i_stall might not be high yet on the first SRET cycle
-                    // (PTW hasn't started). Stay in SRET_WAIT until the target
-                    // address is resolved.
+                if (sret_pre_commit)
+                    // SRET in ID and CSR side effects haven't committed yet →
+                    // enter suppression. Once commit fires, this guard drops
+                    // and we won't re-enter even if ret_valid_i is still high
+                    // due to c_controller stale state.
                     state_next = SRET_WAIT;
             end
 
@@ -93,10 +111,10 @@ module trap_sequencer (
                 if (interrupt_valid_i)
                     // Nested interrupt → abort SRET, handle trap
                     state_next = IDLE;
-                else if (!mmu_i_stall_i && !ret_valid_i)
-                    // ITLB resolved AND SRET no longer in ID → resume normal.
-                    // The !ret_valid_i check prevents exiting too early when
-                    // SRET is still stalled in ID (ret_valid stays high).
+                else if (ret_side_effects_done_i)
+                    // SRET CSR side effects committed → exit suppression so the
+                    // legitimate post-commit faults (e.g. user demand-page) can
+                    // propagate to the kernel.
                     state_next = IDLE;
             end
 
@@ -111,15 +129,18 @@ module trap_sequencer (
     // All faults clear on trap (interrupt_valid)
     wire clear_on_trap = interrupt_valid_i;
 
-    // Instruction page fault has additional clearing:
-    // - On branch/ret redirect (when not stalled)
-    // - During SRET_WAIT state (suppress stale S-mode fetch faults)
-    // - On SRET start (first cycle, even if stalled)
-    wire sret_start = ret_valid_i && sret_i;
+    // Instruction page fault clearing — three sources, all must be gated by
+    // `!ret_side_effects_done_i` so they don't permanently suppress the
+    // post-commit demand-page fault:
+    //
+    //   1. branch / ret redirect when not stalled — gate by !committed
+    //      (the redirect-clear is for stale faults from before the redirect)
+    //   2. SRET_WAIT state — already gated by the FSM via sret_pre_commit
+    //   3. sret_start (the dominant suppression term) — gate by !committed
     wire clear_ifault = clear_on_trap |
-                        (~if_id_stall_i & (branch_taken_i | ret_valid_i)) |
-                        (state == SRET_WAIT) |  // suppress stale faults for entire SRET transition
-                        sret_start;
+                        (~if_id_stall_i & (branch_taken_i | (ret_valid_i && !ret_side_effects_done_i))) |
+                        (state == SRET_WAIT) |
+                        sret_pre_commit;
 
     // Data page fault, instruction PMP, data PMP: clear on trap ONLY.
     // These come from the IE stage (not fetch path) and are not affected

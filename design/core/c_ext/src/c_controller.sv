@@ -29,7 +29,10 @@ module c_controller (
 	input  onebit_sig_e flush_i,
 	input              redirect_i,          // non-sequential redirect this cycle
 	input  [31:0]      redirect_addr_i,     // target address for redirect
-	input              interrupt_i,         // trap firing (only this bypasses internal PC stall)
+	input              interrupt_i,         // trap firing (bypasses internal PC stall + flushes FSM)
+	input              ret_pulse_i,         // MRET/SRET commit one-shot (symmetric to interrupt_i,
+	                                        // but FSM follows redirect_addr_i[1] instead of flushing
+	                                        // to ALIGN, since xRET targets can be half-aligned)
 	input  [31:0]      instruction_i,       // 32-bit fetch word from memory
 
 	output [31:0]      instruction_addr_o,  // logical PC of current instruction
@@ -73,7 +76,11 @@ program_counter #(.DEFAULT(32'h80000000)) c_program_counter_inst
 (
 	.clk_i    (clk_i),
 	.reset_i  (reset_i),
-	.stall_i  (interrupt_i ? 1'b0 : stall_i || (p_state == BRANCH && branch_upper_32bit)),
+	// PC bypass on interrupt (trap entry) AND ret_pulse (xRET commit one-shot).
+	// xRET needs the bypass because if_id_stall can be high due to ITLB miss for
+	// the return target (the U-mode page is cold in the ITLB on first SRET to
+	// user) — without this, apc never latches sepc/mepc and the core deadlocks.
+	.stall_i  ((interrupt_i || ret_pulse_i) ? 1'b0 : stall_i || (p_state == BRANCH && branch_upper_32bit)),
 	.pc_in_i  (apc_in),
 	.pc_out_o (apc_out)
 );

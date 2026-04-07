@@ -30,6 +30,7 @@ module privilege_unit (
     // ── Pipeline state ──────────────────────────────────────────────────
     input  logic        insn_valid_id_i,   // from hazard_unit
     input  logic        csr_ret_hazard_i,  // from hazard_unit
+    input  onebit_sig_e ie_stall_i,        // IE stage stalled (DTLB miss, mul, etc.)
     input  onebit_sig_e interrupt_valid_i,  // trap firing
 
     // ── Illegal instruction outputs ─────────────────────────────────────
@@ -80,10 +81,15 @@ assign illegal_insn_id_o = illegal_csr_priv | illegal_mret_o | illegal_sret_o
 assign ret_valid_o = onebit_sig_e'(((id_mret_i && !illegal_mret_o) ||
                                     (id_sret_i && !illegal_sret_o)) && insn_valid_id_i);
 
+// Gate by !ie_stall: don't commit privilege change while IE has a pending
+// DTLB walk or multicycle op — the old privilege must remain active until
+// the IE instruction completes (its DTLB permission check uses live priv).
 assign ret_fire_o  = id_mret_i && insn_valid_id_i && !illegal_mret_o &&
-                     !ret_side_effects_done_o && !csr_ret_hazard_i && !interrupt_valid_i;
+                     !ret_side_effects_done_o && !csr_ret_hazard_i &&
+                     !ie_stall_i && !interrupt_valid_i;
 assign sret_fire_o = id_sret_i && insn_valid_id_i && !illegal_sret_o &&
-                     !ret_side_effects_done_o && !csr_ret_hazard_i && !interrupt_valid_i;
+                     !ret_side_effects_done_o && !csr_ret_hazard_i &&
+                     !ie_stall_i && !interrupt_valid_i;
 
 // One-shot flag: commit xRET CSR side effects on the first valid cycle,
 // then hold until the xRET leaves ID (or a trap fires).
@@ -92,7 +98,7 @@ always_ff @(posedge clk_i or posedge reset_i) begin
         ret_side_effects_done_o <= 1'b0;
     else if (interrupt_valid_i)
         ret_side_effects_done_o <= 1'b0;
-    else if (ret_valid_o && !csr_ret_hazard_i && !ret_side_effects_done_o)
+    else if ((ret_fire_o || sret_fire_o) && !ret_side_effects_done_o)
         ret_side_effects_done_o <= 1'b1;
     else if (!ret_valid_o)
         ret_side_effects_done_o <= 1'b0;

@@ -142,13 +142,23 @@ always_ff @(posedge clk_i or posedge reset_i) begin
 end
 
 // ── Refetch after trap ───────────────────────────────────────────────────
-// When a trap fires during a stall, the fetch for the handler was never
-// issued. Insert one stall cycle to re-issue the fetch at handler_addr.
+// When a trap fires, the next-cycle i_vaddr defaults to pc_in (= pc_out+4),
+// which would skip the trap target's FIRST instruction. We must force i_vaddr
+// to use pc_out (= the trap target itself) for one cycle so the first
+// instruction of the handler actually gets fetched.
+//
+// This MUST fire on EVERY trap, not only traps that coincide with a stall.
+// Previously gated by `interrupt_valid & if_id_stall`, which silently
+// dropped handler[0] whenever the user was running smoothly when the trap
+// fired — exactly the case Linux init triggers, where U-mode runs cleanly,
+// takes a page fault, and the kernel's first instruction (csrrw at
+// handle_exception) was being skipped, leading to handle_exception running
+// the bnez first with stale tp=0 → wrong _restore_kernel_tpsp path → loop.
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i)
         refetch_after_trap_o <= 1'b0;
     else
-        refetch_after_trap_o <= interrupt_valid_i & if_id_stall_o;
+        refetch_after_trap_o <= interrupt_valid_i;
 end
 
 endmodule

@@ -1,0 +1,97 @@
+# ntiny rv32ima NoMMU Linux kernel config
+#
+# Goal: rule out the MMU/privilege-transition path as a debug track. The kernel
+# runs in M-mode directly (no OpenSBI, no S-mode, no Sv32). All instructions
+# stay in M-mode, no SRET, no privilege drops, no ITLB/DTLB. The pipeline only
+# exercises the basic M-mode instruction execution + traps + memory.
+#
+# If this boots cleanly: bug is in MMU/privilege transition path → fetch revamp
+# is needed for the right reasons.
+# If this also fails: bug is more fundamental → fetch revamp is even more
+# urgent.
+#
+# Notes:
+#   - No console driver: our UART is `ntiny,uart` not 8250-compatible. Boot is
+#     silent; verify progress via the testbench's PC sampler in uart.log.
+#   - Built with rv32ima (no compressed) for the same reasons as ntiny_no_c_defconfig.
+#   - No userspace transition required for the test — even just reaching
+#     `start_kernel()` and looping in something benign would be a positive signal.
+
+# Architecture
+CONFIG_ARCH_RV32I=y
+CONFIG_NONPORTABLE=y
+# CONFIG_SMP is not set
+# CONFIG_MMU is not set
+# CONFIG_RISCV_ISA_C is not set
+# CONFIG_EFI is not set
+
+# Embed device tree directly in kernel image. Without this, the kernel boots
+# with a1=0 (no DTB pointer), can't find any memory regions, and panics in
+# setup_arch on the first memblock_alloc. The DTS lives at
+# arch/riscv/boot/dts/ntiny/ntiny_nommu.dts (copied from the project tree by
+# build_nommu.sh on each build).
+CONFIG_BUILTIN_DTB=y
+
+# SoC base
+CONFIG_SOC_VIRT=y
+
+# Memory
+CONFIG_BLK_DEV_INITRD=y
+# CONFIG_RD_BZIP2 is not set
+# CONFIG_RD_LZMA is not set
+# CONFIG_RD_XZ is not set
+# CONFIG_RD_LZO is not set
+# CONFIG_RD_LZ4 is not set
+CONFIG_INITRAMFS_SOURCE="/home/shaheer/Documents/github/ntiny/software/linux/initramfs_mini.cpio.gz"
+
+# Size optimization
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+CONFIG_EXPERT=y
+CONFIG_SLUB=y
+CONFIG_SLUB_TINY=y
+
+# Disable heavy features
+# CONFIG_MODULES is not set
+# CONFIG_VIRTUALIZATION is not set
+# CONFIG_PM is not set
+# CONFIG_CPU_IDLE is not set
+# CONFIG_HIGH_RES_TIMERS is not set
+# CONFIG_PROFILING is not set
+# CONFIG_BPF_SYSCALL is not set
+# CONFIG_CGROUPS is not set
+# CONFIG_NAMESPACES is not set
+# CONFIG_NET is not set
+# CONFIG_BLOCK is not set
+# CONFIG_SWAP is not set
+# CONFIG_KALLSYMS is not set
+# CONFIG_VM_EVENT_COUNTERS is not set
+# CONFIG_FHANDLE is not set
+# CONFIG_BASE_FULL is not set
+# CONFIG_EPOLL is not set
+# CONFIG_SIGNALFD is not set
+# CONFIG_TIMERFD is not set
+# CONFIG_EVENTFD is not set
+# CONFIG_AIO is not set
+# CONFIG_IO_URING is not set
+# CONFIG_ADVISE_SYSCALLS is not set
+
+# Console — silent for now (no 8250-compatible UART driver). printk buffers
+# but doesn't drain. Verify boot via testbench PC sampler.
+CONFIG_TTY=y
+CONFIG_PRINTK=y
+# CONFIG_SERIAL_8250 is not set
+
+# Boot command line — no console=, kernel will run silently
+CONFIG_CMDLINE=""
+
+# Minimal filesystem
+CONFIG_BINFMT_FLAT=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_TMPFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+
+# Disable debug for size
+# CONFIG_DEBUG_KERNEL is not set
+# CONFIG_FTRACE is not set

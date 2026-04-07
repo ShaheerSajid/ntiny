@@ -59,6 +59,8 @@ Plus three pipeline-control shims that keep accreting special cases:
 | — | Stale i_fault overwrites sepc during SRET ITLB stall | i_fault registered between SRET decode and ITLB walk completion | new `trap_sequencer` SRET_WAIT FSM |
 | — | OpenSBI hung in `sbi_hart_hang` after `refetch_after_ret` was added | duplicate fetch caused c_controller to decode stale `ins_buffer` + new `instruction_i` as a bogus CSR write | reverted `refetch_after_ret`, kept only the PC bypass |
 | — | Forced FSM advance on `ret_pulse` decoded stale data as random instructions | FSM and instruction_i out of sync when stall_i is high | reverted FSM forcing |
+| 16 | Trap_sequencer SRET_WAIT permanently suppresses post-commit page fault → user-mode deadlock | exit condition `!mmu_i_stall && !ret_valid` deadlocks (both stuck high in cold ITLB SRET) | gate suppression by `!ret_side_effects_done` |
+| **18** | **Recursive trap loop in `_save_context`** — kernel boot reaches user, takes page fault on `_start`, traps to handler. **csrrw at handle_exception[0] is fetched but its decode is NOP_CSR_OP**. csrrw doesn't write sscratch, doesn't write tp. bnez tp falls through to `_restore_kernel_tpsp` which corrupts `TI_KERNEL_SP` with the stale user sp. Next iteration loads corrupt sp → store fault → loop. | **The c_controller's `instruction_pipe` at the cycle `pc_id == handler_addr` is STALE** (= leftover from before the trap), because the imem fetch for the trap target hasn't returned yet. The IE register wall latches `ctrl_bus_if_id` (= the stale-decoded NOP) at the `!ie_stall` cycle, BEFORE the actual handler[0] bytes arrive from the icache. Equivalent to bug #14 but at the IE wall layer instead of the IF stage. Compounds with: `icache_stall_i` is hardcoded to 0 in `hazard_unit_inst` instantiation, and the core driver of `imem_port` ignores `ready` and `rvalid` per OBI protocol. The pipeline thinks the fetch completes immediately when it actually takes multiple cycles. | **Cannot bandaid cleanly.** Tried Option A (gate IE wall by `insn_valid_id`) — drops the csrrw entirely because pc_id advances past it before the latch. Tried Option B (gate IE wall by a new `imem_in_flight` flag) — would need to plumb `imem_port.rvalid` through `hazard_unit` AND hold `pc_id` at the trap target until rvalid. Both fixes converge on the same observation: the IF stage **needs an explicit "fetch in flight" state** with a fetch buffer that only releases instructions to ID once the corresponding rdata has arrived. **= the revamp.** |
 
 The common thread is that **the IF stage has no explicit "fetch request in
 flight" concept.** It tracks the *current decode PC* and the *next PC to fetch*,
@@ -73,6 +75,41 @@ given cycle when a redirect, an ITLB stall, and a state transition all coincide.
 Every fix attempt that tried to "force" the FSM into a known state (my
 `ret_pulse_i` BRANCH/ALIGN forcing, the earlier `refetch_after_ret` sticky
 flag) broke a different scenario because the FSM's contract isn't precise.
+
+A third thread (uncovered while debugging bug #18): **the imem bus protocol is
+not actually being honored.** `design/buses/src/buses.sv` defines `mem_bus`
+as an OBI-style valid/ready protocol with `req`, `ready`, `rvalid`, `rdata`.
+The icache slave correctly drives `ready` and `rvalid`, but the core master
+in `core_top.sv` does this:
+
+```sv
+assign imem_port.req = refetch_after_trap | (~if_id_stall & ~c_stall);
+.instruction_i (reset_i ? 32'b0 : imem_port.rdata),
+```
+
+— the master ignores `ready` (so a back-pressuring icache is silently dropped)
+and ignores `rvalid` (so `imem_port.rdata` is treated as combinational, while
+the protocol guarantees it appears 1 cycle after acceptance and only for the
+duration of the rvalid pulse). The `c_controller`'s `instruction_i` is just
+`imem_port.rdata` directly, so when the icache hasn't returned a fresh result
+the c_controller is decoding stale bits — exactly the cycle window that bug
+#18 lives in. Compounding this: `hazard_unit_inst` in core_top.sv has:
+
+```sv
+.icache_stall_i (1'b0),  // transparent cache: no stall
+```
+
+— the only stall source that could legitimately tell the pipeline "the imem
+fetch has not returned yet" is hardcoded to zero. So `if_id_stall` doesn't
+include the imem-in-flight cycles at all. The pipeline thinks every fetch
+completes the same cycle the request goes out, and the c_controller-stale-
+decode + IE-wall-latch race in bug #18 is the inevitable result.
+
+The fetch revamp doesn't just clean up the c_controller's FSM — it also has
+to fix the bus protocol layer below it (Fetch Issue Unit must check `ready`
+before declaring a request "issued", and Fetch Buffer must only push entries
+on `rvalid`). Both are already in the §4 module specs but should be flagged
+as critical, not nice-to-have.
 
 ---
 
@@ -892,8 +929,50 @@ This is a multi-week central-datapath replacement; do it AFTER:
 22. Run RISCOF, Linux boot, save_context test, sret_itlb_miss test.
 23. If anything fails, do not merge until fixed.
 
-**Total estimate:** 2-3 weeks of focused work. Much of phases 1-3 can run
-in parallel with other tasks because the new code is purely additive.
+### Phase 7: real I/D caches with miss handling (~1 week, optional, post-pipeline)
+
+The current `design/memory/src/icache.sv` and `design/memory/src/dcache.sv`
+are **transparent pass-throughs**: they always assert `ready=1`, always
+forward to the backing SRAM, and always return data with the same 1-cycle
+latency. The "cache" arrays exist but are dead weight on the data path —
+the rdata mux falls through to `mem_rdata_i` on every access.
+
+This is a *consequence* of the no-IF/ID-register architecture. A real cache
+that stalls on miss has no place to park the in-flight instruction in the
+current pipeline (`if_id_stall_o` doesn't actually hold `imem_port.rdata`,
+as bug #18's bandaid failure proved). The fetch buffer in Phase 2 is what
+finally gives downstream logic a place to wait while a miss fills.
+
+Once Phases 1-6 are merged and the FIU/buffer/aligner pipeline is in place:
+
+24. **icache rewrite**: replace the transparent passthrough with a proper
+    direct-mapped cache that asserts `ready=0` on miss while it issues a
+    backing-store request. The FIU's `FIU_REQ` state already handles this
+    correctly — it stays in REQ until `imem_port.ready && imem_port.rvalid`
+    arrives. Add a fill FSM and a miss-status holding register (MSHR-lite,
+    1 outstanding miss is enough for an in-order core).
+25. **dcache rewrite**: same pattern on the load/store path. Stores are
+    write-through (current model is fine). Loads need to back-pressure the
+    IE stage's `mmu_d_stall_i` until the fill returns. The hazard_unit
+    already handles `mmu_d_stall_i` correctly, so this is mostly a slave-
+    side change.
+26. **FENCE.I and FENCE**: today flush all entries in 1 cycle. Keep the
+    same semantics; the new caches just have non-trivial valid bits to
+    clear.
+27. **RISCOF + Linux gate**: the cache rewrite is the highest-risk part of
+    the revamp because it changes timing across the entire memory system.
+    Run RISCOF + Linux + sret_itlb_miss + the riscv-dv directed tests
+    after each cache change in isolation.
+
+**Cache phase is optional** in the sense that it can ship later — the
+fetch revamp (phases 1-6) closes bugs 13-18 by itself. The cache revamp is
+a *quality* improvement: real hit/miss behaviour, reduced power, more
+realistic ASIC characterization. But it should not block the pipeline
+revamp from merging.
+
+**Total estimate:** 2-3 weeks for phases 1-6, +1 week for phase 7. Phases
+1-3 can run in parallel with other tasks because the new code is purely
+additive.
 
 ---
 
@@ -974,6 +1053,88 @@ The current no-C build passes both checks (verified April 7).
   would need rebuilding too (significant effort, separate task).
 - The long-term design target stays RV32IMAC. This is a *bridge*, not a
   destination.
+
+---
+
+## 11.5. Attempted bandaid for bug #18 (FAILED — reverted 2026-04-07)
+
+**Context:** Bug #18 is "the IE register wall latches a NOP for handler[0]
+because the c_controller's `instruction_pipe` decodes stale `imem_port.rdata`
+at the cycle the trap-target apc is captured." The proper fix is the Fetch
+Issue Unit FSM in §4 with explicit `IDLE/REQ/WAIT/FAULT` "fetch in flight"
+tracking — when a fetch is outstanding, the aligner does not advance and the
+ID-stage instruction stays gated until `rvalid` returns.
+
+The bandaid below was attempted as a stop-gap but **DID NOT WORK** — the
+recursive `handle_exception` loop returned identically. Reverted in the same
+session. The failure is documented here as a record so future attempts don't
+re-tread the same wrong path.
+
+The bandaid added a single 1-bit register in
+[design/core/core_top/src/core_top.sv](../design/core/core_top/src/core_top.sv):
+
+```sv
+logic imem_pending_post_trap;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i)
+        imem_pending_post_trap <= 1'b0;
+    else if (interrupt_valid)
+        imem_pending_post_trap <= 1'b1;
+    else if (imem_port.rvalid)
+        imem_pending_post_trap <= 1'b0;
+end
+```
+
+It was wired into `hazard_unit_inst.icache_stall_i` (which used to be
+hardcoded to `1'b0`). `if_id_stall_o` already ORs `icache_stall_i` into the
+stall vector, so the *intent* was to extend the IF/ID stall window across
+the entire trap-target round trip: from the cycle `interrupt_valid` fires
+through the first imem `rvalid` *after* the trap.
+
+### Why it failed
+
+The bandaid assumed that "stalling `if_id_stall`" would also "hold the
+instruction word steady at the c_controller's input." It does not.
+
+ntiny has **no IF/ID pipeline register** — the imem SRAM's output register is
+absorbed into the pipeline as the IF/ID stage register. `imem_port.rdata`
+feeds the c_controller and decoder *combinationally*. So:
+
+1. Stalling `if_id_stall` only delays the *IE register wall* from latching
+   the decoded ctrl_bus. It does NOT hold `imem_port.rdata`.
+2. While the stall is high, `imem_port.rdata` continues to change as the
+   SRAM presents whatever it presents each cycle (the next sequential
+   word's data, or zeros, or whatever the OBI slave is driving).
+3. When the stall releases, the c_controller decodes whatever happens to be
+   on `rdata` at that moment, and the IE wall latches *that* — not
+   necessarily the trap-target instruction.
+
+The bandaid simply moved the race window without closing it. Verilator
+rebuild + with-MMU Linux re-run produced the **identical** recursive
+`handle_exception` loop that bug #18 originally caused:
+```
+PC[162529280] pc=c0002428 priv=1
+PC[163577856] pc=c000240c priv=1
+PC[164626432] pc=c000241c priv=1
+PC[165675008] pc=c0002428 priv=1   ← repeats
+```
+
+### Lesson
+
+Any fix for bug #18 must hold the **instruction word**, not the IE register
+wall. That requires a structural change:
+
+- **A real IF/ID register** that captures `rdata` on `rvalid=1` and decouples
+  decode from the bus (paying +1 branch penalty unless a BPU compensates), or
+- **A fetch buffer** between `imem_port` and the c_controller that pushes on
+  `rvalid` and pops only when the consumer is ready (this is what §4.3 of
+  this plan specifies), or
+- **Gating the c_controller's clock enable** by an explicit "fetch in flight"
+  signal so its internal state doesn't advance until rvalid returns
+  (equivalent to the FIU FSM in §4.2).
+
+All three are part of the revamp. There is no purely-stall-based fix that
+works in this architecture.
 
 ---
 

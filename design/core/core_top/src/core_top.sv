@@ -192,16 +192,21 @@ logic [31:0] mmu_i_fault_addr_r, mmu_d_fault_addr_r;
 logic        mmu_i_access_fault_r,      mmu_d_access_fault_r;
 logic [31:0] mmu_i_access_fault_addr_r, mmu_d_access_fault_addr_r;
 
+// privilege_unit forward declaration so trap_sequencer can read it
+// (privilege_unit_inst is instantiated later in the file)
+logic ret_side_effects_done;
+
 trap_sequencer trap_seq_inst (
     .clk_i              (clk_i),
     .reset_i            (reset_i),
     // Pipeline events
-    .interrupt_valid_i  (interrupt_valid),
-    .ret_valid_i        (ret_valid),
-    .sret_i             (ctrl_bus_if_id.sret == TRUE),
-    .branch_taken_i     (branch_taken_valid),
-    .if_id_stall_i      (if_id_stall),
-    .mmu_i_stall_i      (mmu_i_stall),
+    .interrupt_valid_i        (interrupt_valid),
+    .ret_valid_i              (ret_valid),
+    .sret_i                   (ctrl_bus_if_id.sret == TRUE),
+    .ret_side_effects_done_i  (ret_side_effects_done),
+    .branch_taken_i           (branch_taken_valid),
+    .if_id_stall_i            (if_id_stall),
+    .mmu_i_stall_i            (mmu_i_stall),
     // Raw faults from MMU
     .mmu_i_fault_i              (mmu_i_fault),
     .mmu_i_fault_addr_i         (mmu_i_fault_addr),
@@ -357,7 +362,7 @@ assign debug_valid =  onebit_sig_e'(resumeack_o);
 wire illegal_mret, illegal_sret, illegal_insn_id;
 wire csr_invalid;  // unimplemented CSR accessed in IE stage
 wire ret_fire, sret_fire;
-logic ret_side_effects_done;
+// `ret_side_effects_done` is forward-declared near the trap_sequencer above.
 wire [1:0] mmu_priv;
 
 privilege_unit privilege_unit_inst (
@@ -375,6 +380,7 @@ privilege_unit privilege_unit_inst (
     // Pipeline state
     .insn_valid_id_i    (insn_valid_id),
     .csr_ret_hazard_i   (csr_ret_hazard),
+    .ie_stall_i         (ie_stall),
     .interrupt_valid_i  (interrupt_valid),
     // Illegal instruction outputs
     .illegal_mret_o     (illegal_mret),
@@ -428,6 +434,14 @@ end
 // FETCH STAGE
 // ============================================================
 
+// xRET commit one-shot: combines MRET and SRET fire pulses from privilege_unit.
+// Used to bypass main PC stall and c_controller stall so they latch sepc/mepc
+// on the same cycle the CSR side effects commit (symmetric to interrupt_valid
+// for trap entry). Without this, an SRET to a U-mode address whose page is
+// cold in the ITLB deadlocks: if_id_stall stays high during the PTW walk and
+// neither pc_out nor apc ever latch the return target.
+wire ret_pulse = ret_fire | sret_fire;
+
 `ifdef BOOT
 program_counter #(.DEFAULT(32'h00001000)) program_counter_inst
 `else
@@ -436,10 +450,11 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 (
 	.clk_i		(clk_i),
 	.reset_i	(reset_i),
-	.stall_i	(interrupt_valid ? 1'b0 : if_id_stall | c_stall),
+	.stall_i	((interrupt_valid | ret_pulse) ? 1'b0 : if_id_stall | c_stall),
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
+
 // refetch_after_trap: use pc_out (= handler_addr, held by the stall) so the
 // memory request targets the correct handler address instead of handler_addr+4.
 wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_after_trap) ? pc_out : pc_in;
@@ -467,6 +482,7 @@ c_controller c_controller_inst
 	.redirect_i             (c_redirect),
 	.redirect_addr_i        (pc_in),
 	.interrupt_i            (interrupt_valid),
+	.ret_pulse_i            (ret_pulse),
 	.instruction_i          (reset_i ? 32'b0 : imem_port.rdata),
 
 	.instruction_addr_o     (pc_id),

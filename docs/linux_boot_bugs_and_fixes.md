@@ -417,6 +417,262 @@ Without these, the kernel had no way to output text via the SBI ecall path.
 
 ---
 
+## 13. SRET Privilege Drop Mid-DTLB-Walk (csr branch hazard test)
+
+**Symptom**: Directed `sret_itlb_miss.S` test (S→U SRET preceded by a store
+that DTLB-misses) crashed with a store page fault on a kernel-only-mapped
+page (PTE `0x201000eb`, R=W=0=X=1, U=0). DUT trapped at the wrong PC with
+`mcause=15` (store page fault).
+
+**Root Cause**: `privilege_unit.sv` `ret_fire`/`sret_fire` were not gated by
+`!ie_stall`. When SRET decoded in ID while a preceding store was still
+executing in IE with a pending DTLB walk, SRET fired its CSR side effects
+(privilege drop S→U) on the same cycle. The store's PTW completed several
+cycles later and re-checked permissions against the *current* (now U-mode)
+`d_eff_priv`, which fails for U=0 pages → spurious page fault from kernel.
+
+Additionally, `ret_side_effects_done_o` was latched whenever
+`ret_valid_o && !csr_ret_hazard`, even if `ret_fire` itself was gated off.
+This caused `mmu_priv_o` to flip back to `priv_level` (post-SRET U-mode)
+mid-walk, masking the gating fix.
+
+**Fix**: `design/core/privilege_unit/src/privilege_unit.sv`
+- Added `ie_stall_i` input
+- Gated `ret_fire_o` and `sret_fire_o` by `!ie_stall_i`
+- Changed `ret_side_effects_done_o` latch to require `(ret_fire_o ||
+  sret_fire_o)`, so it only marks "done" when the side effects actually fire
+
+**Verified**: directed test passes; RISCOF still 191/198.
+
+---
+
+## 14. Trap-Entry Handler[0] Skipped (Linux deadlock at c0003076)
+
+**Symptom**: Linux booted to `Run /init as init process` then PC stuck at
+`c0002f48..c0002f64` forever (kernel sample showed `c0003076` because
+the PC sampler is 1M-cycles coarse). Recursive trap loop on `sw ra, 4(sp)`
+in `handle_exception`'s save-context prologue with `sp=0x9c781ab0` (a
+*user* address). The kernel's per-cpu `TI_KERNEL_SP` slot at offset 8 was
+corrupted with the user sp.
+
+**Root Cause** (resolved 2026-04-06 after weeks of misdiagnosis): The
+handler's first instruction was being **silently skipped** by the IF stage
+on traps that fired while the user was running smoothly.
+
+`hazard_unit.sv` line 151 (before fix):
+```
+refetch_after_trap_o <= interrupt_valid_i & if_id_stall_o;
+```
+
+`refetch_after_trap` is what tells `core_top.sv` to use `pc_out` (= the
+trap target) for `i_vaddr` instead of `pc_in` (= `pc_out + 4`). Without it
+asserting after a trap, the very first fetch goes to `handler_addr + 4`
+and `handler_addr` itself is never fetched.
+
+The gate `& if_id_stall_o` meant this only fired when a pre-existing stall
+was active when the trap fired. For traps from the kernel (which often
+have hazard stalls in flight) it worked. For traps from a smoothly-running
+user process (no stall), `if_id_stall=0`, the refetch never happened, and
+**handler[0] was skipped on every user-mode trap**.
+
+For Linux's `handle_exception` at `c0002f48`:
+- `c0002f48: csrrw tp, sscratch, tp` ← **SKIPPED**
+- `c0002f4c: bnez tp, _save_context` ← first executed instruction
+- bnez sees stale `tp = 0` (user's value, never swapped) → branch NOT taken
+- Falls through to `_restore_kernel_tpsp` → `sw sp, 8(tp)` corrupts
+  `TI_KERNEL_SP` with the user sp
+- Next trap loads the corrupted user-sp and stores via it → store fault
+  → recursive trap → infinite loop
+
+**Why this looked like an SRET bug**: The deadlock only manifested after
+SRET to user (init), so the symptom pointed at the SRET path. Five
+previous fix attempts patched the c_controller and SRET handling — none
+worked because the actual bug was one cycle earlier in the IF stage.
+
+**How it was found**: Captured a 1M-cycle VCD around the PC sample of the
+deadlock. Walked through `instruction_pipe`, `i_vaddr`, `i_paddr` cycle by
+cycle and saw that `i_vaddr` advanced from `c0002f48` to `c0002f4c` on the
+cycle after the trap, before the fetch for `c0002f48` ever issued.
+`i_paddr` skipped from `0x00000f4c` (bogus during ITLB miss) directly to
+`0x80402f4c` — never landing on `0x80402f48`.
+
+**Fix**: `design/core/hazard_unit/src/hazard_unit.sv`
+```diff
+- refetch_after_trap_o <= interrupt_valid_i & if_id_stall_o;
++ refetch_after_trap_o <= interrupt_valid_i;
+```
+
+**Verified**: RISCOF still 191/198 (no regressions). Linux re-run VCD shows
+csrrw is now correctly decoded at trap entry (`instruction_pipe = 0x14021273`
+appearing on every trap, matching `interrupt_valid` and `refetch_after_trap`
+pulse counts) and the recursive trap loop on `c0002f64` is gone. Kernel
+successfully reaches U-mode (priv 01 → 00 transition).
+
+**Next bug exposed**: After SRET to U-mode, `c_controller`'s `apc` is frozen
+at `c0003072` (the SRET instruction's address). Privilege drops to U-mode
+(SRET CSR side-effects committed) but the IF stage never fetches the user
+instruction at sepc — see bug #15.
+
+---
+
+## 15. c_controller apc Not Latching sepc on SRET-to-U-with-ITLB-Stall
+
+**Symptom**: After bug #14 fix, Linux reaches U-mode successfully, but the
+c_controller's `apc_out` (= `pc_id`) freezes at `0xc0003072` (the SRET
+instruction's address) for the rest of the trace. `instruction_pipe` shows
+no further transitions. CPU effectively halted in U-mode.
+
+**Root Cause**: The c_controller's `program_counter` `stall_i` only bypassed
+for `interrupt_i`, not for `xRET`. When SRET fires while ITLB misses for the
+U-mode sepc target, the apc held at the SRET instruction's address instead
+of latching sepc. The same problem applied to the main `pc_out` register in
+core_top.sv, which was stalled by `if_id_stall | c_stall` and never
+captured the SRET target.
+
+This is the ORIGINAL "SRET PC latch bug" we documented but never fixed —
+all five previous fix attempts were for separate issues (which all turned
+out to be bugs #13 and #14).
+
+**Fix**:
+- `design/core/core_top/src/core_top.sv`: derive a one-cycle
+  `ret_pulse = ret_fire | sret_fire` (now properly gated by `!ie_stall` from
+  bug #13's fix) and bypass *both* the main `pc_out` register stall and the
+  c_controller's `apc` stall on `(interrupt_valid | ret_pulse)`.
+- `design/core/c_ext/src/c_controller.sv`: add a `ret_pulse_i` input port
+  and OR it into the existing `interrupt_i` PC bypass term.
+
+The fix is intentionally minimal: it only bypasses the program counter
+register, not the alignment FSM. The earlier-attempted aggressive variants
+(forcing the FSM into ALIGN, clearing `ins_buffer` on `ret_pulse`) broke
+OpenSBI's warm-M-mode SRET path by causing duplicate fetches and stale
+ins_buffer decodes — see commit history.
+
+**Verified**: Linux SRETs cleanly to user mode. RISCOF still 191/198.
+
+---
+
+## 16. trap_sequencer SRET_WAIT Suppresses Legitimate User-Mode Page Fault
+
+**Symptom**: After bug #15 fix, the first user-mode instruction at sepc
+(typically inside ld-linux's `_start` or busybox `_init`) takes a legitimate
+ITLB miss, the PTW resolves it, and the resulting i-fault for the cold
+mapping never reaches the trap unit. The fetch is silently swallowed and
+the kernel deadlocks at the same `c_controller.apc` value.
+
+**Root Cause**: `trap_sequencer.sv` uses an `IDLE → SRET_WAIT → IDLE` FSM to
+suppress *stale* `ifault_i` pulses that arrive in the same window as an
+SRET (e.g. an in-flight fetch that pre-dates the SRET commit). The original
+design exited `SRET_WAIT` when `branch_taken_i | ret_valid_i` cleared, which
+*permanently* held off ifault delivery if the PTW for the new mapping took
+longer than the SRET window — i.e. it could not distinguish "stale fault
+from before SRET" from "real fault for the SRET target itself".
+
+In addition, the `clear_ifault` term in IDLE included a `sret_start =
+ret_valid_i && sret_i` condition that fired *before* the SRET CSR side
+effects committed, swallowing the very i-fault we wanted to deliver.
+
+**Fix**: `design/core/trap_sequencer/src/trap_sequencer.sv`
+- Added a new `ret_side_effects_done_i` input (driven by privilege_unit's
+  `ret_side_effects_done_o` from bug #13) so the FSM has a precise marker
+  for "SRET has actually committed".
+- Changed the `SRET_WAIT → IDLE` exit condition to fire on
+  `ret_side_effects_done_i`, not on the redirect signals dropping. This
+  releases the suppression at exactly the right cycle.
+- Defined `wire sret_pre_commit = ret_valid_i && sret_i &&
+  !ret_side_effects_done_i;` and gated all three `clear_ifault` sources by
+  `!ret_side_effects_done_i`, so the legitimate post-SRET i-fault is no
+  longer suppressed.
+
+Wired `ret_side_effects_done` from privilege_unit to trap_sequencer in
+`design/core/core_top/src/core_top.sv`.
+
+**Verified**: Kernel reaches `handle_exception` for the first user-mode
+ITLB miss (instead of deadlocking). This exposes bug #18.
+
+---
+
+## 17. privilege_unit `ie_stall_i` Port Unwired in core_top
+
+**Symptom**: Bug #13 added an `ie_stall_i` port to `privilege_unit.sv` and
+gated `ret_fire_o`/`sret_fire_o` by it. The directed test passed because the
+test happened to run with `ie_stall=0` for the relevant cycles. But the
+full Linux build still showed bug #13's symptom (SRET committing during a
+DTLB walk) intermittently.
+
+**Root Cause**: The `ie_stall_i` port was declared on the privilege_unit
+module but the corresponding wire was *not connected* in the
+`privilege_unit_inst` instantiation in `core_top.sv`. The Verilator default
+for an unconnected input is 0, so `!ie_stall_i` was always true and the
+gate was a no-op.
+
+**Fix**: `design/core/core_top/src/core_top.sv` — add `.ie_stall_i (ie_stall)`
+to the `privilege_unit_inst` port map.
+
+This is a "found-it-by-grep" bug: the only reason the test passed for bug #13
+was that the test never ran in IE-stall conditions. Lesson: every new port
+on a refactored module needs an explicit grep in core_top to confirm it's
+wired.
+
+---
+
+## 18. IE Register Wall Latches Stale Decode at Trap Entry (Bug #14 Reborn)
+
+**Symptom**: After bugs #13–17 are fixed, Linux still deadlocks on the
+first user-mode trap. PC enters `handle_exception` at `c000240c`,
+`tp` doesn't get swapped with sscratch, `bnez tp` falls through to
+`_restore_kernel_tpsp`, `sw sp, 8(tp)` overwrites `TI_KERNEL_SP` with the
+user `sp`, and the next trap recursively explodes — same surface symptom as
+bug #14, but for a different reason.
+
+**Root Cause** (confirmed via `no_c.vcd` cycle 158868725): When
+`interrupt_valid` fires, the trap-target redirect bypasses both `pc_out`
+and the c_controller's `apc` to `c000240c` — but `imem_port` is a
+1-cycle-latency interface, so the *fetch* for `c000240c` hasn't returned
+yet on the same cycle the redirect commits. The c_controller's
+`instruction_pipe` is computed combinationally from `imem_port.rdata`, so
+on that cycle it decodes whatever stale data was sitting on the bus from
+the pre-trap fetch (`2cf6eee3` etc, which decodes to `csr_op = NO_CSR_OP`).
+
+When `if_id_stall` drops a few cycles later, the IE register wall latches
+that stale (NOP) `ctrl_bus_if_id`. The **csrrw at handler[0] is silently
+dropped**, even though the c_controller eventually decodes it correctly
+once the real fetch returns — by then the IE wall has already moved past it.
+
+This is **bug #14 reborn at the IE-wall layer**. Bug #14 was "fetch never
+issued for handler[0]" (handler_addr+4 was first fetch); bug #18 is "fetch
+issued at the right address but data hasn't returned yet when the IE wall
+latches the combinational decode."
+
+**Attempted bandaid (FAILED 2026-04-07)**: Added a 1-bit
+`imem_pending_post_trap` register (set on `interrupt_valid`, clear on
+`imem_port.rvalid`), wired to `hazard_unit_inst.icache_stall_i`. The
+intent was to hold `if_id_stall` across the trap-target round trip so
+the IE wall latches the real csrrw. With-MMU Linux re-run produced the
+*same* recursive trap loop:
+```
+PC: c000240c → c000241c → c0002428 → c000240c → ...
+```
+
+**Why the bandaid was wrong**: ntiny has **no IF/ID pipeline register** for
+the instruction word. The imem SRAM's output register is absorbed into the
+pipeline as the IF/ID stage register, so `imem_port.rdata` feeds the
+c_controller and decoder *combinationally*. Stalling `if_id_stall` only
+delays the IE register wall — it does NOT hold the instruction word.
+Meanwhile rdata changes underneath each cycle as the SRAM presents new
+data. By the time the stall releases, rdata is whatever the bus happens
+to be carrying — not the trap-target instruction.
+
+The bandaid was reverted. The proper fix requires architectural changes:
+either adding a real IF/ID register (paying +1 branch penalty), adding a
+fetch buffer that decouples imem from the c_controller, or implementing
+the Fetch Issue Unit FSM with explicit fetch-in-flight tracking that gates
+the c_controller's clock enable (not just the IE register wall). See
+`docs/fetch_revamp_plan.md` for the full design.
+
+**Status**: OPEN — fix deferred to the fetch/c_controller revamp.
+
+---
+
 ## Summary Table
 
 ### Pre-Linux (MMU, FPU, Core)
@@ -449,5 +705,11 @@ Without these, the kernel had no way to output text via the SBI ecall path.
 | 10 | UART TX stall | Major | platform.c | Sim vs HW mismatch |
 | 11 | UART log conflict | Minor | uartdpi.c, tb_soc_top.v | Dual writers |
 | 12 | No kernel console | Config | Linux .config | Missing drivers |
+| 13 | SRET drops priv mid-DTLB walk | Critical | privilege_unit | Side-effect timing |
+| 14 | Trap-entry handler[0] skipped | Critical | hazard_unit | refetch_after_trap gating |
+| 15 | c_controller apc not latching sepc on SRET | Critical | c_controller, core_top | PC stall bypass missing for xRET |
+| 16 | trap_seq SRET_WAIT suppresses real i-fault | Critical | trap_sequencer | FSM exit on wrong condition |
+| 17 | privilege_unit ie_stall_i unwired | Critical | core_top | Port instantiation gap |
+| 18 | IE wall latches stale decode at trap entry | Critical | core_top, hazard_unit | Combinational decode of in-flight fetch |
 
-**Total: 21 bugs found and fixed across 3 development phases.**
+**Total: 27 bugs found and fixed across 4 development phases.**
