@@ -518,6 +518,80 @@ assign imem_port.we    = 1'b0;
 assign imem_port.be    = 4'b1111;
 assign imem_port.wdata = 32'b0;
 
+// ── Phase 2.1: parallel fetch_buffer snoop ─────────────────────────────
+// docs/fetch_revamp_plan.md §4.3 / §9 Phase 2.
+//
+// Captures every imem fetch into a parallel 2-deep FIFO. The buffer
+// outputs are NOT consumed by any functional path — Phase 2.2 will add
+// compressed_aligner on top and Phase 3 will switch the decoder over.
+//
+// Snoop logic:
+//   - Register i_vaddr at the cycle imem_port.req=1 (icache slave is
+//     always ready, so request is accepted on the same cycle)
+//   - Push (rdata, registered vaddr) to the buffer on imem_port.rvalid
+//   - Pop on every rvalid (depth-1 effective; the proper consumer-pop
+//     comes in Phase 2.2 when the aligner is wired in)
+//   - Flush on the same redirect signals the c_controller sees
+//
+// Self-consistency assertion: the buffer must never overflow under this
+// snoop drive (one push, one pop per rvalid cycle → depth-1 is enough).
+logic [31:0] snoop_inflight_vaddr_q;
+logic        snoop_inflight_valid_q;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        snoop_inflight_vaddr_q <= 32'b0;
+        snoop_inflight_valid_q <= 1'b0;
+    end else if (imem_port.req) begin
+        snoop_inflight_vaddr_q <= i_vaddr;
+        snoop_inflight_valid_q <= 1'b1;
+    end else if (imem_port.rvalid) begin
+        snoop_inflight_valid_q <= 1'b0;
+    end
+end
+
+fetch_pkg::fetch_buffer_entry_t snoop_push_entry;
+assign snoop_push_entry.word  = imem_port.rdata;
+assign snoop_push_entry.vaddr = snoop_inflight_vaddr_q;
+assign snoop_push_entry.fault = 1'b0;  // Phase 2: faults still via legacy path
+assign snoop_push_entry.cause = 5'b0;
+
+wire snoop_flush = controller_flush | ret_pulse;
+wire snoop_pop   = imem_port.rvalid;  // depth-1 effective for Phase 2.1
+
+logic                              snoop_buf_full;
+logic                              snoop_buf_overflow;
+fetch_pkg::fetch_buffer_entry_t    snoop_buf_head;
+fetch_pkg::fetch_buffer_entry_t    snoop_buf_next;
+logic                              snoop_buf_head_valid;
+logic                              snoop_buf_next_valid;
+logic                              snoop_buf_empty;
+logic [1:0]                        snoop_buf_count;
+
+fetch_buffer #(.DEPTH(2)) fetch_buffer_snoop (
+    .clk_i        (clk_i),
+    .reset_i      (reset_i),
+    .flush_i      (snoop_flush),
+    .push_i       (imem_port.rvalid),
+    .push_entry_i (snoop_push_entry),
+    .full_o       (snoop_buf_full),
+    .overflow_o   (snoop_buf_overflow),
+    .pop_i        (snoop_pop),
+    .head_entry_o (snoop_buf_head),
+    .next_entry_o (snoop_buf_next),
+    .head_valid_o (snoop_buf_head_valid),
+    .next_valid_o (snoop_buf_next_valid),
+    .empty_o      (snoop_buf_empty),
+    .count_o      (snoop_buf_count)
+);
+
+`ifndef SYNTHESIS
+property p_snoop_no_overflow;
+    @(posedge clk_i) disable iff (reset_i)
+        !snoop_buf_overflow;
+endproperty
+a_snoop_no_overflow: assert property (p_snoop_no_overflow)
+    else $error("fetch_buffer snoop overflow at count=%0d", snoop_buf_count);
+`endif
 
 // ── Compressed instruction alignment ────────────────────────────────────
 // redirect fires on any non-sequential PC change; pc_in is the unified target.
