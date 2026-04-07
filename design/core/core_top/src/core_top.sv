@@ -518,45 +518,80 @@ assign imem_port.we    = 1'b0;
 assign imem_port.be    = 4'b1111;
 assign imem_port.wdata = 32'b0;
 
-// ── Phase 2.1: parallel fetch_buffer snoop ─────────────────────────────
-// docs/fetch_revamp_plan.md §4.3 / §9 Phase 2.
+// ── Phase 2.1+2.2: parallel fetch_buffer + compressed_aligner snoop ────
+// docs/fetch_revamp_plan.md §4.3 / §4.4 / §9 Phase 2.
 //
-// Captures every imem fetch into a parallel 2-deep FIFO. The buffer
-// outputs are NOT consumed by any functional path — Phase 2.2 will add
-// compressed_aligner on top and Phase 3 will switch the decoder over.
+// Two new modules running in parallel with the existing c_controller-
+// based fetch path. NEITHER feeds any functional signal — they exist
+// only so the modules compile, simulate, and execute the same buffer/
+// aligner state machine the Phase 3 switchover will eventually consume.
+// Validation strategy: the existing legacy path still drives the
+// decoder, so RISCOF + Linux baselines must remain unchanged with the
+// new modules attached. Phase 3 switches the decoder to read from the
+// new aligner; RISCOF signature comparison at that phase validates the
+// aligner output against the spike reference (not against the legacy).
 //
 // Snoop logic:
 //   - Register i_vaddr at the cycle imem_port.req=1 (icache slave is
-//     always ready, so request is accepted on the same cycle)
-//   - Push (rdata, registered vaddr) to the buffer on imem_port.rvalid
-//   - Pop on every rvalid (depth-1 effective; the proper consumer-pop
-//     comes in Phase 2.2 when the aligner is wired in)
-//   - Flush on the same redirect signals the c_controller sees
-//
-// Self-consistency assertion: the buffer must never overflow under this
-// snoop drive (one push, one pop per rvalid cycle → depth-1 is enough).
+//     always ready, so request is accepted same cycle)
+//   - Push (rdata, registered vaddr) to fetch_buffer on imem_port.rvalid
+//   - Pop comes from compressed_aligner.pop_o (which knows when the
+//     head entry is fully consumed by the aligner's half_index advance)
+//   - Flush both modules on the same redirect signals the c_controller
+//     sees: (controller_flush | ret_pulse)
+
+// snoop_inflight_vaddr_q latches i_vaddr on every cycle imem_port.req is
+// high. The vaddr register itself has NO reset (so a request issued in
+// the very first non-reset cycle is captured even if we're still settling
+// out of reset). A separate snoop_inflight_valid_q tracks whether the
+// captured vaddr corresponds to a real in-flight transaction; this *is*
+// reset-cleared so we don't push garbage on the first rvalid following
+// reset deassertion.
 logic [31:0] snoop_inflight_vaddr_q;
 logic        snoop_inflight_valid_q;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i) begin
-        snoop_inflight_vaddr_q <= 32'b0;
-        snoop_inflight_valid_q <= 1'b0;
-    end else if (imem_port.req) begin
+always_ff @(posedge clk_i) begin
+    if (imem_port.req)
         snoop_inflight_vaddr_q <= i_vaddr;
-        snoop_inflight_valid_q <= 1'b1;
-    end else if (imem_port.rvalid) begin
-        snoop_inflight_valid_q <= 1'b0;
-    end
 end
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i)
+        snoop_inflight_valid_q <= 1'b0;
+    else if (imem_port.req)
+        snoop_inflight_valid_q <= 1'b1;
+    else if (imem_port.rvalid)
+        snoop_inflight_valid_q <= 1'b0;
+end
+
+// Push to snoop buffer only when the rvalid corresponds to a vaddr we
+// actually captured (i.e., the in-flight tracker is valid). This drops
+// any spurious rvalid that might appear on the first cycle out of reset
+// with stale SRAM state.
+wire snoop_push = imem_port.rvalid && snoop_inflight_valid_q;
 
 fetch_pkg::fetch_buffer_entry_t snoop_push_entry;
 assign snoop_push_entry.word  = imem_port.rdata;
-assign snoop_push_entry.vaddr = snoop_inflight_vaddr_q;
+// Store the WORD-ALIGNED vaddr so the aligner's pc_id arithmetic
+// (head.vaddr + (half_index ? 2 : 0)) works correctly even when a
+// redirect lands on a half-aligned target (e.g. j to a 16-bit
+// compressed instruction at vaddr[1]=1). The icache fetches the
+// containing word regardless of whether the request was half-aligned;
+// the aligner's half_index already tracks which half is "current" via
+// redirect_target_i[1].
+assign snoop_push_entry.vaddr = {snoop_inflight_vaddr_q[31:2], 2'b00};
 assign snoop_push_entry.fault = 1'b0;  // Phase 2: faults still via legacy path
 assign snoop_push_entry.cause = 5'b0;
 
 wire snoop_flush = controller_flush | ret_pulse;
-wire snoop_pop   = imem_port.rvalid;  // depth-1 effective for Phase 2.1
+
+// Aligner outputs (pop drives the buffer below — order: aligner reads buffer
+// head/next, computes pop combinationally, buffer state advances on edge)
+logic        snoop_aligner_pop;
+logic [31:0] snoop_aligner_inst;
+logic [31:0] snoop_aligner_pc_id;
+logic        snoop_aligner_inst_valid;
+logic        snoop_aligner_inst_fault;
+logic [4:0]  snoop_aligner_inst_cause;
+logic        snoop_aligner_is_compressed;
 
 logic                              snoop_buf_full;
 logic                              snoop_buf_overflow;
@@ -571,11 +606,11 @@ fetch_buffer #(.DEPTH(2)) fetch_buffer_snoop (
     .clk_i        (clk_i),
     .reset_i      (reset_i),
     .flush_i      (snoop_flush),
-    .push_i       (imem_port.rvalid),
+    .push_i       (snoop_push),
     .push_entry_i (snoop_push_entry),
     .full_o       (snoop_buf_full),
     .overflow_o   (snoop_buf_overflow),
-    .pop_i        (snoop_pop),
+    .pop_i        (snoop_aligner_pop),
     .head_entry_o (snoop_buf_head),
     .next_entry_o (snoop_buf_next),
     .head_valid_o (snoop_buf_head_valid),
@@ -584,14 +619,57 @@ fetch_buffer #(.DEPTH(2)) fetch_buffer_snoop (
     .count_o      (snoop_buf_count)
 );
 
-`ifndef SYNTHESIS
-property p_snoop_no_overflow;
-    @(posedge clk_i) disable iff (reset_i)
-        !snoop_buf_overflow;
-endproperty
-a_snoop_no_overflow: assert property (p_snoop_no_overflow)
-    else $error("fetch_buffer snoop overflow at count=%0d", snoop_buf_count);
-`endif
+// The compressed_aligner reads from the buffer head/next. Its
+// `consumer_take_i` is the same signal that gates the legacy IE
+// register wall (= !if_id_stall), so the half_index advances in
+// lockstep with the legacy decoder.
+compressed_aligner compressed_aligner_snoop (
+    .clk_i               (clk_i),
+    .reset_i             (reset_i),
+    .flush_i             (snoop_flush),
+    .consumer_take_i     (~if_id_stall),
+
+    .head_i              (snoop_buf_head),
+    .next_i              (snoop_buf_next),
+    .head_valid_i        (snoop_buf_head_valid),
+    .next_valid_i        (snoop_buf_next_valid),
+    .pop_o               (snoop_aligner_pop),
+
+    .redirect_valid_i    (arb_redirect_valid),
+    .redirect_target_i   (arb_redirect_target),
+
+    .instruction_o       (snoop_aligner_inst),
+    .pc_id_o             (snoop_aligner_pc_id),
+    .instruction_valid_o (snoop_aligner_inst_valid),
+    .instruction_fault_o (snoop_aligner_inst_fault),
+    .instruction_cause_o (snoop_aligner_inst_cause),
+    .is_compressed_o     (snoop_aligner_is_compressed)
+);
+
+// Notes on Phase 2 limitations:
+//
+// 1. The snoop buffer CAN overflow on compressed code: the legacy
+//    c_controller's main pc_out drives imem_port.req at the full
+//    word-fetch rate while the aligner consumes one instruction per
+//    cycle (= half a word for RVC). With no producer-side back-pressure,
+//    a steady stream of compressed instructions fills the buffer. The
+//    fetch_buffer drops on full silently, so this is non-fatal — but the
+//    buffer's state is meaningless during the overflow window. Phase 4
+//    moves req drive into the FIU FSM, which back-pressures off the
+//    buffer's full_o and eliminates the overflow.
+//
+// 2. No cycle-by-cycle cross-check assertion vs the legacy. An earlier
+//    draft used a stream-FIFO equality check (push legacy emission,
+//    pop on aligner emission, compare bit-for-bit). It fired on every
+//    RVC test because the legacy emits a "phantom" first instruction
+//    at cycle R (apc_out=0x80000000, instruction_pipe=stale SRAM rdata,
+//    flagged by insn_valid_id=0 to downstream), and because the legacy's
+//    MISALIGN/BRANCH FSM stretches its emission timeline asymmetrically.
+//    The two streams are conceptually identical but bit-pattern
+//    divergent in startup transients and compressed-stall windows.
+//    Validation strategy: Phase 3 will swap the decoder source over
+//    and rely on RISCOF signature comparison against the spike reference
+//    as the correctness gate.
 
 // ── Compressed instruction alignment ────────────────────────────────────
 // redirect fires on any non-sequential PC change; pc_in is the unified target.

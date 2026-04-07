@@ -64,6 +64,7 @@
 ../../design/core/branch/src/branch_target_address.sv
 ../../design/core/fetch/src/fetch_pkg.sv
 ../../design/core/fetch/src/fetch_buffer.sv
+../../design/core/fetch/src/compressed_aligner.sv
 ../../design/core/fetch/src/redirect_arbiter.sv
 ../../design/core/interrupt/src/interrupt_ctrl.sv
 ../../design/uncore/plic/src/plic_rv.sv
