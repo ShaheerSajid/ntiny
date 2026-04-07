@@ -6,6 +6,8 @@ flows/simulation/obj_dir/
 flows/simulation/Vtb_soc_top
 flows/simulation/Vtb_soc_top_default
 flows/simulation/riscof_work
+verification/**/obj_dir/
+verification/**/Vtb_soc_top
 
 # Simulation outputs
 *.vcd
