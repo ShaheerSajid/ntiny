@@ -20,7 +20,9 @@
             device_type = "cpu";
             reg = <0>;
             compatible = "riscv";
-            riscv,isa = "rv32imacsu";
+            riscv,isa-base = "rv32i";
+            riscv,isa = "rv32imac_zicsr_zifencei_zkr";
+            riscv,isa-extensions = "i", "m", "a", "c", "zicsr", "zifencei", "zkr";
             mmu-type = "riscv,sv32";
 
             interrupt-controller {

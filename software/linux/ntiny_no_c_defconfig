@@ -1,15 +1,31 @@
-# ntiny minimal Linux kernel config for RV32IMACSU + Sv32 MMU
+# ntiny rv32ima Linux kernel config (NO compressed instructions)
 # Target: single-hart, 128MB RAM, OpenSBI, UART console
 #
-# This is the WITH-C build (compressed instructions enabled).
-# For the rv32ima (no-C) variant used to bypass c_controller alignment
-# edge cases during the fetch revamp, use ntiny_no_c_defconfig.
+# This is the NO-C variant: compressed instructions disabled in the kernel
+# to bypass the c_controller alignment FSM edge cases (sepc[1]=1 BRANCH state,
+# stale ins_buffer interactions, etc.) while the fetch-unit revamp is in
+# progress. See docs/fetch_revamp_plan.md §4 for the long-form rationale.
+#
+# Notes:
+#   - arch/riscv/Kconfig has EFI_STUB → select RISCV_ISA_C, so EFI must also
+#     be disabled for the C disable to actually take effect.
+#   - HVC_RISCV_SBI and SERIAL_EARLYCON_RISCV_SBI both depend on RISCV_SBI_V01,
+#     which is `default n`. olddefconfig will silently drop the console
+#     drivers if RISCV_SBI_V01 isn't explicitly set, so we set it here too
+#     (this is bug #12 — see docs/linux_boot_bugs_and_fixes.md).
+#   - The OpenSBI build that consumes this kernel must use
+#     PLATFORM_RISCV_ISA=rv32ima_zicsr_zifencei to match.
+#   - Userspace (busybox/glibc) is still C-enabled because the riscv32-unknown-
+#     linux-gnu toolchain emits compressed by default. So this only sidesteps
+#     C edge cases on the kernel-side fetch path.
 
 # Architecture
 CONFIG_ARCH_RV32I=y
 CONFIG_NONPORTABLE=y
 # CONFIG_SMP is not set
 CONFIG_MMU=y
+# CONFIG_RISCV_ISA_C is not set
+# CONFIG_EFI is not set
 
 # SoC — use generic/virt as base
 CONFIG_SOC_VIRT=y
