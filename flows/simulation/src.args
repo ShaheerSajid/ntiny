@@ -62,6 +62,7 @@
 ../../design/uncore/i2c/src/i2c_master_bit_ctrl.sv
 ../../design/uncore/i2c/src/i2c_master_byte_ctrl.sv
 ../../design/core/branch/src/branch_target_address.sv
+../../design/core/fetch/src/redirect_arbiter.sv
 ../../design/core/interrupt/src/interrupt_ctrl.sv
 ../../design/uncore/plic/src/plic_rv.sv
 ../../design/uncore/crc/src/crc_avalon_wrap.v

@@ -430,6 +430,58 @@ begin
 		default: pc_in = pc_out + 4;
 	endcase
 end
+
+// ── Redirect Arbiter (Phase 1: parallel observation only) ───────────────
+// docs/fetch_revamp_plan.md §4.1 / §9 Phase 1.
+// This module runs in parallel with the existing pc_sel/pc_in logic above.
+// Its outputs are NOT consumed by any functional path — they exist only so
+// the SVA assertions below can cross-check that the new arbiter produces
+// the same redirect decision as the legacy mux on every cycle. Once
+// validated by RISCOF + Linux, Phase 4 will switch the program counter to
+// consume these signals and delete the legacy pc_sel logic.
+logic            arb_redirect_valid;
+logic [31:0]     arb_redirect_target;
+redirect_kind_e  arb_redirect_kind;
+
+redirect_arbiter redirect_arbiter_inst (
+    .debug_resume_i  (debug_valid),
+    .trap_valid_i    (interrupt_valid),
+    .branch_taken_i  (branch_taken_valid),
+    .ret_valid_i     (ret_valid_valid),
+    .sret_select_i   (ctrl_bus_if_id.sret == TRUE),
+
+    .handler_addr_i  (handler_addr),
+    .branch_target_i (branch_target_address),
+    .sepc_i          (sepc),
+    .mepc_i          (epc),
+    .dpc_i           (dpc),
+
+    .redirect_valid_o  (arb_redirect_valid),
+    .redirect_target_o (arb_redirect_target),
+    .redirect_kind_o   (arb_redirect_kind)
+);
+
+// SVA cross-check: arbiter outputs must match the legacy pc_sel/pc_in mux
+// every cycle (after reset). If these fire, either the arbiter has a bug
+// or the legacy mux has a case the arbiter is missing. Both are blockers
+// for Phase 1 → Phase 2 progression.
+`ifndef SYNTHESIS
+property p_arb_valid_matches_pc_sel;
+    @(posedge clk_i) disable iff (reset_i)
+        arb_redirect_valid == (pc_sel != PC_plus_4);
+endproperty
+property p_arb_target_matches_pc_in;
+    @(posedge clk_i) disable iff (reset_i)
+        arb_redirect_valid |-> (arb_redirect_target == pc_in);
+endproperty
+a_arb_valid_matches_pc_sel:  assert property (p_arb_valid_matches_pc_sel)
+    else $error("redirect_arbiter: valid (%0b) != (pc_sel != PC_plus_4) (%0b), pc_sel=%0d",
+                 arb_redirect_valid, (pc_sel != PC_plus_4), pc_sel);
+a_arb_target_matches_pc_in:  assert property (p_arb_target_matches_pc_in)
+    else $error("redirect_arbiter: target (%08x) != pc_in (%08x), kind=%0d, pc_sel=%0d",
+                 arb_redirect_target, pc_in, arb_redirect_kind, pc_sel);
+`endif
+
 // ============================================================
 // FETCH STAGE
 // ============================================================

@@ -305,6 +305,20 @@ typedef enum logic[2:0] {
 	BRANCH_DPC
 } pc_sel_e;
 
+// Redirect-arbiter kind enum (fetch revamp Phase 1).
+// Single source of truth for "why is the next fetch going somewhere other
+// than pc+4". Mirrors pc_sel_e but with explicit MRET vs SRET distinction
+// removed (the arbiter resolves which xPC to use internally) and a RESET
+// kind for completeness. See docs/fetch_revamp_plan.md §4.1.
+typedef enum logic [2:0] {
+	RDR_NONE   = 3'd0,
+	RDR_RESET  = 3'd1,
+	RDR_DEBUG  = 3'd2,
+	RDR_TRAP   = 3'd3,
+	RDR_XRET   = 3'd4,
+	RDR_BRANCH = 3'd5
+} redirect_kind_e;
+
 // Control bus — decoded instruction fields, propagated through pipeline stages.
 // Groups: instruction type, branch, memory, ALU/MUL/FPU/BIT ops, CSR, register addresses, writeback.
 typedef struct {
