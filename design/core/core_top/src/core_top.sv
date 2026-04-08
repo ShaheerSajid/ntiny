@@ -540,13 +540,21 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 	// does NOT suppress the redirect's PC latch when a branch/xRET/
 	// trap/debug fires while the buffer is full.
 	//
-	// (An earlier draft also gated the bypass by ~insert_bubble to
-	// avoid latching wrong targets during a load-use bubble. After
-	// moving branch resolution to the IE stage, insert_bubble is
-	// permanently 0 — the IE-stage forwarding network handles the
-	// load-use case for branches without any pipeline bubble. The
-	// guard is therefore dead and removed.)
-	.stall_i	((interrupt_valid | ret_pulse | arb_redirect_valid) ? 1'b0 : fetch_producer_stall),
+	// CRITICAL: the bypass must NOT fire when csr_ret_hazard is
+	// asserted. csr_ret_hazard means an mret/sret is in ID while a
+	// csrrw mepc/sepc is still in IE — i.e., the RET target value is
+	// being WRITTEN this cycle but won't be visible to the redirect
+	// path until the next cycle. Without this guard, the program_counter
+	// latches pc_in = OLD epc (because mepc reads the pre-write value),
+	// causing the mret to jump to the previous trap's epc rather than
+	// the freshly-set value.
+	//
+	// (An earlier draft also gated the bypass by ~insert_bubble for
+	// the load-use bubble case. After moving branch resolution to the
+	// IE stage, insert_bubble is permanently 0 — the IE-stage forwarding
+	// handles the load-use case for branches without any pipeline
+	// bubble. That guard is dead and removed.)
+	.stall_i	(((interrupt_valid | ret_pulse | arb_redirect_valid) & ~csr_ret_hazard) ? 1'b0 : fetch_producer_stall),
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
@@ -566,9 +574,11 @@ assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
 // advances to target+4, and the producer fetches target+4 first —
 // the actual redirect target instruction is never fetched.
 //
-// (Earlier this had a `~insert_bubble` guard that's now dead — see
-// the matching comment on program_counter.stall_i above.)
-assign imem_port.req   = refetch_after_trap | arb_redirect_valid | ~fetch_producer_stall;
+// Same csr_ret_hazard guard as on program_counter.stall_i: don't fire
+// the bypass during a csr→ret hazard cycle, because the redirect
+// target (mepc/sepc) is being written THIS cycle and reading it
+// reads the OLD value.
+assign imem_port.req   = refetch_after_trap | (arb_redirect_valid & ~csr_ret_hazard) | ~fetch_producer_stall;
 assign imem_port.we    = 1'b0;
 assign imem_port.be    = 4'b1111;
 assign imem_port.wdata = 32'b0;
