@@ -62,10 +62,22 @@ assign f5_imem = 1'b0;
 assign stall_condition_ie = c1_ie && ((c2_ie && (c3_ie || c4_ie)) || (f3_ie || f4_ie || f5_ie));
 assign stall_condition_imem = c1_imem && ((c2_imem && (c3_imem || c4_imem)) || (f3_imem || f4_imem || f5_imem));
 
-assign br_true = ctrl_bus_if_id_i.inst_type == JUMP_R || ctrl_bus_if_id_i.inst_type == BRANCH;
-assign lu_ie = ctrl_bus_ie_i.mem_op == READ;
-assign lu_imem = ctrl_bus_imem_i.mem_op == READ;
+// Phase 3 (branch-in-IE move): branches are now resolved at the IE
+// stage instead of ID, so they read their source operands via the
+// regular IE-stage forwarding network (forwarda_ie/forwardb_ie). This
+// removes the need for stall_line to bubble for "branch with producer
+// in IE/IMEM" cases — the previous br_true / lu_ie / lu_imem terms
+// were exactly that bubble, and they are now dead.
+//
+// Result: insert_bubble is permanently 0 in this revision. The
+// signal is kept (driven low) so the rest of the pipeline (which
+// consumes insert_bubble via hazard_unit) does not need to be
+// touched in the same commit. A follow-up cleanup can delete the
+// insert_bubble plumbing entirely.
+assign br_true = 1'b0;
+assign lu_ie   = 1'b0;
+assign lu_imem = 1'b0;
 
-assign insert_bubble_o = onebit_sig_e'(( ((br_true | lu_ie ) & stall_condition_ie) | ((br_true & lu_imem) & stall_condition_imem) ) );
+assign insert_bubble_o = onebit_sig_e'(1'b0);
 
 endmodule

@@ -40,11 +40,18 @@ class ntiny(pluginTemplate):
         self.work_dir = work_dir
         self.suite_dir = suite
 
+        # Soft check: warn if Vtb_soc_top is missing, but don't abort.
+        # We don't abort here because (a) `riscof run --no-dut-run` only
+        # needs the plugin to load (not actually run), and (b) the
+        # `make gen_refs` workflow generates spike refs first, then the
+        # user iterates on the DUT separately. If the user calls a
+        # `riscof run` that DOES need the binary, it will fail in
+        # run_test.sh anyway with a clear error.
         if not os.path.isfile(self.verilator_bin):
-            logger.error(
-                'Verilator binary not found at %s. Run "make verilator_build" in flows/simulation/ first.',
+            logger.warning(
+                'Verilator binary not found at %s. (Reference-only run is OK; '
+                'DUT-side run will fail until you build it.)',
                 self.verilator_bin)
-            raise SystemExit(1)
 
         gcc = os.path.join(self.toolchain, 'riscv64-unknown-elf-gcc')
         self.compile_cmd = gcc + \

@@ -167,14 +167,25 @@ module compressed_aligner
     assign pop_o = pop_internal && consumer_take_i && instruction_valid_o;
 
     // ── half_index state update ────────────────────────────────────────
-    // Priority: reset > flush > redirect > consumed-emit advance
+    // Priority: reset > redirect > flush > consumed-emit advance
+    //
+    // redirect_valid_i must take priority over flush_i because in the
+    // top-level wiring `fetch_flush = arb_redirect_valid` (the same
+    // signal). On a redirect to a half-aligned target the aligner needs
+    // to reseat half_index = redirect_target[1] (= 1), but if `flush_i`
+    // ran first it would reset half_index to 0 and the upper-half
+    // instruction at the target would be misaligned.
+    //
+    // The flush_i branch is retained for explicit non-redirect flushes
+    // (e.g. reset path or future debug halt resync), but in the current
+    // wiring it is dominated by the redirect path.
     always_ff @(posedge clk_i or posedge reset_i) begin
         if (reset_i)
             half_index_q <= 1'b0;
-        else if (flush_i)
-            half_index_q <= 1'b0;
         else if (redirect_valid_i)
             half_index_q <= redirect_target_i[1];
+        else if (flush_i)
+            half_index_q <= 1'b0;
         else if (instruction_valid_o && consumer_take_i)
             half_index_q <= next_half_index;
     end

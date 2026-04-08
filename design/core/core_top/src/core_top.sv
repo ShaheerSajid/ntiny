@@ -324,6 +324,12 @@ hazard_unit hazard_unit_inst (
     // Control flow
     .interrupt_valid_i  (interrupt_valid),
     .resumeack_i        (resumeack_o),
+    // Phase 3: aligner-not-ready stall + redirect for branch_squash_q.
+    // aligner_valid and arb_redirect_valid are declared later in the
+    // file (the fetch_buffer + redirect_arbiter blocks); SystemVerilog
+    // forward references inside a single module scope are legal.
+    .aligner_valid_i    (aligner_valid),
+    .redirect_valid_i   (arb_redirect_valid),
     .exception_from_ie_i(exception_from_ie),
     // Processor state
     .halted_i           (halted_o),
@@ -405,7 +411,12 @@ assign fence_i_o = (ctrl_bus_ie.fence_i == TRUE) && !stale_ie;
 // Static not-taken: predicted_taken=0, so mispredict = branch_taken.
 // Future BTB also catches: predicted_taken=1 but actually not-taken.
 // Do NOT gate with insn_valid_id (see original comment about trap JAL redirect).
-assign bpu_mispredict = onebit_sig_e'(branch_taken != ctrl_bus_if_id.predicted_taken);
+//
+// Phase 3 (branch-in-IE): branch_taken is now produced by branch_comp
+// at the IE stage, so the prediction it must be compared against is
+// the IE-stage `predicted_taken` (latched into ctrl_bus_ie at the IE
+// register wall). Was ctrl_bus_if_id.predicted_taken in the legacy.
+assign bpu_mispredict = onebit_sig_e'(branch_taken != ctrl_bus_ie.predicted_taken);
 
 wire branch_taken_valid = bpu_mispredict;  // redirect on mispredict, not raw branch_taken
 wire ret_valid_valid    = ret_valid;
@@ -494,6 +505,28 @@ a_arb_target_matches_pc_in:  assert property (p_arb_target_matches_pc_in)
 // neither pc_out nor apc ever latch the return target.
 wire ret_pulse = ret_fire | sret_fire;
 
+// Phase 3: producer-side stall sources.
+//
+// The producer (pc_out + imem_port.req) must NOT depend on the consumer-
+// side stalls (if_id_stall, which now includes id_no_insn_stall =
+// ~aligner_valid). Coupling them creates a chicken-and-egg deadlock:
+// the buffer is empty → aligner_valid=0 → if_id_stall=1 → req=0 → no
+// fetch → buffer stays empty.
+//
+// The producer should only stall when:
+//   - the IE-side hazard chain is stalled (alu_stall, dmem busy, AMO,
+//     mmu_d_stall, etc) — captured by ie_stall
+//   - the icache cannot accept more (fetch_stall)
+//   - the MMU instruction-side is doing a PTW walk (mmu_i_stall) — the
+//     fetch can't issue while the translation is pending
+//   - debug halted
+//
+// We deliberately exclude id_no_insn_stall from this set because the
+// whole point of fetching is to refill the buffer when ID is dry.
+wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
+                            csr_ret_hazard | refetch_after_trap |
+                            insert_bubble | fetch_stall;
+
 `ifdef BOOT
 program_counter #(.DEFAULT(32'h00001000)) program_counter_inst
 `else
@@ -502,7 +535,18 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 (
 	.clk_i		(clk_i),
 	.reset_i	(reset_i),
-	.stall_i	((interrupt_valid | ret_pulse) ? 1'b0 : if_id_stall | c_stall),
+	// Phase 3: c_stall replaced by fetch_producer_stall. The bypass
+	// includes arb_redirect_valid so that the back-pressure stall
+	// does NOT suppress the redirect's PC latch when a branch/xRET/
+	// trap/debug fires while the buffer is full.
+	//
+	// (An earlier draft also gated the bypass by ~insert_bubble to
+	// avoid latching wrong targets during a load-use bubble. After
+	// moving branch resolution to the IE stage, insert_bubble is
+	// permanently 0 — the IE-stage forwarding network handles the
+	// load-use case for branches without any pipeline bubble. The
+	// guard is therefore dead and removed.)
+	.stall_i	((interrupt_valid | ret_pulse | arb_redirect_valid) ? 1'b0 : fetch_producer_stall),
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
@@ -511,65 +555,112 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 // memory request targets the correct handler address instead of handler_addr+4.
 wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_after_trap) ? pc_out : pc_in;
 assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
-// Force req=1 during refetch: if_id_stall=1 on that cycle (from refetch_after_trap)
-// so ~if_id_stall would be 0, but we still need to issue the fetch.
-assign imem_port.req   = refetch_after_trap | (~if_id_stall & ~c_stall);
+// Force req=1 during refetch even when the producer is otherwise stalled.
+// Phase 3: gate by fetch_producer_stall (NOT if_id_stall) so the fetch
+// path keeps refilling when ID is dry.
+//
+// arb_redirect_valid bypass: a redirect (branch/xRET/trap/debug) MUST
+// issue its target's fetch on the redirect cycle, regardless of
+// fetch_stall back-pressure. Without this, the redirect target gets
+// skipped: pc_out latches the target the next cycle, then pc_in
+// advances to target+4, and the producer fetches target+4 first —
+// the actual redirect target instruction is never fetched.
+//
+// (Earlier this had a `~insert_bubble` guard that's now dead — see
+// the matching comment on program_counter.stall_i above.)
+assign imem_port.req   = refetch_after_trap | arb_redirect_valid | ~fetch_producer_stall;
 assign imem_port.we    = 1'b0;
 assign imem_port.be    = 4'b1111;
 assign imem_port.wdata = 32'b0;
 
-// ── Phase 2.1+2.2: parallel fetch_buffer + compressed_aligner snoop ────
-// docs/fetch_revamp_plan.md §4.3 / §4.4 / §9 Phase 2.
+// ── Phase 3: fetch_buffer + compressed_aligner are the LIVE fetch path ──
+// docs/fetch_revamp_plan.md §4.3 / §4.4 / §9 Phase 3.
 //
-// Two new modules running in parallel with the existing c_controller-
-// based fetch path. NEITHER feeds any functional signal — they exist
-// only so the modules compile, simulate, and execute the same buffer/
-// aligner state machine the Phase 3 switchover will eventually consume.
-// Validation strategy: the existing legacy path still drives the
-// decoder, so RISCOF + Linux baselines must remain unchanged with the
-// new modules attached. Phase 3 switches the decoder to read from the
-// new aligner; RISCOF signature comparison at that phase validates the
-// aligner output against the spike reference (not against the legacy).
+// The decoder now reads from the compressed_aligner instead of the
+// legacy c_controller. The c_controller is kept instantiated for
+// reversibility but no functional path consumes its outputs. Phase 4
+// will delete it entirely.
 //
-// Snoop logic:
-//   - Register i_vaddr at the cycle imem_port.req=1 (icache slave is
-//     always ready, so request is accepted same cycle)
-//   - Push (rdata, registered vaddr) to fetch_buffer on imem_port.rvalid
-//   - Pop comes from compressed_aligner.pop_o (which knows when the
-//     head entry is fully consumed by the aligner's half_index advance)
-//   - Flush both modules on the same redirect signals the c_controller
-//     sees: (controller_flush | ret_pulse)
+// Key timing change: a registered fetch buffer adds +1 cycle of latency
+// between imem_port.rdata and the IE register wall capture. This
+// increases branch misprediction penalty from 1 cycle to 2. The user
+// has explicitly accepted this trade ("BPU will amortize") in exchange
+// for converging towards a textbook fetch design.
+//
+// Producer/consumer flow:
+//   - Producer: pc_out + imem_port.req fetch one word per cycle, but
+//     are HELD when the buffer would overflow (fetch_stall) or when a
+//     redirect just fired (the bypass on program_counter.stall_i).
+//   - inflight_q tracks the in-flight cycle of the icache 1-cycle
+//     latency; clears on arb_redirect_valid so wrong-path rdata is
+//     dropped at the push gate.
+//   - The buffer is pushed on (rvalid && inflight_q), so a redirect
+//     mid-fetch silently drops the wrong-path word.
+//   - The aligner consumes from the buffer head/next, advancing
+//     half_index according to compressed/straddled layout.
+//   - Consumer side: when the aligner has nothing to emit
+//     (aligner_valid=0), hazard_unit raises if_id_stall via the new
+//     id_no_insn_stall input, and the IE wall capture in core_top
+//     additionally gates on aligner_valid (3l) to avoid latching the
+//     decoder's NOP-from-zero output.
 
-// snoop_inflight_vaddr_q latches i_vaddr on every cycle imem_port.req is
+// Canonical fetch flush: every redirect (trap, xRET, branch, debug,
+// reset) flushes the buffer + aligner half_index in lockstep with
+// pc_out latching the new target. Sourced from the Phase 1 redirect
+// arbiter so there is one arbiter for the new path and one mux for
+// the legacy producer (pc_in mux at line 422), kept consistent by the
+// SVA cross-check assertions just below the arbiter instantiation.
+wire fetch_flush = arb_redirect_valid;
+
+// inflight_vaddr_q latches i_vaddr on every cycle imem_port.req is
 // high. The vaddr register itself has NO reset (so a request issued in
-// the very first non-reset cycle is captured even if we're still settling
-// out of reset). A separate snoop_inflight_valid_q tracks whether the
-// captured vaddr corresponds to a real in-flight transaction; this *is*
-// reset-cleared so we don't push garbage on the first rvalid following
-// reset deassertion.
-logic [31:0] snoop_inflight_vaddr_q;
-logic        snoop_inflight_valid_q;
+// the very first non-reset cycle is captured even if we're still
+// settling out of reset).
+logic [31:0] inflight_vaddr_q;
 always_ff @(posedge clk_i) begin
     if (imem_port.req)
-        snoop_inflight_vaddr_q <= i_vaddr;
+        inflight_vaddr_q <= i_vaddr;
 end
+
+// inflight_q tracks "a fetch is on the bus, waiting for rvalid".
+//
+// Priority on the same cycle:
+//   1. imem_port.req → inflight_q=1 (a new request is being issued —
+//      its rvalid will arrive next cycle and we want to capture it).
+//      This wins over arb_redirect_valid because on the redirect cycle
+//      the producer issues a req for the *new* target (pc_in already
+//      reflects the redirect because the pc_sel mux is combinational).
+//   2. arb_redirect_valid && !imem_port.req → inflight_q=0 (a redirect
+//      with no new req this cycle drops any prior wrong-path in-flight).
+//   3. imem_port.rvalid (and not req) → inflight_q=0 (response landed).
+logic inflight_q;
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i)
-        snoop_inflight_valid_q <= 1'b0;
+        inflight_q <= 1'b0;
     else if (imem_port.req)
-        snoop_inflight_valid_q <= 1'b1;
+        inflight_q <= 1'b1;
+    else if (arb_redirect_valid)
+        inflight_q <= 1'b0;
     else if (imem_port.rvalid)
-        snoop_inflight_valid_q <= 1'b0;
+        inflight_q <= 1'b0;
 end
 
-// Push to snoop buffer only when the rvalid corresponds to a vaddr we
-// actually captured (i.e., the in-flight tracker is valid). This drops
-// any spurious rvalid that might appear on the first cycle out of reset
-// with stale SRAM state.
-wire snoop_push = imem_port.rvalid && snoop_inflight_valid_q;
+// Push to the buffer when imem returns a valid rdata, gated only by
+// `!arb_redirect_valid` to drop wrong-path rdata that arrives on the
+// same cycle as a redirect.
+//
+// Notably we do NOT gate by inflight_q here. inflight_q is reset-
+// cleared, but the SRAM may have a valid `pa_rvalid_o` on the very
+// first non-reset cycle (because the icache fetched during the last
+// reset cycle, and rvalid is registered without reset). Gating the
+// push by inflight_q would cause us to DROP the rdata for the very
+// first instruction at the reset PC, leading to a "first instruction
+// after reset is silently skipped" bug. inflight_q is still used by
+// fetch_stall to anticipate the buffer fill 1 cycle early.
+wire fb_push = imem_port.rvalid && !arb_redirect_valid;
 
-fetch_pkg::fetch_buffer_entry_t snoop_push_entry;
-assign snoop_push_entry.word  = imem_port.rdata;
+fetch_pkg::fetch_buffer_entry_t fb_push_entry;
+assign fb_push_entry.word  = imem_port.rdata;
 // Store the WORD-ALIGNED vaddr so the aligner's pc_id arithmetic
 // (head.vaddr + (half_index ? 2 : 0)) works correctly even when a
 // redirect lands on a half-aligned target (e.g. j to a 16-bit
@@ -577,105 +668,97 @@ assign snoop_push_entry.word  = imem_port.rdata;
 // containing word regardless of whether the request was half-aligned;
 // the aligner's half_index already tracks which half is "current" via
 // redirect_target_i[1].
-assign snoop_push_entry.vaddr = {snoop_inflight_vaddr_q[31:2], 2'b00};
-assign snoop_push_entry.fault = 1'b0;  // Phase 2: faults still via legacy path
-assign snoop_push_entry.cause = 5'b0;
+assign fb_push_entry.vaddr = {inflight_vaddr_q[31:2], 2'b00};
+assign fb_push_entry.fault = 1'b0;  // Phase 3: faults still via legacy mmu_i_fault path
+assign fb_push_entry.cause = 5'b0;
 
-wire snoop_flush = controller_flush | ret_pulse;
+// Aligner output wires (forward declared so the producer back-pressure
+// computed below can reference fb_full / fb_count from the buffer).
+logic        aligner_pop;
+logic [31:0] aligner_inst;
+logic [31:0] aligner_pc_id;
+logic        aligner_valid;
+logic        aligner_fault;
+logic [4:0]  aligner_cause;
+logic        aligner_is_compressed;
 
-// Aligner outputs (pop drives the buffer below — order: aligner reads buffer
-// head/next, computes pop combinationally, buffer state advances on edge)
-logic        snoop_aligner_pop;
-logic [31:0] snoop_aligner_inst;
-logic [31:0] snoop_aligner_pc_id;
-logic        snoop_aligner_inst_valid;
-logic        snoop_aligner_inst_fault;
-logic [4:0]  snoop_aligner_inst_cause;
-logic        snoop_aligner_is_compressed;
+logic                              fb_full;
+logic                              fb_overflow;
+fetch_pkg::fetch_buffer_entry_t    fb_head;
+fetch_pkg::fetch_buffer_entry_t    fb_next;
+logic                              fb_head_valid;
+logic                              fb_next_valid;
+logic                              fb_empty;
+logic [1:0]                        fb_count;
 
-logic                              snoop_buf_full;
-logic                              snoop_buf_overflow;
-fetch_pkg::fetch_buffer_entry_t    snoop_buf_head;
-fetch_pkg::fetch_buffer_entry_t    snoop_buf_next;
-logic                              snoop_buf_head_valid;
-logic                              snoop_buf_next_valid;
-logic                              snoop_buf_empty;
-logic [1:0]                        snoop_buf_count;
-
-fetch_buffer #(.DEPTH(2)) fetch_buffer_snoop (
+fetch_buffer #(.DEPTH(2)) fetch_buffer_inst (
     .clk_i        (clk_i),
     .reset_i      (reset_i),
-    .flush_i      (snoop_flush),
-    .push_i       (snoop_push),
-    .push_entry_i (snoop_push_entry),
-    .full_o       (snoop_buf_full),
-    .overflow_o   (snoop_buf_overflow),
-    .pop_i        (snoop_aligner_pop),
-    .head_entry_o (snoop_buf_head),
-    .next_entry_o (snoop_buf_next),
-    .head_valid_o (snoop_buf_head_valid),
-    .next_valid_o (snoop_buf_next_valid),
-    .empty_o      (snoop_buf_empty),
-    .count_o      (snoop_buf_count)
+    .flush_i      (fetch_flush),
+    .push_i       (fb_push),
+    .push_entry_i (fb_push_entry),
+    .full_o       (fb_full),
+    .overflow_o   (fb_overflow),
+    .pop_i        (aligner_pop),
+    .head_entry_o (fb_head),
+    .next_entry_o (fb_next),
+    .head_valid_o (fb_head_valid),
+    .next_valid_o (fb_next_valid),
+    .empty_o      (fb_empty),
+    .count_o      (fb_count)
 );
 
-// The compressed_aligner reads from the buffer head/next. Its
-// `consumer_take_i` is the same signal that gates the legacy IE
-// register wall (= !if_id_stall), so the half_index advances in
-// lockstep with the legacy decoder.
-compressed_aligner compressed_aligner_snoop (
+compressed_aligner compressed_aligner_inst (
     .clk_i               (clk_i),
     .reset_i             (reset_i),
-    .flush_i             (snoop_flush),
+    .flush_i             (fetch_flush),
     .consumer_take_i     (~if_id_stall),
 
-    .head_i              (snoop_buf_head),
-    .next_i              (snoop_buf_next),
-    .head_valid_i        (snoop_buf_head_valid),
-    .next_valid_i        (snoop_buf_next_valid),
-    .pop_o               (snoop_aligner_pop),
+    .head_i              (fb_head),
+    .next_i              (fb_next),
+    .head_valid_i        (fb_head_valid),
+    .next_valid_i        (fb_next_valid),
+    .pop_o               (aligner_pop),
 
     .redirect_valid_i    (arb_redirect_valid),
     .redirect_target_i   (arb_redirect_target),
 
-    .instruction_o       (snoop_aligner_inst),
-    .pc_id_o             (snoop_aligner_pc_id),
-    .instruction_valid_o (snoop_aligner_inst_valid),
-    .instruction_fault_o (snoop_aligner_inst_fault),
-    .instruction_cause_o (snoop_aligner_inst_cause),
-    .is_compressed_o     (snoop_aligner_is_compressed)
+    .instruction_o       (aligner_inst),
+    .pc_id_o             (aligner_pc_id),
+    .instruction_valid_o (aligner_valid),
+    .instruction_fault_o (aligner_fault),
+    .instruction_cause_o (aligner_cause),
+    .is_compressed_o     (aligner_is_compressed)
 );
 
-// Notes on Phase 2 limitations:
+// Producer back-pressure: hold pc_out and gate imem_port.req when the
+// buffer would overflow on the next rvalid.
 //
-// 1. The snoop buffer CAN overflow on compressed code: the legacy
-//    c_controller's main pc_out drives imem_port.req at the full
-//    word-fetch rate while the aligner consumes one instruction per
-//    cycle (= half a word for RVC). With no producer-side back-pressure,
-//    a steady stream of compressed instructions fills the buffer. The
-//    fetch_buffer drops on full silently, so this is non-fatal — but the
-//    buffer's state is meaningless during the overflow window. Phase 4
-//    moves req drive into the FIU FSM, which back-pressures off the
-//    buffer's full_o and eliminates the overflow.
+//   fb_full is "the buffer is already full".
+//   (fb_count == 1) && inflight_q is "buffer has one entry AND there's
+//   one word in flight that will arrive next cycle and fill it" — we
+//   need to anticipate this case because the icache cannot back-pressure.
 //
-// 2. No cycle-by-cycle cross-check assertion vs the legacy. An earlier
-//    draft used a stream-FIFO equality check (push legacy emission,
-//    pop on aligner emission, compare bit-for-bit). It fired on every
-//    RVC test because the legacy emits a "phantom" first instruction
-//    at cycle R (apc_out=0x80000000, instruction_pipe=stale SRAM rdata,
-//    flagged by insn_valid_id=0 to downstream), and because the legacy's
-//    MISALIGN/BRANCH FSM stretches its emission timeline asymmetrically.
-//    The two streams are conceptually identical but bit-pattern
-//    divergent in startup transients and compressed-stall windows.
-//    Validation strategy: Phase 3 will swap the decoder source over
-//    and rely on RISCOF signature comparison against the spike reference
-//    as the correctness gate.
+// The combined fetch_stall is the source of producer hold throughout
+// the rest of this file (replaces the role of c_stall on the fetch path).
+wire fetch_stall = fb_full | ((fb_count == 2'd1) && inflight_q);
 
-// ── Compressed instruction alignment ────────────────────────────────────
-// redirect fires on any non-sequential PC change; pc_in is the unified target.
+// ── Phase 3: legacy c_controller is disconnected from functional paths ─
+// The decoder, IE wall, and predicted_pc_id are now driven by the
+// compressed_aligner above. The c_controller is kept INSTANTIATED so
+// the diff can be reverted easily if RISCOF regresses, but its outputs
+// are renamed to legacy_* and only consumed by SVA / debug helpers.
+// Phase 4 will delete c_controller entirely.
 wire c_redirect = (pc_sel != PC_plus_4);
 onebit_sig_e controller_flush;
 assign controller_flush = onebit_sig_e'(resumereq_i | interrupt_valid);
+
+logic [31:0] legacy_pc_id;
+logic [31:0] legacy_instruction_pipe;
+logic [31:0] legacy_next_instruction_addr;
+onebit_sig_e legacy_c_stall;
+onebit_sig_e legacy_c_valid;
+onebit_sig_e legacy_c_busy;
 
 c_controller c_controller_inst
 (
@@ -689,13 +772,32 @@ c_controller c_controller_inst
 	.ret_pulse_i            (ret_pulse),
 	.instruction_i          (reset_i ? 32'b0 : imem_port.rdata),
 
-	.instruction_addr_o     (pc_id),
-	.instruction_o          (instruction_pipe),
-	.next_instruction_addr_o(next_instruction_addr),
-	.c_stall_o              (c_stall),
-	.c_valid_o              (c_valid),
-	.busy_o                 (c_busy)
+	.instruction_addr_o     (legacy_pc_id),
+	.instruction_o          (legacy_instruction_pipe),
+	.next_instruction_addr_o(legacy_next_instruction_addr),
+	.c_stall_o              (legacy_c_stall),
+	.c_valid_o              (legacy_c_valid),
+	.busy_o                 (legacy_c_busy)
 );
+
+// ── Decoder source: the new compressed_aligner ─────────────────────────
+assign pc_id                 = aligner_pc_id;
+assign instruction_pipe      = aligner_inst;
+assign c_valid               = onebit_sig_e'(aligner_is_compressed);
+// next_instruction_addr is the +2 / +4 fall-through PC consumed by
+// debug_ctrl. With the new aligner driving pc_id, compute it locally.
+assign next_instruction_addr = aligner_pc_id + (aligner_is_compressed ? 32'd2 : 32'd4);
+
+// c_stall and c_busy are no longer driven by c_controller. Synthesize
+// drop-in replacements from the aligner/buffer state:
+//   - c_stall (consumed by program_counter and imem_port.req gates) is
+//     replaced by fetch_stall above; we tie it to 0 here for any stale
+//     consumer that still references the wire.
+//   - c_busy is consumed by debug_ctrl to defer halt commit until the
+//     fetch path is in a quiescent state. The new equivalent is "the
+//     aligner has nothing emitted yet OR a fetch is in flight".
+assign c_stall = onebit_sig_e'(1'b0);
+assign c_busy  = onebit_sig_e'(~aligner_valid | inflight_q);
 
 // ── BPU: predicted fall-through PC ──────────────────────────────
 // Static not-taken: predicted_pc is always the sequential address.
@@ -841,22 +943,17 @@ stall_line stall_line_inst
     .insert_bubble_o	(insert_bubble)
 );
 
-branch_comp branch_comp_inst
-(
-	.a_i			      (rs1_forwarded_id),
-	.b_i			      (rs2_forwarded_id),
-	.br_cond_i		  (ctrl_bus_if_id.br_cond),
-	.opcode_i		    (ctrl_bus_if_id.inst_type),
-	.branch_taken_o	(branch_taken)
-);
-branch_target_address branch_target_address_inst
-(
-	.pc_i		  (pc_id),
-	.rs1_i		(rs1_forwarded_id),
-	.imm_i		(imm_id),
-	.opcode_i	(ctrl_bus_if_id.inst_type),
-	.target_o	(branch_target_address)
-);
+// ── Phase 3 (post branch-in-IE move): branch_comp and branch_target ─
+// are now instantiated DOWN at the IE stage (after the IE-stage
+// forwarding logic computes opA/opB_forwarded_data). See the comment
+// block near branch_comp_inst around line ~1145.
+//
+// This eliminates the load-use bubble for branches (the legacy
+// stall_line generated 1 or 2 stalls because the branch was reading
+// rs1_forwarded_id at the ID stage). With branch in IE the regular
+// IE-stage forwarding (FORWARD_IMEM / FORWARD_IWB) provides the
+// values for free. Branch penalty becomes 2 cycles (was 1) — accepted
+// trade for the BPU revamp.
 imm_gen imm_gen_inst
 (
   .instruction_i	(instruction_pipe),
@@ -956,11 +1053,8 @@ always_ff@(posedge clk_i or posedge reset_i)
 			stale_ie <= 1'b0;
 			predicted_pc_ie <= 0;
 		end
-		else if(!ie_stall) begin
-			// No stale NOP injection: the IE flush on interrupt_valid already
-			// handles the leftover instruction. The handler's first insn arrives
-			// in ID 1 cycle after trap and must NOT be NOP'd (it needs to execute,
-			// especially for direct-mode mtvec handlers like OpenSBI).
+		else if(!ie_stall && aligner_valid) begin
+			// Capture a real instruction from the aligner.
 			ctrl_bus_ie <= ctrl_bus_if_id;
 			pc_ie <= pc_id;
 			imm_ie <= imm_id;
@@ -971,13 +1065,34 @@ always_ff@(posedge clk_i or posedge reset_i)
 			c_valid_ie <= c_valid;
 			stale_ie <= stale_id;
 		end
+		else if(!ie_stall && !aligner_valid) begin
+			// Phase 3 (branch-in-IE): the aligner has nothing to emit
+			// this cycle (buffer empty after a redirect, or waiting for
+			// a straddled-32-bit's second word). Inject a NOP into IE
+			// instead of holding the previous IE value. Holding would
+			// cause the previous instruction to be executed twice when
+			// downstream stages advance — particularly bad if it was a
+			// branch (the redirect would re-fire) or a CSR write (would
+			// double-update).
+			ctrl_bus_ie <= CTRL_BUS_NOP();
+			pc_ie <= 0;
+			imm_ie <= 0;
+			rs1_forwarded_ie <= 0;
+			rs2_forwarded_ie <= 0;
+			rs3_forwarded_ie <= 0;
+			c_valid_ie <= FALSE;
+			stale_ie <= 1'b0;
+			predicted_pc_ie <= 0;
+		end
 		else begin
-			// During a stall the IE pipeline registers are frozen, but forwarding
-			// sources (IMEM/IWB) continue to advance.  If the instruction currently
-			// in IE has a forwarding dependency on a source that is about to leave
-			// the pipeline, capture the forwarded value now so it is not lost.
-			// Without this, a store whose rs2 source completes IWB while the store
-			// itself is stuck in IE (e.g. DTLB miss) would write stale data.
+			// During a real IE stall (load in flight, AMO, MMU PTW etc.),
+			// the IE pipeline registers are frozen but forwarding sources
+			// (IMEM/IWB) continue to advance. If the instruction currently
+			// in IE has a forwarding dependency on a source that is about
+			// to leave the pipeline, capture the forwarded value now so it
+			// is not lost. Without this, a store whose rs2 source completes
+			// IWB while the store itself is stuck in IE (e.g. DTLB miss)
+			// would write stale data.
 			if (forwarda_ie == FORWARD_IWB)
 				rs1_forwarded_ie <= write_back_data;
 			else if (forwarda_ie == FORWARD_IMEM)
@@ -1036,6 +1151,51 @@ begin
 		default: opC_forwarded_data = 0;
 	endcase
 end
+
+// ── Phase 3 (branch-in-IE): branch_comp + branch_target_address ───────
+// MOVED HERE FROM THE ID STAGE.
+//
+// Why: with the registered fetch buffer (Phase 3) the producer pipe is
+// 1 cycle longer, which broke the legacy stall_line interaction with
+// the load-use hazard for branches. The legacy needed up to 2 stall
+// cycles to wait for a load value to reach a forwarding source readable
+// from the ID stage (where branch_comp lived). Phase 3's wait windows
+// shifted, leading to incorrect branch_target computation from stale
+// forwarded operands AND a chicken-and-egg fight between insert_bubble
+// and the arb_redirect_valid PC-stall bypass.
+//
+// Solution: resolve the branch in IE instead of ID. The IE-stage
+// forwarding network (forwarda_ie/forwardb_ie via opA/opB_forwarded_data)
+// already handles all hazards correctly because it's the same network
+// the ALU uses, which has been correct in legacy for years.
+//
+// Cost: branch penalty 1 → 2 cycles. Accepted because BPU work in
+// project_core_revamp_plan.md will amortize this. The eventual BPU
+// makes "branch in ID" pointless anyway since prediction subsumes the
+// 1-cycle gain.
+//
+// Cleanup that follows from this move:
+//   - stall_line.br_true cases are dead (removed)
+//   - the insert_bubble guard on the arb_redirect_valid PC-stall
+//     bypass is dead (removed)
+//   - the bpu_mispredict expression now uses ctrl_bus_ie.predicted_taken
+//     (was ctrl_bus_if_id.predicted_taken)
+branch_comp branch_comp_inst
+(
+	.a_i			      (opA_forwarded_data),
+	.b_i			      (opB_forwarded_data),
+	.br_cond_i		  (ctrl_bus_ie.br_cond),
+	.opcode_i		    (ctrl_bus_ie.inst_type),
+	.branch_taken_o	(branch_taken)
+);
+branch_target_address branch_target_address_inst
+(
+	.pc_i		  (pc_ie),
+	.rs1_i		(opA_forwarded_data),
+	.imm_i		(imm_ie),
+	.opcode_i	(ctrl_bus_ie.inst_type),
+	.target_o	(branch_target_address)
+);
 
 always_comb
 begin

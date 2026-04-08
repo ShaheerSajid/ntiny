@@ -86,6 +86,26 @@ run: verilator
 		--work-dir=$(WORK) || true
 	@$(MAKE) summary
 
+# Generate ONLY the spike reference signatures, skipping the DUT-side
+# simulation. Useful when the DUT is being debugged and may hang —
+# without this, a hung DUT prevents spike from generating its refs,
+# which makes individual smoke tests impossible (no reference to
+# compare against). Run this once after a `clean`, then iterate on
+# the DUT with the smoke test helper at /tmp/smoke_test.sh.
+#
+# Uses riscof's `--no-dut-run` flag (which still requires the ntiny
+# plugin to be loadable, but does not actually run Vtb_soc_top).
+.PHONY: gen_refs
+gen_refs:
+	@echo "Generating spike reference signatures (no DUT run)..."
+	source $(VENV) && riscof run \
+		--config=config.ini \
+		--suite=$(SUITE) \
+		--env=$(ENV) \
+		--work-dir=$(WORK) \
+		--no-dut-run || true
+	@echo "Spike reference signatures generated. Use smoke tests now."
+
 # Run F-extension tests
 .PHONY: run_fpu
 run_fpu: verilator_fpu

@@ -31,6 +31,10 @@ module hazard_unit (
     input  onebit_sig_e interrupt_valid_i,  // trap/interrupt firing
     input  logic        resumeack_i,        // debug resume
 
+    // ── Phase 3: fetch path validity / redirect ─────────────────────────
+    input  logic        aligner_valid_i,    // 1 = aligner has a real ID-stage instruction
+    input  logic        redirect_valid_i,   // any redirect (trap/xRET/branch/debug)
+
     // ── IE-stage exception flag ─────────────────────────────────────────
     input  logic        exception_from_ie_i,
 
@@ -90,14 +94,42 @@ assign csr_ret_hazard_o = ((id_mret_i && !illegal_mret_i) ||
                           ((id_mret_i && ie_csr_addr_i == 12'h341) ||
                            (id_sret_i && ie_csr_addr_i == 12'h141));
 
+// Phase 3: id_no_insn_stall is the new "ID has no real instruction"
+// stall source. It fires when the compressed_aligner has nothing to
+// emit (buffer empty after a redirect, or waiting for a straddled
+// 32-bit's second word). It must hold the IF/ID stage so the IE wall
+// does not capture the decoder's NOP-from-zero output.
+wire id_no_insn_stall = ~aligner_valid_i;
+
 assign if_id_stall_o = onebit_sig_e'(ie_stall_o | insert_bubble_i |
                                       refetch_after_trap_o | halted_i |
                                       icache_stall_i | mmu_i_stall_i |
-                                      csr_ret_hazard_o);
+                                      csr_ret_hazard_o |
+                                      id_no_insn_stall);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Flush logic (combinational)
 // ═══════════════════════════════════════════════════════════════════════════
+//
+// Phase 3 (branch-in-IE): wrong-path squash via direct redirect_valid_i
+//
+// When the branch resolves at the IE stage at cycle K, the aligner is
+// already emitting the next sequential instruction (PC+4 wrong-path)
+// into ctrl_bus_if_id at the SAME cycle K. Without intervention, the
+// IE wall captures the wrong-path at edge K→K+1 and it executes at
+// K+1, corrupting state before the redirect target arrives.
+//
+// The fix: OR `redirect_valid_i` (= arb_redirect_valid, combinational
+// from branch_comp at IE) directly into ie_flush_o on the SAME cycle.
+// The IE wall sees ie_flush=1 at cycle K and captures CTRL_BUS_NOP for
+// cycle K+1, killing the wrong-path before it executes. The branch
+// itself was already captured into ctrl_bus_ie at edge K-1→K and
+// continues to propagate through IMEM/IWB normally (the link write,
+// CSR side effects, etc. happen as expected).
+//
+// This must be combinational (NOT registered) because the wrong-path
+// is in ID at the SAME cycle the branch is in IE — there's no 1-cycle
+// gap between "branch detected" and "wrong-path entering IE".
 always_comb begin
     case ({if_id_stall_o | resumeack_i | interrupt_valid_i,
            ie_stall_o, imem_stall_o, iwb_stall_o})
@@ -110,6 +142,8 @@ always_comb begin
         4'b1110: {ie_flush_o, imem_flush_o, iwb_flush_o} = 3'b001;
         default: {ie_flush_o, imem_flush_o, iwb_flush_o} = 3'b000;
     endcase
+    if (redirect_valid_i)
+        ie_flush_o = TRUE;
 end
 
 // ═══════════════════════════════════════════════════════════════════════════
