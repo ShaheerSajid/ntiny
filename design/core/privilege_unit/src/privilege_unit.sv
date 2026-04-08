@@ -78,8 +78,24 @@ assign illegal_insn_id_o = illegal_csr_priv | illegal_mret_o | illegal_sret_o
 // MRET/SRET return instruction control
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ret_valid drives the redirect arbiter (and hence the aligner flush). It
+// MUST be gated by csr_ret_hazard_i in Phase 3, otherwise the following
+// race occurs:
+//   Cycle K   : csrrw mepc in IE, mret in ID, csr_ret_hazard=1.
+//               ret_valid=1 → arbiter redirects → aligner flush.
+//               ret_fire=0  (correctly gated) → priv_level NOT updated.
+//               if_id_stall=1 holds the IE wall, but the aligner flush has
+//               already evicted the mret from the head.
+//   Cycle K+1 : csrrw mepc has committed, csr_ret_hazard=0, but the mret
+//               is gone — its side effects (priv/mstatus update) never
+//               fired, and the new code runs in stale (M) priv.
+// Gating ret_valid_o by !csr_ret_hazard_i defers BOTH the redirect and
+// the aligner flush by one cycle, so on cycle K+1 the mret is still in
+// ID and ret_fire / ret_valid fire together against the freshly-committed
+// mepc value.
 assign ret_valid_o = onebit_sig_e'(((id_mret_i && !illegal_mret_o) ||
-                                    (id_sret_i && !illegal_sret_o)) && insn_valid_id_i);
+                                    (id_sret_i && !illegal_sret_o)) && insn_valid_id_i &&
+                                    !csr_ret_hazard_i);
 
 // Gate by !ie_stall: don't commit privilege change while IE has a pending
 // DTLB walk or multicycle op — the old privilege must remain active until
