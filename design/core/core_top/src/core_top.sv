@@ -904,11 +904,24 @@ forwarding_logic forwarding_logic_id_inst
 	.forwardc_id_o	(forwardc_id)
 );
 
+// Phase 3 (branch-in-IE + load-use cleanup): include the MEMORY case
+// so that a load instruction in IMEM stage forwards its load result
+// to a consumer in IE/ID. The legacy relied on stall_line's
+// `(lu_ie | br_true) & stall_condition_ie` bubble to delay the
+// consumer until the load reached IWB (where write_back_data already
+// handles MEMORY → readdata_iwb). With Phase 3 the stall_line's
+// load-use bubble was removed (along with the branch bubble) to
+// match the architecture brief's "MEM/WB merged → no load-use stall".
+// That requires the IMEM-stage forwarding to actually return the
+// load result. readdata_imem is the dmem rvalid data for the IMEM-stage
+// instruction (the load currently in MEM), so it's the correct
+// forwarding source for MEMORY wb_sel.
 always_comb
 begin
 	case(ctrl_bus_imem.wb_sel)
-		EXEC:imem_forwarded_data = exec_result_imem;
-		PC_WB:imem_forwarded_data = pc_imem;
+		EXEC:   imem_forwarded_data = exec_result_imem;
+		PC_WB:  imem_forwarded_data = pc_imem;
+		MEMORY: imem_forwarded_data = readdata_imem;
 		default:imem_forwarded_data = 0;
 	endcase
 end
