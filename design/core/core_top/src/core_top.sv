@@ -578,7 +578,22 @@ assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
 // the bypass during a csr→ret hazard cycle, because the redirect
 // target (mepc/sepc) is being written THIS cycle and reading it
 // reads the OLD value.
-assign imem_port.req   = refetch_after_trap | (arb_redirect_valid & ~csr_ret_hazard) | ~fetch_producer_stall;
+//
+// CRITICAL: also gate by ~mmu_i_stall. When the redirect target is in
+// a virtually-mapped region whose ITLB entry is missing (e.g. an mret
+// to a high VA after sfence.vma), the MMU's i_paddr_o defaults to
+// {PPN=0, offset} on the cycle of the miss while it kicks off a PTW.
+// Without this gate the bypass forces a bus request out with the
+// PPN=0 PA, the SRAM returns whatever happens to live there, and the
+// aligner buffers a garbage word that later commits as the supposed
+// redirect target instruction. Legacy didn't have this bypass at all
+// (imem_port.req was just `refetch_after_trap | (~if_id_stall &
+// ~c_stall)`), so the bus stayed silent during PTW. Restore that
+// behaviour for the redirect path by waiting until the MMU has a
+// translation before issuing the bus request.
+assign imem_port.req   = refetch_after_trap |
+                         (arb_redirect_valid & ~csr_ret_hazard & ~mmu_i_stall) |
+                         ~fetch_producer_stall;
 assign imem_port.we    = 1'b0;
 assign imem_port.be    = 4'b1111;
 assign imem_port.wdata = 32'b0;
