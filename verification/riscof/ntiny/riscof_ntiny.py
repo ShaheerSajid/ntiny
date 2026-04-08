@@ -73,9 +73,21 @@ class ntiny(pluginTemplate):
             makefilePath=os.path.join(self.work_dir, "Makefile." + self.name[:-1]))
         make.makeCommand = 'make -k -j' + self.num_jobs
 
+        # Optional skip filter: comma-separated path substrings, set via env
+        # var RISCOF_SKIP. Any test whose test_path contains one of the
+        # substrings is silently dropped before the makefile is built.
+        # Used during the fetch revamp to bring up the suite category by
+        # category (e.g. RISCOF_SKIP=pmp32,vm_sv32 to validate basic ISA +
+        # privilege first, then re-enable PMP / sv32 once those pass).
+        skip_env = os.environ.get('RISCOF_SKIP', '').strip()
+        skip_substrs = [s for s in skip_env.split(',') if s]
+
         for testname in testList:
             testentry = testList[testname]
             test = testentry['test_path']
+            if any(sub in test for sub in skip_substrs):
+                logger.info('RISCOF_SKIP: dropping %s', testname)
+                continue
             test_dir = testentry['work_dir']
             elf = 'my.elf'
             sig_file = os.path.join(test_dir, self.name[:-1] + ".signature")
