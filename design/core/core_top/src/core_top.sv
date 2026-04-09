@@ -553,6 +553,68 @@ wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
                             refetch_after_trap |
                             insert_bubble | fetch_stall;
 
+// ── Pending fetch target (deferred-redirect register) ──────────────────
+//
+// When a redirect (branch / xRET / trap / debug) lands on a virtually-
+// mapped target whose ITLB entry is missing, the MMU stalls (mmu_i_stall=1)
+// while it kicks off a PTW. The producer-side bus request is correctly
+// suppressed (Phase 3.4 `~mmu_i_stall` guard), and the bypass forces
+// `pc_out` to latch the redirect target on the same cycle.
+//
+// The next cycle, however, `pc_in = pc_out + 4` advances PAST the redirect
+// target. Without intervention this leaks two ways:
+//
+//   1. The MMU's combinational `itlb_hit` is computed against the live
+//      `i_vaddr_i = pc_in`, so even after its PTW completes for the
+//      original redirect target the TLB hit check fails (now looking at
+//      target+4) and the MMU starts a SECOND PTW for the wrong VA.
+//
+//   2. After PTW finishes and the bus fetches the target, sequential
+//      fetches resume immediately (target+4, target+8, ...). For a
+//      target at the top of the address space (e.g. 0xfffffffc with the
+//      vm_VA_all_ones test) this wraps to VA 0x00000000, whose PTE has
+//      A=0, and the wrong-path PTW faults — squashing the in-pipeline
+//      target instruction (which would have redirected away if given
+//      the chance to commit).
+//
+// Fix: latch the redirect target into a "pending fetch" register on the
+// cycle of a deferred redirect, drive `i_vaddr` from it while pending,
+// hold `pc_out` so the off-by-one doesn't break, and only clear the
+// pending bit when the target instruction has REACHED IE — i.e., when
+// `pc_ie == pending_target_q`. By that point the target is committing
+// (or stalling) in IE; if it's a branch / xRET / trap it has already
+// fired its own redirect on the same cycle and `pc_in` reflects the
+// new direction; if it's a sequential instruction `pc_in = target + 4`
+// is the right next fetch.
+//
+// Clearing on `imem_port.req` (the bus-issue cycle) was the original
+// implementation but allowed sequential wrong-path fetches to start
+// before the target reached IE — which is exactly what triggered
+// vm_VA_all_ones. Clearing on `pc_ie == pending_target_q` is the
+// right point.
+//
+// This is the pipelined equivalent of spike's non-speculative fetch:
+// don't issue the fetch past the redirect target until the target's
+// own commit-stage decision is known. The pending register acts as a
+// 1-instruction "barrier" that drains naturally when the target retires.
+logic [31:0] pending_target_q;
+logic        pending_target_v_q;
+wire         redirect_deferred = arb_redirect_valid & mmu_i_stall;
+wire         pending_target_drained = pending_target_v_q && (pc_ie == pending_target_q);
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        pending_target_q   <= 32'b0;
+        pending_target_v_q <= 1'b0;
+    end else if (redirect_deferred) begin
+        // Capture (or re-capture on a nested redirect) the deferred target.
+        pending_target_q   <= pc_in;
+        pending_target_v_q <= 1'b1;
+    end else if (pending_target_drained) begin
+        // Target instruction has reached IE — release the override.
+        pending_target_v_q <= 1'b0;
+    end
+end
+
 `ifdef BOOT
 program_counter #(.DEFAULT(32'h00001000)) program_counter_inst
 `else
@@ -571,19 +633,35 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 	// reaches wb_trap_unit. The previous Phase 3.2 guard (`& ~csr_ret_hazard`)
 	// is removed.
 	//
+	// pending_target_v_q stall: while a deferred redirect is pending,
+	// pc_out must NOT advance (it's "parked" at the previous fetch's PC,
+	// waiting for the override to drive the bus). Without this gate,
+	// pc_out would latch pc_in = pc_out + 4 on the cycle the override
+	// fires the bus req, and the next sequential fetch would skip
+	// target + 4.
+	//
 	// (An earlier draft also gated the bypass by ~insert_bubble for
 	// the load-use bubble case. After moving branch resolution to the
 	// IE stage, insert_bubble is permanently 0 — the IE-stage forwarding
 	// handles the load-use case for branches without any pipeline
 	// bubble. That guard is dead and removed.)
-	.stall_i	((interrupt_valid | ret_pulse | arb_redirect_valid) ? 1'b0 : fetch_producer_stall),
+	.stall_i	((interrupt_valid | ret_pulse | arb_redirect_valid) ? 1'b0 :
+	             (fetch_producer_stall | pending_target_v_q)),
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
 
 // refetch_after_trap: use pc_out (= handler_addr, held by the stall) so the
 // memory request targets the correct handler address instead of handler_addr+4.
-wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_after_trap) ? pc_out : pc_in;
+//
+// pending_target_v_q override: see the long comment on `pending_target_q`
+// above. While a deferred redirect is pending, drive i_vaddr from the
+// latched target so the MMU sees a stable VA across the entire PTW window
+// (otherwise pc_in would advance and the MMU would walk the wrong page
+// once the original PTW completes).
+wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_after_trap) ? pc_out :
+                      pending_target_v_q                              ? pending_target_q :
+                                                                        pc_in;
 assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
 // Force req=1 during refetch even when the producer is otherwise stalled.
 // Phase 3: gate by fetch_producer_stall (NOT if_id_stall) so the fetch
