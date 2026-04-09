@@ -11,6 +11,20 @@ MEMORY
 SECTIONS
 {
   .text.init : { *(.text.init) } > RAM
+
+  /* Reserve a NOBITS 1-page slot to match spike's layout. spike's
+     reference linker puts a real .tohost section in RAM between
+     .text.init and .data, so .data lands at .text.init_end + 2 pages.
+     ntiny puts .tohost at a fixed bus-monitored address outside RAM,
+     so it doesn't need a backing slot — but if we don't reserve one,
+     .data ends up at .text.init_end + 1 page, shifted DOWN by 0x1000
+     relative to spike's binary. Tests that use absolute PC values
+     (AUIPC + signature writes of EPCs) then diverge from the spike
+     reference signature, causing dozens of false-positive RISCOF
+     failures across the PMP / vm_sv32 / privilege suites. */
+  . = ALIGN(0x1000);
+  .tohost_pad (NOLOAD) : { . = . + 0x1000; } > RAM
+
   . = ALIGN(0x1000);
   .text : { *(.text) } > RAM
 
