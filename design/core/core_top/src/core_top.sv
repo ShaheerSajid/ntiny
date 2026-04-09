@@ -188,6 +188,13 @@ logic        mmu_i_fault, mmu_d_fault;
 logic [31:0] mmu_i_fault_addr, mmu_d_fault_addr;
 logic        mmu_i_access_fault, mmu_d_access_fault;
 logic [31:0] mmu_i_access_fault_addr, mmu_d_access_fault_addr;
+// Phase 4.8: PTW-completion-only versions of i-side faults (see big
+// comment near `inflight_i_fault_q`). Used to keep the legacy
+// direct-to-trap_sequencer path firing for PTW-completion faults
+// (which have no live imem.req cycle to ride the buffer) while the
+// comb portion takes the fetch_buffer route.
+logic        mmu_i_fault_ptw,        mmu_i_access_fault_ptw;
+logic [31:0] mmu_i_fault_ptw_addr,   mmu_i_access_fault_ptw_addr;
 logic [31:0] ptw_addr;
 logic        ptw_req, ptw_active;
 logic        d_store_for_mmu;
@@ -214,6 +221,27 @@ logic [31:0] mmu_i_fault_addr_r, mmu_d_fault_addr_r;
 logic        mmu_i_access_fault_r,      mmu_d_access_fault_r;
 logic [31:0] mmu_i_access_fault_addr_r, mmu_d_access_fault_addr_r;
 
+// ── Phase 4.8: buffer-routed instruction-side faults ──
+// Forward references to aligner_valid / aligner_fault / aligner_cause /
+// aligner_pc_id (declared with the fetch_buffer block much later in the
+// file) and branch_taken_valid / ret_valid_valid / debug_valid (declared
+// with the pc_sel mux). SystemVerilog allows forward refs inside one
+// module scope; the existing hazard_unit instantiation does the same.
+//
+// The fault rides through the fetch_buffer on the same entry as its
+// rdata. It only fires here when the entry has reached the aligner head
+// AND no older in-flight redirect (branch / xRET / debug-resume) is
+// firing this cycle. The "older redirect wins" gate prevents the
+// wrong-path PMP/page-fault bug for unconditional jumps (e.g. `j` at
+// PC X with PC+4 in a no-perm region or on an A-bit-clear page; the
+// speculative fetch's fault would otherwise fire as a trap before the
+// jump can commit). See the big comment near `inflight_i_fault_q`.
+wire i_buf_fault_squash = branch_taken_valid | ret_valid_valid | debug_valid;
+wire i_buf_access_fault =
+    aligner_valid && aligner_fault && (aligner_cause == 5'd1)  && !i_buf_fault_squash;
+wire i_buf_page_fault =
+    aligner_valid && aligner_fault && (aligner_cause == 5'd12) && !i_buf_fault_squash;
+
 // privilege_unit forward declaration so trap_sequencer can read it
 // (privilege_unit_inst is instantiated later in the file)
 //
@@ -234,12 +262,36 @@ trap_sequencer trap_seq_inst (
     .if_id_stall_i            (if_id_stall),
     .mmu_i_stall_i            (mmu_i_stall),
     // Raw faults from MMU
-    .mmu_i_fault_i              (mmu_i_fault),
-    .mmu_i_fault_addr_i         (mmu_i_fault_addr),
+    // Phase 4.8: i-side page fault has TWO sources after the wrong-path
+    // bug fix (mirrors the access-fault path):
+    //   (a) i_buf_page_fault — comb portion (formerly term1,
+    //       `itlb_hit && !i_perm_ok`) routed through the fetch_buffer.
+    //   (b) mmu_i_fault_ptw — PTW-completion portion (term2, fired
+    //       when a PTW walk for instruction translation hits an
+    //       invalid PTE). Goes through the legacy direct path.
+    .mmu_i_fault_i              (i_buf_page_fault | mmu_i_fault_ptw),
+    .mmu_i_fault_addr_i         (mmu_i_fault_ptw ? mmu_i_fault_ptw_addr
+                                                 : aligner_pc_id),
     .mmu_d_fault_i              (mmu_d_fault),
     .mmu_d_fault_addr_i         (mmu_d_fault_addr),
-    .mmu_i_access_fault_i       (mmu_i_access_fault),
-    .mmu_i_access_fault_addr_i  (mmu_i_access_fault_addr),
+    // Phase 4.8: i-side PMP access fault has TWO sources after the
+    // wrong-path bug fix:
+    //   (a) i_buf_access_fault — the comb portion of mmu_i_access_fault_o
+    //       (formerly term1, `i_req_i && i_pmp_fault`) routed through
+    //       the fetch_buffer / aligner so it fires from the same
+    //       pipeline slot as the in-flight branch ahead of it.
+    //   (b) mmu_i_access_fault_ptw — the PTW-completion portion
+    //       (formerly term2, `ptw_state == PTW_FAULT && ptw_for_insn
+    //       && ptw_pmp_fault_r`) which has no live imem.req cycle to
+    //       ride the buffer and must keep firing through the legacy
+    //       direct path. This path is what makes pmp_check_on_pte_*
+    //       complete instead of hanging.
+    // The address mux prefers the PTW source when both fire on the
+    // same cycle (rare; only happens if a stale comb fault from a
+    // wrong-path req coincides with a PTW completion).
+    .mmu_i_access_fault_i       (i_buf_access_fault | mmu_i_access_fault_ptw),
+    .mmu_i_access_fault_addr_i  (mmu_i_access_fault_ptw ? mmu_i_access_fault_ptw_addr
+                                                        : aligner_pc_id),
     .mmu_d_access_fault_i       (mmu_d_access_fault),
     .mmu_d_access_fault_addr_i  (mmu_d_access_fault_addr),
     // Registered faults (to interrupt_ctrl)
@@ -739,6 +791,61 @@ always_ff @(posedge clk_i) begin
         inflight_vaddr_q <= i_vaddr;
 end
 
+// ── Phase 4.8: route instruction-side faults through fetch_buffer ────────
+// Wrong-path-bug fix for the PMP cluster + vm_A_and_D residual.
+//
+// Background. `mmu_i_access_fault_o` and `mmu_i_fault_o` both have a
+// COMBINATIONAL term that fires the SAME cycle the producer issues
+// imem.req (term1: `i_req_i && i_pmp_fault` for access faults;
+// `itlb_hit && !i_perm_ok` for page faults from ITLB-hit perm fails,
+// e.g. an A-bit-clear PTE). For an unconditional jump (e.g.
+// `j 0x8000078c` at PC 0x80000764), the producer issues a sequential
+// prefetch for PC+4 = 0x80000768 ONE cycle after the JAL fetch. If
+// 0x80000768 lives in a no-perm PMP region (PMP cluster) or on a
+// page with cleared A/D bit (vm_A_and_D), the comb fault fires the
+// same cycle. Two cycles later, before the JAL has reached IE, the
+// legacy path latches the fault into trap_sequencer and interrupt_ctrl
+// fires a sync trap with mepc = wrong-path PC. The JAL never commits
+// — it gets clobbered by the trap's IE flush. The result is one EXTRA
+// trap that spike never sees (spike is non-speculative).
+//
+// Fix. Latch the comb fault into `inflight_i_fault_q` at imem.req
+// time, ride it through the fetch_buffer on the same entry as the rdata
+// (using the existing fault/cause fields), and only fire the trap when
+// the buffer entry has actually reached the aligner head AND no older
+// in-flight redirect (branch / xRET / debug-resume) is firing this cycle.
+// Combined with the natural fetch_flush on `arb_redirect_valid`, this
+// guarantees the wrong-path entry is squashed before its fault can leak.
+//
+// PTW-completion versions of i_fault / i_access_fault keep firing
+// through the legacy direct-to-trap_sequencer path (the
+// `mmu_i_*_fault_ptw` outputs added to mmu_sv32 expose just term2 of
+// the legacy outputs). PTW completion has no live imem.req cycle to
+// ride the buffer, but it's also naturally delayed by the PTW window
+// so it doesn't suffer the wrong-path bug.
+//
+// Priority on capture: access fault wins over page fault on the same
+// cycle (PMP is checked before MMU translation per the RISC-V spec).
+logic       inflight_i_fault_q;
+logic [4:0] inflight_i_cause_q;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        inflight_i_fault_q <= 1'b0;
+        inflight_i_cause_q <= 5'd0;
+    end else if (imem_port.req) begin
+        if (mmu_i_access_fault) begin
+            inflight_i_fault_q <= 1'b1;
+            inflight_i_cause_q <= 5'd1;   // INSN_ACCESS_FAULT
+        end else if (mmu_i_fault) begin
+            inflight_i_fault_q <= 1'b1;
+            inflight_i_cause_q <= 5'd12;  // INSN_PAGE_FAULT
+        end else begin
+            inflight_i_fault_q <= 1'b0;
+            inflight_i_cause_q <= 5'd0;
+        end
+    end
+end
+
 // inflight_q tracks "a fetch is on the bus, waiting for rvalid".
 //
 // Priority on the same cycle:
@@ -786,8 +893,12 @@ assign fb_push_entry.word  = imem_port.rdata;
 // the aligner's half_index already tracks which half is "current" via
 // redirect_target_i[1].
 assign fb_push_entry.vaddr = {inflight_vaddr_q[31:2], 2'b00};
-assign fb_push_entry.fault = 1'b0;  // Phase 3: faults still via legacy mmu_i_fault path
-assign fb_push_entry.cause = 5'b0;
+// Phase 4.8: route comb i-side faults through the buffer (see big
+// comment above on inflight_i_fault_q). Both access faults (cause 1)
+// and page faults (cause 12) take this path; PTW-completion faults
+// keep firing through the legacy direct mmu_i_*_fault_ptw path.
+assign fb_push_entry.fault = inflight_i_fault_q;
+assign fb_push_entry.cause = inflight_i_cause_q;
 
 // Aligner output wires (forward declared so the producer back-pressure
 // computed below can reference fb_full / fb_count from the buffer).
@@ -1188,8 +1299,18 @@ always_ff@(posedge clk_i or posedge reset_i)
 			predicted_pc_ie <= 0;
 		end
 		else if(!ie_stall && aligner_valid) begin
-			// Capture a real instruction from the aligner.
-			ctrl_bus_ie <= ctrl_bus_if_id;
+			// Phase 4.8: a fault marker from the fetch_buffer (an entry
+			// whose imem.req faulted on PMP) emerges here as
+			// `aligner_fault=1`. The decoder reads the (garbage) word
+			// and produces an arbitrary ctrl_bus_if_id; we MUST NOT
+			// let that arbitrary instruction execute. Capture NOP
+			// instead, and rely on i_buf_access_fault → trap_sequencer
+			// (declared near the trap_sequencer instantiation) to fire
+			// the actual sync trap one cycle later. pc_ie is left at
+			// the faulting PC for trace fidelity; the trap's epc comes
+			// from i_access_fault_addr_r (= aligner_pc_id at latch
+			// time) so the value of pc_ie doesn't reach the CSR.
+			ctrl_bus_ie <= aligner_fault ? CTRL_BUS_NOP() : ctrl_bus_if_id;
 			pc_ie <= pc_id;
 			imm_ie <= imm_id;
 			rs1_forwarded_ie <= rs1_forwarded_id;
@@ -1491,7 +1612,13 @@ mmu_sv32 mmu_inst (
   .i_access_fault_o      (mmu_i_access_fault),
   .i_access_fault_addr_o (mmu_i_access_fault_addr),
   .d_access_fault_o      (mmu_d_access_fault),
-  .d_access_fault_addr_o (mmu_d_access_fault_addr)
+  .d_access_fault_addr_o (mmu_d_access_fault_addr),
+  // Phase 4.8: PTW-completion-only fault terms for the buffer-routed
+  // i-side fault fix. See big comment near `inflight_i_fault_q`.
+  .i_fault_ptw_o            (mmu_i_fault_ptw),
+  .i_fault_ptw_addr_o       (mmu_i_fault_ptw_addr),
+  .i_access_fault_ptw_o     (mmu_i_access_fault_ptw),
+  .i_access_fault_ptw_addr_o(mmu_i_access_fault_ptw_addr)
 );
 
 alu alu_inst

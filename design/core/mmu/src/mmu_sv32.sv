@@ -53,7 +53,22 @@ module mmu_sv32 (
     output logic        i_access_fault_o,
     output logic [31:0] i_access_fault_addr_o,
     output logic        d_access_fault_o,
-    output logic [31:0] d_access_fault_addr_o
+    output logic [31:0] d_access_fault_addr_o,
+
+    // ── Phase 4.8: split-out PTW-completion versions of i_fault_o /
+    // i_access_fault_o. Core_top routes the COMB portion of the i-side
+    // faults through the fetch_buffer (to fix the wrong-path PMP bug),
+    // but the PTW-completion portion has no corresponding live imem.req
+    // and must keep firing through the legacy direct path. These two
+    // outputs expose just the PTW_FAULT-state contributions so core_top
+    // can OR them with the buffer-routed signal at the trap_sequencer
+    // input. _ptw_o asserts only when the fault originates from a PTW
+    // walk that completed in PTW_FAULT state for an instruction-side
+    // translation.
+    output logic        i_fault_ptw_o,
+    output logic [31:0] i_fault_ptw_addr_o,
+    output logic        i_access_fault_ptw_o,
+    output logic [31:0] i_access_fault_ptw_addr_o
 );
 
     // ── Translation enable ───────────────────────────────────────
@@ -500,11 +515,22 @@ module mmu_sv32 (
     assign i_fault_o = (!flush_i && i_translate && i_req_i && itlb_hit && !i_perm_ok) ||
                        (i_translate && ptw_state == PTW_FAULT && ptw_for_insn && !ptw_pmp_fault_r);
     assign i_fault_addr_o = (ptw_state == PTW_FAULT && ptw_for_insn) ? ptw_vaddr : i_vaddr_i;
+    // Phase 4.8: PTW-completion-only version (term2 of i_fault_o). The
+    // legacy i_fault_o path stays for backward compat; core_top picks
+    // either it or this _ptw_o version depending on whether it routes
+    // the comb portion through the fetch_buffer.
+    assign i_fault_ptw_o      = i_translate && (ptw_state == PTW_FAULT) &&
+                                ptw_for_insn && !ptw_pmp_fault_r;
+    assign i_fault_ptw_addr_o = ptw_vaddr;
     // Access faults (cause 1): PMP denial on fetch or PTW PMP fault for insn
     // Instruction PMP fault is registered (mmu_i_access_fault_r in core_top), no comb loop risk
     assign i_access_fault_o = (i_req_i && i_pmp_fault) ||
                               (ptw_state == PTW_FAULT && ptw_for_insn && ptw_pmp_fault_r);
     assign i_access_fault_addr_o = (ptw_state == PTW_FAULT && ptw_for_insn) ? ptw_vaddr : i_vaddr_i;
+    // Phase 4.8: PTW-completion-only version (term2 of i_access_fault_o).
+    assign i_access_fault_ptw_o      = (ptw_state == PTW_FAULT) &&
+                                       ptw_for_insn && ptw_pmp_fault_r;
+    assign i_access_fault_ptw_addr_o = ptw_vaddr;
 
     // Data side
     assign d_paddr_o = d_paddr_out;
