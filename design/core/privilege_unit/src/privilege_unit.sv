@@ -2,20 +2,18 @@ import common_pkg::*;
 import core_pkg::*;
 
 // ── Privilege Unit ──────────────────────────────────────────────────────────
-// Centralises all privilege-related combinational checks and registered state
-// that was previously scattered across core_top.  Pure-refactor: behaviour is
-// identical to the original inline logic.
+// Centralises privilege-related combinational checks. Phase 4.6 trap revamp
+// reduced this module to just the illegal-instruction detector — the
+// xRET commit logic (ret_valid / ret_fire / sret_fire / ret_side_effects)
+// moved to wb_trap_unit (IWB-stage commit) in Phase 4.3, eliminating the
+// csr_ret_hazard race entirely. mmu_priv override is also gone — by the
+// time the redirect target's fetch happens, csr_unit's priv_level has
+// already updated, so a plain `priv_level` view is correct.
 //
 // Owns:
 //   - Illegal instruction detection (CSR priv, MRET/SRET priv, TVM)
-//   - MRET/SRET fire signals and ret_side_effects_done one-shot
-//   - Effective privilege for instruction-side MMU (mmu_priv)
-//   - ret_valid computation
 //
 module privilege_unit (
-    input  logic        clk_i,
-    input  logic        reset_i,
-
     // ── Current privilege state (from CSR unit) ─────────────────────────
     input  logic [1:0]  priv_level_i,
     input  logic [31:0] status_csr_i,      // MSTATUS register
@@ -27,25 +25,10 @@ module privilege_unit (
     input  csr_op_e     id_csr_op_i,       // .csr_op
     input  logic [11:0] id_csr_addr_i,     // .csr_addr
 
-    // ── Pipeline state ──────────────────────────────────────────────────
-    input  logic        insn_valid_id_i,   // from hazard_unit
-    input  logic        csr_ret_hazard_i,  // from hazard_unit
-    input  onebit_sig_e ie_stall_i,        // IE stage stalled (DTLB miss, mul, etc.)
-    input  onebit_sig_e interrupt_valid_i,  // trap firing
-
     // ── Illegal instruction outputs ─────────────────────────────────────
     output logic        illegal_mret_o,
     output logic        illegal_sret_o,
-    output logic        illegal_insn_id_o,
-
-    // ── Return instruction control ──────────────────────────────────────
-    output onebit_sig_e ret_valid_o,
-    output logic        ret_fire_o,        // to CSR unit .ret_i
-    output logic        sret_fire_o,       // to CSR unit .sret_i
-    output logic        ret_side_effects_done_o,
-
-    // ── Effective privilege for instruction-side MMU ─────────────────────
-    output logic [1:0]  mmu_priv_o
+    output logic        illegal_insn_id_o
 );
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -58,13 +41,12 @@ wire csr_access = (id_csr_op_i == WRITE_CSR) ||
                   (id_csr_op_i == CLEAR_CSR);
 wire illegal_csr_priv = csr_access && (priv_level_i < id_csr_addr_i[9:8]);
 
-// MRET requires M-mode; SRET requires at least S-mode.
-// Once ret_side_effects_done, the xRET has already committed its CSR side
-// effects from ID — don't flag as illegal due to the (now-updated) priv level.
-assign illegal_mret_o = (id_mret_i == TRUE) && (priv_level_i != 2'b11) &&
-                         !ret_side_effects_done_o;
-assign illegal_sret_o = (id_sret_i == TRUE) && (priv_level_i < 2'b01) &&
-                         !ret_side_effects_done_o;
+// MRET requires M-mode; SRET requires at least S-mode. With Phase 4.3
+// xRET commits at IWB so by the time the carrier reaches IWB the
+// priv_level is whatever it should be — the old `ret_side_effects_done`
+// guard is no longer needed.
+assign illegal_mret_o = (id_mret_i == TRUE) && (priv_level_i != 2'b11);
+assign illegal_sret_o = (id_sret_i == TRUE) && (priv_level_i < 2'b01);
 
 // TVM enforcement: SATP access or SFENCE.VMA from S-mode when mstatus.TVM=1
 wire tvm_active         = status_csr_i[20] && (priv_level_i == 2'b01);
@@ -73,64 +55,6 @@ wire illegal_sfence_tvm = tvm_active && (id_sfence_vma_i == TRUE);
 
 assign illegal_insn_id_o = illegal_csr_priv | illegal_mret_o | illegal_sret_o
                          | illegal_satp_tvm | illegal_sfence_tvm;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// MRET/SRET return instruction control
-// ═══════════════════════════════════════════════════════════════════════════
-
-// ret_valid drives the redirect arbiter (and hence the aligner flush). It
-// MUST be gated by csr_ret_hazard_i in Phase 3, otherwise the following
-// race occurs:
-//   Cycle K   : csrrw mepc in IE, mret in ID, csr_ret_hazard=1.
-//               ret_valid=1 → arbiter redirects → aligner flush.
-//               ret_fire=0  (correctly gated) → priv_level NOT updated.
-//               if_id_stall=1 holds the IE wall, but the aligner flush has
-//               already evicted the mret from the head.
-//   Cycle K+1 : csrrw mepc has committed, csr_ret_hazard=0, but the mret
-//               is gone — its side effects (priv/mstatus update) never
-//               fired, and the new code runs in stale (M) priv.
-// Gating ret_valid_o by !csr_ret_hazard_i defers BOTH the redirect and
-// the aligner flush by one cycle, so on cycle K+1 the mret is still in
-// ID and ret_fire / ret_valid fire together against the freshly-committed
-// mepc value.
-assign ret_valid_o = onebit_sig_e'(((id_mret_i && !illegal_mret_o) ||
-                                    (id_sret_i && !illegal_sret_o)) && insn_valid_id_i &&
-                                    !csr_ret_hazard_i);
-
-// Gate by !ie_stall: don't commit privilege change while IE has a pending
-// DTLB walk or multicycle op — the old privilege must remain active until
-// the IE instruction completes (its DTLB permission check uses live priv).
-assign ret_fire_o  = id_mret_i && insn_valid_id_i && !illegal_mret_o &&
-                     !ret_side_effects_done_o && !csr_ret_hazard_i &&
-                     !ie_stall_i && !interrupt_valid_i;
-assign sret_fire_o = id_sret_i && insn_valid_id_i && !illegal_sret_o &&
-                     !ret_side_effects_done_o && !csr_ret_hazard_i &&
-                     !ie_stall_i && !interrupt_valid_i;
-
-// One-shot flag: commit xRET CSR side effects on the first valid cycle,
-// then hold until the xRET leaves ID (or a trap fires).
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i)
-        ret_side_effects_done_o <= 1'b0;
-    else if (interrupt_valid_i)
-        ret_side_effects_done_o <= 1'b0;
-    else if ((ret_fire_o || sret_fire_o) && !ret_side_effects_done_o)
-        ret_side_effects_done_o <= 1'b1;
-    else if (!ret_valid_o)
-        ret_side_effects_done_o <= 1'b0;
-end
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Effective privilege for instruction-side MMU (MRET/SRET override)
-// ═══════════════════════════════════════════════════════════════════════════
-// On MRET/SRET the fetch address is the return target (mepc/sepc) which lives
-// in the target privilege's address space.  Override mmu_priv with the target
-// privilege so the MMU resolves the correct physical address.
-wire [1:0] ret_target_priv = id_mret_i ? status_csr_i[12:11] :   // MRET: MPP
-                                          {1'b0, status_csr_i[8]}; // SRET: SPP
-
-assign mmu_priv_o = (ret_valid_o && !csr_ret_hazard_i && !ret_side_effects_done_o)
-                    ? ret_target_priv : priv_level_i;
 
 // Note: PLIC claim/complete is now fully memory-mapped (no sideband signals).
 // Software reads PLIC claim register to claim, writes to complete.

@@ -75,7 +75,6 @@ onebit_sig_e bpu_mispredict;       // BPU: prediction != resolution
 logic [31:0] predicted_pc_id;      // BPU: fall-through PC at ID stage
 logic [31:0] predicted_pc_ie;      // BPU: fall-through PC flopped into IE
 onebit_sig_e interrupt_valid;
-onebit_sig_e ret_valid;
 onebit_sig_e debug_valid;
 ctrl_bus_e ctrl_bus_if_id;
 ctrl_bus_e ctrl_bus_ie;
@@ -217,16 +216,20 @@ logic [31:0] mmu_i_access_fault_addr_r, mmu_d_access_fault_addr_r;
 
 // privilege_unit forward declaration so trap_sequencer can read it
 // (privilege_unit_inst is instantiated later in the file)
-logic ret_side_effects_done;
+//
+// Phase 4.6: trap_sequencer's xRET-related inputs (ret_valid_i, sret_i,
+// ret_side_effects_done_i) are tied off — xRET commit moved to wb_trap_unit
+// at IWB. trap_sequencer's surviving job is to register MMU faults so the
+// legacy interrupt_ctrl path can read them stably.
 
 trap_sequencer trap_seq_inst (
     .clk_i              (clk_i),
     .reset_i            (reset_i),
     // Pipeline events
     .interrupt_valid_i        (interrupt_valid),
-    .ret_valid_i              (ret_valid),
-    .sret_i                   (ctrl_bus_if_id.sret == TRUE),
-    .ret_side_effects_done_i  (ret_side_effects_done),
+    .ret_valid_i              (1'b0),                  // Phase 4.6: xRET at IWB
+    .sret_i                   (1'b0),                  // Phase 4.6: xRET at IWB
+    .ret_side_effects_done_i  (1'b0),                  // Phase 4.6: xRET at IWB
     .branch_taken_i           (branch_taken_valid),
     .if_id_stall_i            (if_id_stall),
     .mmu_i_stall_i            (mmu_i_stall),
@@ -326,7 +329,6 @@ debug_ctrl debug_ctrl_inst (
 
 // ── Hazard Unit ─────────────────────────────────────────────────────────
 // Centralised stall / flush / post-trap logic (was inline).
-wire csr_ret_hazard;
 logic refetch_after_trap;
 
 hazard_unit hazard_unit_inst (
@@ -359,13 +361,6 @@ hazard_unit hazard_unit_inst (
     .exception_from_ie_i(exception_from_ie),
     // Processor state
     .halted_i           (halted_o),
-    // CSR ret hazard
-    .id_mret_i          (ctrl_bus_if_id.mret),
-    .id_sret_i          (ctrl_bus_if_id.sret),
-    .illegal_mret_i     (illegal_mret),
-    .illegal_sret_i     (illegal_sret),
-    .ie_csr_op_i        (ctrl_bus_ie.csr_op),
-    .ie_csr_addr_i      (ctrl_bus_ie.csr_addr),
     // Stall outputs
     .if_id_stall_o      (if_id_stall),
     .ie_stall_o         (ie_stall),
@@ -381,9 +376,7 @@ hazard_unit hazard_unit_inst (
     // Instruction validity
     .insn_valid_id_o    (insn_valid_id),
     // Fetch control
-    .refetch_after_trap_o(refetch_after_trap),
-    // CSR ret hazard
-    .csr_ret_hazard_o   (csr_ret_hazard)
+    .refetch_after_trap_o(refetch_after_trap)
 );
 
 assign interrupt_valid = onebit_sig_e'(trap_true);
@@ -393,13 +386,12 @@ assign debug_valid =  onebit_sig_e'(resumeack_o);
 // Centralised privilege checks, xRET fire/one-shot, mmu_priv, PLIC protocol.
 wire illegal_mret, illegal_sret, illegal_insn_id;
 wire csr_invalid;  // unimplemented CSR accessed in IE stage
-wire ret_fire, sret_fire;
-// `ret_side_effects_done` is forward-declared near the trap_sequencer above.
-wire [1:0] mmu_priv;
 
+// Phase 4.6: privilege_unit reduced to illegal-instruction detection only.
+// xRET commit moved to wb_trap_unit (Phase 4.3); mmu_priv override removed
+// (priv_level updates at the cycle the xRET commits in IWB, so the
+// next-fetch path uses the right priv naturally — no override needed).
 privilege_unit privilege_unit_inst (
-    .clk_i              (clk_i),
-    .reset_i            (reset_i),
     // Current privilege state
     .priv_level_i       (priv_level),
     .status_csr_i       (status_csr),
@@ -409,23 +401,15 @@ privilege_unit privilege_unit_inst (
     .id_sfence_vma_i    (ctrl_bus_if_id.sfence_vma),
     .id_csr_op_i        (ctrl_bus_if_id.csr_op),
     .id_csr_addr_i      (ctrl_bus_if_id.csr_addr),
-    // Pipeline state
-    .insn_valid_id_i    (insn_valid_id),
-    .csr_ret_hazard_i   (csr_ret_hazard),
-    .ie_stall_i         (ie_stall),
-    .interrupt_valid_i  (interrupt_valid),
     // Illegal instruction outputs
     .illegal_mret_o     (illegal_mret),
     .illegal_sret_o     (illegal_sret),
-    .illegal_insn_id_o  (illegal_insn_id),
-    // Return instruction control
-    .ret_valid_o        (ret_valid),
-    .ret_fire_o         (ret_fire),
-    .sret_fire_o        (sret_fire),
-    .ret_side_effects_done_o(ret_side_effects_done),
-    // MMU privilege
-    .mmu_priv_o         (mmu_priv)
+    .illegal_insn_id_o  (illegal_insn_id)
 );
+
+// MMU instruction-side privilege view: just the live priv_level. The old
+// MRET/SRET override path is gone (see comment above).
+wire [1:0] mmu_priv = priv_level;
 
 // exception_from_ie now driven by interrupt_ctrl (misalign detection moved there)
 

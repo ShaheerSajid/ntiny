@@ -49,14 +49,6 @@ module hazard_unit (
     // ── Processor state ─────────────────────────────────────────────────
     input  logic        halted_i,           // debug halted (pstate == HALTED)
 
-    // ── CSR ret-hazard detection inputs ─────────────────────────────────
-    input  logic        id_mret_i,          // ctrl_bus_if_id.mret
-    input  logic        id_sret_i,          // ctrl_bus_if_id.sret
-    input  logic        illegal_mret_i,
-    input  logic        illegal_sret_i,
-    input  csr_op_e     ie_csr_op_i,        // ctrl_bus_ie.csr_op
-    input  logic [11:0] ie_csr_addr_i,      // ctrl_bus_ie.csr_addr
-
     // ── Stall outputs ───────────────────────────────────────────────────
     output onebit_sig_e if_id_stall_o,
     output onebit_sig_e ie_stall_o,
@@ -76,10 +68,7 @@ module hazard_unit (
     output logic        insn_valid_id_o,
 
     // ── Fetch control ───────────────────────────────────────────────────
-    output logic        refetch_after_trap_o,
-
-    // ── CSR ret hazard ──────────────────────────────────────────────────
-    output logic        csr_ret_hazard_o
+    output logic        refetch_after_trap_o
 );
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -94,14 +83,10 @@ assign ie_stall_o   = onebit_sig_e'(imem_stall_o | alu_stall_i | dmem_busy |
                                      misalign_stall_i | pmp_d_fault_i |
                                      d_page_fault_i);
 
-// CSR read-after-write hazard: deprecated in Phase 4 — xRET resolves at
-// IWB so by definition the older csrrw mepc/sepc has already committed.
-// Tied off here; the input ports stay for the legacy interface but their
-// values are ignored. Will be deleted in the Phase 4 cleanup pass.
-assign csr_ret_hazard_o = 1'b0;
-wire _unused_csr_ret_inputs = &{1'b0, id_mret_i, id_sret_i,
-                                 illegal_mret_i, illegal_sret_i,
-                                 ie_csr_op_i, ie_csr_addr_i};
+// CSR read-after-write hazard removed in Phase 4.6: xRET resolves at IWB
+// so by definition the older csrrw mepc/sepc has already committed before
+// the carrier reaches wb_trap_unit. The whole hazard logic, the legacy
+// ID-stage ret_valid path, and the privilege_unit one-shot are gone.
 
 // Phase 3: id_no_insn_stall is the new "ID has no real instruction"
 // stall source. It fires when the compressed_aligner has nothing to
