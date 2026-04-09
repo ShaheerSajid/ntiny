@@ -74,7 +74,16 @@ module interrupt_ctrl (
     output [31:0] mtval_o,
     output [31:0] interrupt_src_o,
     // Exception side-effect: suppress memory op on misalign
-    output       exception_from_ie_o
+    output       exception_from_ie_o,
+
+    // ── Phase 4 trap revamp: level-signal interrupt pending feeds ──
+    // wb_trap_unit (resolves at IWB).  These do NOT depend on the IE
+    // pipeline state — they're purely "is there an enabled, pending
+    // interrupt for the current priv that the current global IE allows".
+    // Cause encoding matches the legacy ecause (cause_code field).
+    output       interrupt_pending_o,
+    output [4:0] interrupt_cause_o,
+    output       interrupt_to_s_o
 );
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -235,5 +244,48 @@ wire [31:0] base_addr = {vec_i[31:2], 2'b00};
 assign handler_addr_o = (vec_i[0] && is_interrupt) ? (base_addr + {24'b0, cause_code, 2'b00}) : base_addr;
 
 assign interrupt_src_o = {20'd0, ext_itr_i, 3'b000, timer_itr_i, 3'b000, soft_itr_i, 3'b000};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 4 trap revamp: pure level-signal interrupt outputs
+// ═══════════════════════════════════════════════════════════════════════════
+// These do NOT depend on the IE pipeline state (no sync_exception
+// arbitration, no insn_valid_id gate). They report "is there an
+// enabled, pending interrupt waiting for the current priv level"
+// — wb_trap_unit at IWB will combine this with insn_valid_iwb_i to
+// decide whether to fire it on the carrier instruction.
+//
+// Cause encoding mirrors the legacy ecause_o[4:0] (IRQ bits dropped):
+//   M-ext = 11, M-soft = 3, M-timer = 7
+//   S-ext = 9,  S-soft = 1, S-timer = 5
+// Priority order matches the legacy precedence (M before S, ext before
+// soft before timer within each priv).
+logic [4:0] async_cause_only;
+logic       async_to_s_only;
+always_comb begin
+    async_cause_only = 5'd0;
+    async_to_s_only  = 1'b0;
+    if (external_valid && m_ie_global) begin
+        async_cause_only = 5'd11;
+        async_to_s_only  = (priv_i != 2'b11) && mideleg_i[11];
+    end else if (software_valid && m_ie_global) begin
+        async_cause_only = 5'd3;
+        async_to_s_only  = (priv_i != 2'b11) && mideleg_i[3];
+    end else if (timer_valid && m_ie_global) begin
+        async_cause_only = 5'd7;
+        async_to_s_only  = (priv_i != 2'b11) && mideleg_i[7];
+    end else if (s_external_valid && s_ie_global) begin
+        async_cause_only = 5'd9;
+        async_to_s_only  = (priv_i != 2'b11) && mideleg_i[9];
+    end else if (s_software_valid && s_ie_global) begin
+        async_cause_only = 5'd1;
+        async_to_s_only  = (priv_i != 2'b11) && mideleg_i[1];
+    end else if (s_timer_valid && s_ie_global) begin
+        async_cause_only = 5'd5;
+        async_to_s_only  = (priv_i != 2'b11) && mideleg_i[5];
+    end
+end
+assign interrupt_pending_o = async_valid;
+assign interrupt_cause_o   = async_cause_only;
+assign interrupt_to_s_o    = async_to_s_only;
 
 endmodule

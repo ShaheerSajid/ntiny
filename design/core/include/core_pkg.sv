@@ -319,6 +319,22 @@ typedef enum logic [2:0] {
 	RDR_BRANCH = 3'd5
 } redirect_kind_e;
 
+// Per-instruction "what to do at writeback" tag (Phase 4 trap revamp).
+// Set at the detection stage of each fault/system instruction and
+// propagated through the IE/IMEM/IWB register walls inside ctrl_bus_e.
+// Resolved atomically at IWB by wb_trap_unit, which performs the
+// pipeline flush, CSR side effects, priv switch and PC redirect.
+//   WB_NONE  : normal retirement
+//   WB_TRAP  : take a synchronous trap (cause/tval already known at tag time)
+//   WB_XRET  : commit mret/sret (read mepc/sepc, switch priv, redirect)
+//   WB_DRET  : commit dret (read dpc, exit debug mode, redirect)
+typedef enum logic [1:0] {
+	WB_NONE = 2'd0,
+	WB_TRAP = 2'd1,
+	WB_XRET = 2'd2,
+	WB_DRET = 2'd3
+} wb_event_e;
+
 // Control bus — decoded instruction fields, propagated through pipeline stages.
 // Groups: instruction type, branch, memory, ALU/MUL/FPU/BIT ops, CSR, register addresses, writeback.
 typedef struct {
@@ -357,6 +373,12 @@ typedef struct {
   onebit_sig_e sfence_vma;        // SFENCE.VMA instruction
   onebit_sig_e fence_i;           // FENCE.I instruction (flush I-cache)
   onebit_sig_e predicted_taken;   // BPU: was this branch predicted taken?
+  // ── Phase 4 trap revamp: per-instruction WB event tag ──
+  // Detected at decode/IF/IE depending on the source, propagated through
+  // the IE/IMEM/IWB register walls, resolved atomically by wb_trap_unit.
+  wb_event_e   wb_event;          // NONE / TRAP / XRET / DRET
+  logic [4:0]  wb_cause;           // mcause to write (only meaningful when wb_event==WB_TRAP)
+  logic [31:0] wb_tval;            // mtval to write (only meaningful when wb_event==WB_TRAP)
 } ctrl_bus_e;
 
 // NOP control bundle — used as pipeline flush/reset value.
@@ -397,6 +419,9 @@ function automatic ctrl_bus_e CTRL_BUS_NOP();
 	CTRL_BUS_NOP.sfence_vma      = FALSE;
 	CTRL_BUS_NOP.fence_i         = FALSE;
 	CTRL_BUS_NOP.predicted_taken = FALSE;
+	CTRL_BUS_NOP.wb_event        = WB_NONE;
+	CTRL_BUS_NOP.wb_cause        = 5'd0;
+	CTRL_BUS_NOP.wb_tval         = 32'd0;
 endfunction
 
 endpackage

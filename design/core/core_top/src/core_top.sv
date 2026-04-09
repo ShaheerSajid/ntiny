@@ -143,6 +143,26 @@ logic async_trap;   // async interrupt only (for CSR write suppression)
 logic [31:0]ip_csr;
 logic [31:0]ie_csr;
 logic [31:0]vec_csr;
+logic [31:0]mtvec_csr;       // Phase 4 trap revamp: unmuxed mtvec for wb_trap_unit
+logic [31:0]stvec_csr;       // Phase 4 trap revamp: unmuxed stvec for wb_trap_unit
+// Phase 4 trap revamp: pure level-signal interrupt status from interrupt_ctrl
+logic        interrupt_pending;
+logic [4:0]  interrupt_cause;
+logic        interrupt_to_s_lvl;
+// Phase 4 trap revamp: wb_trap_unit outputs (parallel/observe-only in Phase 4.2,
+// drive the redirect_arbiter/csr_unit in Phase 4.3 onward).
+logic            wb_trap_fire;
+logic            wb_xret_fire;
+logic            wb_dret_fire;
+logic [4:0]      wb_cause;
+logic [31:0]     wb_tval;
+logic [31:0]     wb_epc;
+logic            wb_trap_to_s;
+logic            wb_is_async;
+logic            wb_redirect_valid;
+logic [31:0]     wb_redirect_target;
+redirect_kind_e  wb_redirect_kind;
+logic            wb_kill_iwb;
 logic [31:0]status_csr;
 logic [31:0]handler_addr;
 logic [31:0]ecause_csr;
@@ -1060,7 +1080,11 @@ interrupt_ctrl interrupt_ctrl_inst
   .epc_o              (epc_csr),
   .mtval_o            (mtval_csr),
   .interrupt_src_o    (interrupt_src),
-  .exception_from_ie_o(exception_from_ie)
+  .exception_from_ie_o(exception_from_ie),
+  // Phase 4 trap revamp: level-signal interrupt outputs for wb_trap_unit
+  .interrupt_pending_o(interrupt_pending),
+  .interrupt_cause_o  (interrupt_cause),
+  .interrupt_to_s_o   (interrupt_to_s_lvl)
 );
 
 // ============================================================
@@ -1289,6 +1313,8 @@ csr_unit csr_unit_inst
   .ip_o                 (ip_csr),
   .ie_o                 (ie_csr),
   .vec_o                (vec_csr),
+  .mtvec_o              (mtvec_csr),
+  .stvec_o              (stvec_csr),
   .status_o             (status_csr),
   .epc_o                (epc),
   .sepc_o               (sepc),
@@ -1298,6 +1324,51 @@ csr_unit csr_unit_inst
   .satp_o               (satp_csr),
   .pmpcfg_o             (pmpcfg_csr),
   .pmpaddr_o            (pmpaddr_csr)
+);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 4 trap revamp: wb_trap_unit (parallel/observe-only in Phase 4.2)
+// ═══════════════════════════════════════════════════════════════════════════
+// Resolves traps, interrupts and mret/sret/dret atomically at the IWB
+// stage. In Phase 4.2 the unit is instantiated and its outputs are
+// computed but NOT yet driving the redirect_arbiter or csr_unit — those
+// stay on the legacy interrupt_ctrl/privilege_unit path. Phase 4.3 cuts
+// the trap path over; Phase 4.4 cuts xRET over and deletes csr_ret_hazard.
+//
+// dpc_i is wired in but Phase 4 hasn't tagged dret yet (it stays on the
+// existing debug_ctrl path), so wb_dret_fire is permanently 0 for now.
+wb_trap_unit wb_trap_unit_inst (
+    .clk_i               (clk_i),
+    .reset_i             (reset_i),
+
+    .ctrl_bus_iwb_i      (ctrl_bus_iwb),
+    .pc_iwb_i            (pc_iwb),
+    .insn_valid_iwb_i    (~stale_iwb),
+
+    .interrupt_pending_i (interrupt_pending),
+    .interrupt_cause_i   (interrupt_cause),
+    .interrupt_to_s_i    (interrupt_to_s_lvl),
+
+    .mepc_i              (epc),
+    .sepc_i              (sepc),
+    .dpc_i               (dpc),
+    .mtvec_i             (mtvec_csr),
+    .stvec_i             (stvec_csr),
+    .medeleg_i           (medeleg),
+    .priv_i              (priv_level),
+
+    .trap_fire_o         (wb_trap_fire),
+    .xret_fire_o         (wb_xret_fire),
+    .dret_fire_o         (wb_dret_fire),
+    .cause_o             (wb_cause),
+    .tval_o              (wb_tval),
+    .epc_o               (wb_epc),
+    .trap_to_s_o         (wb_trap_to_s),
+    .is_async_o          (wb_is_async),
+    .redirect_valid_o    (wb_redirect_valid),
+    .redirect_target_o   (wb_redirect_target),
+    .redirect_kind_o     (wb_redirect_kind),
+    .kill_iwb_o          (wb_kill_iwb)
 );
 
 // ── Sv32 MMU ─────────────────────────────────────────────────

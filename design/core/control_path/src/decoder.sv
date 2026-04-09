@@ -444,5 +444,41 @@ assign ctrl_bus_o.sfence_vma = onebit_sig_e'(csr_op == SYSTEM && instruction_i[3
 assign ctrl_bus_o.fence_i = onebit_sig_e'(instruction_i[6:0] == 7'b0001111 && instruction_i[14:12] == 3'b001);
 assign ctrl_bus_o.predicted_taken = FALSE; // BPU: static not-taken default (future BTB overrides in core_top)
 
+// ── Phase 4 trap revamp: WB-event tagging (additive, not consumed yet) ──
+// The decoder tags the easy ID-detected events here. core_top tags the
+// fetch-side faults (page/access fault) by overwriting wb_event on the
+// ID→IE register-wall write, and the IE-side faults (misalign, dmem PMP,
+// dmem page fault) similarly. Illegal-CSR / xRET-priv-violation tags
+// are layered on top in core_top from privilege_unit's combinational
+// `illegal_*` outputs (decoder doesn't know the runtime priv level).
+//
+// This block sets a sane default and the system-instruction tags. The
+// rest of the pipeline still goes through the legacy interrupt_ctrl
+// path until Phase 4.3 cuts it over to wb_trap_unit.
+always_comb begin
+    ctrl_bus_o.wb_event = WB_NONE;
+    ctrl_bus_o.wb_cause = 5'd0;
+    ctrl_bus_o.wb_tval  = 32'd0;
+    if (csr_op == SYSTEM && csr_addr == 12'd0) begin
+        // ECALL: cause depends on current priv level — set at the
+        // tag-promotion site in core_top, not here.
+        ctrl_bus_o.wb_event = WB_TRAP;
+        ctrl_bus_o.wb_cause = 5'd11;  // default M-mode ECALL; rewritten in core_top
+    end else if (csr_op == SYSTEM && csr_addr == 12'd1) begin
+        // EBREAK: cause = 3 (breakpoint).  Debug-mode entry override (dcsr[15])
+        // is handled in core_top / interrupt_ctrl, not here.
+        ctrl_bus_o.wb_event = WB_TRAP;
+        ctrl_bus_o.wb_cause = 5'd3;
+    end else if (csr_op == SYSTEM && csr_addr == 12'h302) begin
+        // MRET
+        ctrl_bus_o.wb_event = WB_XRET;
+    end else if (csr_op == SYSTEM && csr_addr == 12'h102) begin
+        // SRET
+        ctrl_bus_o.wb_event = WB_XRET;
+    end
+    // Note: WB_DRET is not tagged yet; debug exit goes through the
+    // existing debug_ctrl path. Phase 4.4 wires it in.
+end
+
 endmodule
 

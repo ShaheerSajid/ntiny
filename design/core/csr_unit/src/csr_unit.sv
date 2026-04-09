@@ -34,6 +34,10 @@ module csr_unit (
   output [31:0]ip_o,
   output [31:0]ie_o,
   output [31:0]vec_o,             // mtvec or stvec (selected by trap_to_s_i)
+  // Phase 4 trap revamp: wb_trap_unit needs the unmuxed values so it
+  // can pick the redirect target from its own delegation decision.
+  output [31:0]mtvec_o,
+  output [31:0]stvec_o,
   output [31:0]status_o,
   output [31:0]epc_o,             // mepc (for MRET)
   output [31:0]sepc_o,            // sepc (for SRET)
@@ -509,6 +513,8 @@ module csr_unit (
 	assign ip_o      = _MIP;
 	assign ie_o      = _MIE;
 	assign vec_o     = trap_to_s_i ? _STVEC : _MTVEC;
+	assign mtvec_o   = _MTVEC;
+	assign stvec_o   = _STVEC;
 	assign status_o  = _MSTATUS;
 	assign epc_o     = _MEPC;
 	assign sepc_o    = _SEPC;
