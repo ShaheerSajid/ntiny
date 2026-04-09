@@ -154,6 +154,9 @@ logic        interrupt_to_s_lvl;
 logic            wb_trap_fire;
 logic            wb_xret_fire;
 logic            wb_dret_fire;
+// OR of all WB-commit events. Used by hazard_unit to flush IF/ID/IE/IMEM
+// (the carrier in IWB commits its CSR side effects on the same cycle).
+wire             wb_event_fire = wb_xret_fire | wb_trap_fire | wb_dret_fire;
 logic [4:0]      wb_cause;
 logic [31:0]     wb_tval;
 logic [31:0]     wb_epc;
@@ -344,6 +347,9 @@ hazard_unit hazard_unit_inst (
     // Control flow
     .interrupt_valid_i  (interrupt_valid),
     .resumeack_i        (resumeack_o),
+    // Phase 4 trap revamp: WB-stage event commit (xRET in 4.3, traps
+    // and interrupts in 4.4/4.5).
+    .wb_event_fire_i    (wb_event_fire),
     // Phase 3: aligner-not-ready stall + redirect for branch_squash_q.
     // aligner_valid and arb_redirect_valid are declared later in the
     // file (the fetch_buffer + redirect_arbiter blocks); SystemVerilog
@@ -439,7 +445,12 @@ assign fence_i_o = (ctrl_bus_ie.fence_i == TRUE) && !stale_ie;
 assign bpu_mispredict = onebit_sig_e'(branch_taken != ctrl_bus_ie.predicted_taken);
 
 wire branch_taken_valid = bpu_mispredict;  // redirect on mispredict, not raw branch_taken
-wire ret_valid_valid    = ret_valid;
+// Phase 4.3: xRET commits at IWB via wb_trap_unit. The legacy `ret_valid`
+// from privilege_unit (driven from ID) is no longer used as a redirect
+// trigger — wb_xret_fire from IWB is the new source. ret_valid_valid stays
+// as the wire name to minimise diff in the redirect_arbiter / pc_sel mux
+// instantiation; only the source changes.
+wire ret_valid_valid    = wb_xret_fire;
 
 always_comb
 begin
@@ -456,7 +467,10 @@ begin
 		PC_plus_4: pc_in = pc_out + 4;
 		BRANCH_PC: pc_in = branch_target_address;
     INTERRUPT: pc_in = handler_addr;
-    RET      : pc_in = (ctrl_bus_if_id.sret == TRUE) ? sepc : epc;
+    // Phase 4.3: xRET target now comes from the IWB-stage carrier
+    // (the mret/sret being committed by wb_trap_unit), not the
+    // ID-stage instruction.
+    RET      : pc_in = (ctrl_bus_iwb.sret == TRUE) ? sepc : epc;
 		BRANCH_DPC:pc_in = dpc;
 		default: pc_in = pc_out + 4;
 	endcase
@@ -479,7 +493,8 @@ redirect_arbiter redirect_arbiter_inst (
     .trap_valid_i    (interrupt_valid),
     .branch_taken_i  (branch_taken_valid),
     .ret_valid_i     (ret_valid_valid),
-    .sret_select_i   (ctrl_bus_if_id.sret == TRUE),
+    // Phase 4.3: sret/mret distinction comes from the IWB carrier.
+    .sret_select_i   (ctrl_bus_iwb.sret == TRUE),
 
     .handler_addr_i  (handler_addr),
     .branch_target_i (branch_target_address),
@@ -523,7 +538,9 @@ a_arb_target_matches_pc_in:  assert property (p_arb_target_matches_pc_in)
 // for trap entry). Without this, an SRET to a U-mode address whose page is
 // cold in the ITLB deadlocks: if_id_stall stays high during the PTW walk and
 // neither pc_out nor apc ever latch the return target.
-wire ret_pulse = ret_fire | sret_fire;
+// Phase 4.3: ret_pulse used to be the OR of privilege_unit's ret_fire/sret_fire
+// (both fired from ID). Now the xRET commitment fires from wb_trap_unit at IWB.
+wire ret_pulse = wb_xret_fire;
 
 // Phase 3: producer-side stall sources.
 //
@@ -543,8 +560,13 @@ wire ret_pulse = ret_fire | sret_fire;
 //
 // We deliberately exclude id_no_insn_stall from this set because the
 // whole point of fetching is to refill the buffer when ID is dry.
+// Phase 4.3: csr_ret_hazard is dead (xRET resolves at IWB so the
+// older csrrw mepc/sepc has already committed by the time mret reads
+// it). Removed from the producer stall list. The signal is still
+// connected as a wire and tied to 0 by hazard_unit; cleanup pass
+// will drop the wire entirely.
 wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
-                            csr_ret_hazard | refetch_after_trap |
+                            refetch_after_trap |
                             insert_bubble | fetch_stall;
 
 `ifdef BOOT
@@ -560,21 +582,17 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 	// does NOT suppress the redirect's PC latch when a branch/xRET/
 	// trap/debug fires while the buffer is full.
 	//
-	// CRITICAL: the bypass must NOT fire when csr_ret_hazard is
-	// asserted. csr_ret_hazard means an mret/sret is in ID while a
-	// csrrw mepc/sepc is still in IE — i.e., the RET target value is
-	// being WRITTEN this cycle but won't be visible to the redirect
-	// path until the next cycle. Without this guard, the program_counter
-	// latches pc_in = OLD epc (because mepc reads the pre-write value),
-	// causing the mret to jump to the previous trap's epc rather than
-	// the freshly-set value.
+	// Phase 4.3: csr_ret_hazard is dead — xRET resolves at IWB so the
+	// older csrrw mepc/sepc has already committed before the carrier
+	// reaches wb_trap_unit. The previous Phase 3.2 guard (`& ~csr_ret_hazard`)
+	// is removed.
 	//
 	// (An earlier draft also gated the bypass by ~insert_bubble for
 	// the load-use bubble case. After moving branch resolution to the
 	// IE stage, insert_bubble is permanently 0 — the IE-stage forwarding
 	// handles the load-use case for branches without any pipeline
 	// bubble. That guard is dead and removed.)
-	.stall_i	(((interrupt_valid | ret_pulse | arb_redirect_valid) & ~csr_ret_hazard) ? 1'b0 : fetch_producer_stall),
+	.stall_i	((interrupt_valid | ret_pulse | arb_redirect_valid) ? 1'b0 : fetch_producer_stall),
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
@@ -594,25 +612,17 @@ assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
 // advances to target+4, and the producer fetches target+4 first —
 // the actual redirect target instruction is never fetched.
 //
-// Same csr_ret_hazard guard as on program_counter.stall_i: don't fire
-// the bypass during a csr→ret hazard cycle, because the redirect
-// target (mepc/sepc) is being written THIS cycle and reading it
-// reads the OLD value.
+// Phase 4.3: csr_ret_hazard guard removed (xRET resolves at IWB —
+// the older csrrw mepc/sepc has already committed before the carrier
+// reaches wb_trap_unit, so reading mepc/sepc here is always fresh).
 //
-// CRITICAL: also gate by ~mmu_i_stall. When the redirect target is in
-// a virtually-mapped region whose ITLB entry is missing (e.g. an mret
-// to a high VA after sfence.vma), the MMU's i_paddr_o defaults to
-// {PPN=0, offset} on the cycle of the miss while it kicks off a PTW.
-// Without this gate the bypass forces a bus request out with the
-// PPN=0 PA, the SRAM returns whatever happens to live there, and the
-// aligner buffers a garbage word that later commits as the supposed
-// redirect target instruction. Legacy didn't have this bypass at all
-// (imem_port.req was just `refetch_after_trap | (~if_id_stall &
-// ~c_stall)`), so the bus stayed silent during PTW. Restore that
-// behaviour for the redirect path by waiting until the MMU has a
-// translation before issuing the bus request.
+// Phase 3.4 ~mmu_i_stall guard kept: when the redirect target lives
+// on a virtually-mapped page whose ITLB entry is missing, the MMU's
+// i_paddr_o defaults to {PPN=0, offset} until the PTW finishes and
+// fills the ITLB. Without this gate the bus would issue a fetch with
+// that bogus PA and the aligner would buffer garbage.
 assign imem_port.req   = refetch_after_trap |
-                         (arb_redirect_valid & ~csr_ret_hazard & ~mmu_i_stall) |
+                         (arb_redirect_valid & ~mmu_i_stall) |
                          ~fetch_producer_stall;
 assign imem_port.we    = 1'b0;
 assign imem_port.be    = 4'b1111;
@@ -1307,8 +1317,12 @@ csr_unit csr_unit_inst
   .epc_i                (epc_csr),
   .mtval_i              (mtval_csr),
   .interrupt_src_i      (interrupt_src),
-  .ret_i                (ret_fire),
-  .sret_i               (sret_fire),
+  // Phase 4.3: xRET commits at IWB via wb_trap_unit. ret_fire/sret_fire
+  // from privilege_unit (ID-stage) are no longer used as commit pulses;
+  // they will be deleted in the Phase 4 cleanup pass once nothing else
+  // depends on them.
+  .ret_i                (wb_xret_fire && (ctrl_bus_iwb.mret == TRUE)),
+  .sret_i               (wb_xret_fire && (ctrl_bus_iwb.sret == TRUE)),
 
   .ip_o                 (ip_csr),
   .ie_o                 (ie_csr),
@@ -1381,7 +1395,12 @@ mmu_sv32 mmu_inst (
   .i_priv_i       (mmu_priv),     // instruction-side: overridden on MRET/SRET
   .mstatus_i      (status_csr),
   .sfence_i       (ctrl_bus_ie.sfence_vma),
-  .flush_i        (interrupt_valid | (~if_id_stall & (branch_taken_valid | ret_valid))),
+  // Phase 4.3: ret_valid (legacy ID-stage xRET signal) replaced by
+  // wb_xret_fire (IWB-stage xRET commitment) for the MMU PTW abort.
+  // The MMU needs to drop any in-flight PTW state when control flow
+  // changes — branch_taken still applies (branch is at IE, redirect
+  // is one cycle later), and the new xRET path fires from IWB.
+  .flush_i        (interrupt_valid | (~if_id_stall & branch_taken_valid) | wb_xret_fire),
   // Instruction translation
   .i_vaddr_i      (i_vaddr),
   .i_req_i        (~reset_i),

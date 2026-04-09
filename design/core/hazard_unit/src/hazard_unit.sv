@@ -31,6 +31,14 @@ module hazard_unit (
     input  onebit_sig_e interrupt_valid_i,  // trap/interrupt firing
     input  logic        resumeack_i,        // debug resume
 
+    // ── Phase 4 trap revamp: WB-stage event commit ──────────────────────
+    // Asserted for one cycle when wb_trap_unit commits any of
+    // trap / xret / dret. Triggers a 4-stage flush (IF/ID/IE/IMEM) so
+    // the wrong-path instructions younger than the carrier are killed.
+    // The carrier itself (in IWB) commits its CSR side effects this
+    // cycle and is NOT flushed.
+    input  logic        wb_event_fire_i,
+
     // ── Phase 3: fetch path validity / redirect ─────────────────────────
     input  logic        aligner_valid_i,    // 1 = aligner has a real ID-stage instruction
     input  logic        redirect_valid_i,   // any redirect (trap/xRET/branch/debug)
@@ -86,13 +94,14 @@ assign ie_stall_o   = onebit_sig_e'(imem_stall_o | alu_stall_i | dmem_busy |
                                      misalign_stall_i | pmp_d_fault_i |
                                      d_page_fault_i);
 
-// CSR read-after-write hazard: mret/sret in ID reads epc, but preceding
-// CSR write in IE hasn't committed yet.
-assign csr_ret_hazard_o = ((id_mret_i && !illegal_mret_i) ||
-                           (id_sret_i && !illegal_sret_i)) &&
-                          ie_csr_op_i != NO_CSR_OP &&
-                          ((id_mret_i && ie_csr_addr_i == 12'h341) ||
-                           (id_sret_i && ie_csr_addr_i == 12'h141));
+// CSR read-after-write hazard: deprecated in Phase 4 — xRET resolves at
+// IWB so by definition the older csrrw mepc/sepc has already committed.
+// Tied off here; the input ports stay for the legacy interface but their
+// values are ignored. Will be deleted in the Phase 4 cleanup pass.
+assign csr_ret_hazard_o = 1'b0;
+wire _unused_csr_ret_inputs = &{1'b0, id_mret_i, id_sret_i,
+                                 illegal_mret_i, illegal_sret_i,
+                                 ie_csr_op_i, ie_csr_addr_i};
 
 // Phase 3: id_no_insn_stall is the new "ID has no real instruction"
 // stall source. It fires when the compressed_aligner has nothing to
@@ -104,7 +113,6 @@ wire id_no_insn_stall = ~aligner_valid_i;
 assign if_id_stall_o = onebit_sig_e'(ie_stall_o | insert_bubble_i |
                                       refetch_after_trap_o | halted_i |
                                       icache_stall_i | mmu_i_stall_i |
-                                      csr_ret_hazard_o |
                                       id_no_insn_stall);
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -144,6 +152,20 @@ always_comb begin
     endcase
     if (redirect_valid_i)
         ie_flush_o = TRUE;
+    // Phase 4: when wb_trap_unit commits a trap/xret/dret in IWB, kill
+    // all 4 wrong-path stages (IF via fetch_flush, ID/IE/IMEM/IWB-on-
+    // next-edge via the flush bits). Note iwb_flush=1 here is safe:
+    // the carrier instruction has ALREADY committed its CSR side
+    // effects this cycle (combinationally — wb_trap_unit's outputs feed
+    // csr_unit.ret_i / sret_i / trap_valid_i during the same clock
+    // cycle). The flush only affects the NEXT IWB register-wall edge,
+    // i.e. cycle K+1's ctrl_bus_iwb becomes NOP instead of the
+    // wrong-path-1 that would otherwise propagate from IMEM.
+    if (wb_event_fire_i) begin
+        ie_flush_o   = TRUE;
+        imem_flush_o = TRUE;
+        iwb_flush_o  = TRUE;
+    end
 end
 
 // ═══════════════════════════════════════════════════════════════════════════
