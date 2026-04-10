@@ -1405,6 +1405,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .ie_csr_invalid_i   (csr_invalid),
   .insn_valid_id_i    (insn_valid_id),
   .debug_ebreak_i     (dcsr_ebreak),
+  .branch_taken_i     (branch_taken_valid),
   // IE-stage signals for misalign detection (done inside)
   .ie_mem_op_i        (ctrl_bus_ie.mem_op),
   .ie_ls_width_i      (ctrl_bus_ie.load_store_width),

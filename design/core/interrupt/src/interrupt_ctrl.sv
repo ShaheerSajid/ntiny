@@ -39,6 +39,7 @@ module interrupt_ctrl (
     input        illegal_insn_i,       // from privilege_unit (already computed)
     input        insn_valid_id_i,      // from hazard_unit
     input        debug_ebreak_i,       // dcsr[15] — ebreak enters debug, not trap
+    input        branch_taken_i,       // IE-stage branch mispredict (flush incoming)
 
     // ── IE-stage CSR invalid (unimplemented CSR accessed) ────────────────
     input                ie_csr_invalid_i,
@@ -101,9 +102,16 @@ assign exception_from_ie_o = misalign_amo | ie_csr_illegal;
 // ═══════════════════════════════════════════════════════════════════════════
 // ID-stage exception gating (only fire on valid, non-illegal instructions)
 // ═══════════════════════════════════════════════════════════════════════════
-wire ecall_valid   = ecall_raw_i  & ~illegal_insn_i & insn_valid_id_i;
-wire ebreak_valid  = ebreak_raw_i & ~debug_ebreak_i & ~illegal_insn_i & insn_valid_id_i;
-wire illegal_valid = illegal_insn_i & insn_valid_id_i;
+// Phase 4.10c: suppress ID-stage sync exceptions when the IE instruction
+// is a mispredicted branch. The ID instruction is on the speculative
+// fall-through path and will be flushed by the branch redirect. Without
+// this, ebreak/ecall/illegal in the shadow of a taken branch fires a
+// trap before the branch redirect can flush it (trap > branch priority
+// in the redirect arbiter). Linux BUG_ON() ebreak after c.beqz was
+// firing because the ebreak was consumed before the branch resolved.
+wire ecall_valid   = ecall_raw_i  & ~illegal_insn_i & insn_valid_id_i & ~branch_taken_i;
+wire ebreak_valid  = ebreak_raw_i & ~debug_ebreak_i & ~illegal_insn_i & insn_valid_id_i & ~branch_taken_i;
+wire illegal_valid = illegal_insn_i & insn_valid_id_i & ~branch_taken_i;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Page fault separation (load vs store)
