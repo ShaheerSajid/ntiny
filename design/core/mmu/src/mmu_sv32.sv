@@ -39,10 +39,12 @@ module mmu_sv32 (
     output logic [31:0] d_fault_addr_o, // faulting virtual address (may differ from d_vaddr_i during PTW)
 
     // PTW memory interface (directly drives dbus when active)
-    output logic [31:0] ptw_addr_o,   // physical address for PTE read
+    output logic [31:0] ptw_addr_o,   // physical address for PTE read/write
     output logic        ptw_req_o,    // PTE read request active
+    output logic        ptw_we_o,     // PTE write (svadu A/D update)
+    output logic [31:0] ptw_wdata_o,  // PTE write data (modified with A/D bits)
     input  logic [31:0] ptw_data_i,   // PTE data from memory
-    input  logic        ptw_stall_i,  // memory stall for PTW read
+    input  logic        ptw_stall_i,  // memory stall for PTW read/write
     output logic        ptw_active_o, // PTW is using dbus
 
     // PMP configuration from CSR unit
@@ -187,11 +189,12 @@ module mmu_sv32 (
     // ── PTW (Page Table Walker) ──────────────────────────────────
     typedef enum logic [2:0] {
         PTW_IDLE,
-        PTW_L1,       // reading level-1 PTE
-        PTW_L0_WAIT,  // wait 1 cycle for L1 rvalid to clear before L0 read
-        PTW_L0,       // reading level-0 PTE
-        PTW_FILL,     // write TLB entry
-        PTW_FAULT     // page fault detected
+        PTW_L1,          // reading level-1 PTE
+        PTW_L0_WAIT,     // wait 1 cycle for L1 rvalid to clear before L0 read
+        PTW_L0,          // reading level-0 PTE
+        PTW_FILL,        // check permissions, fill TLB or update A/D
+        PTW_UPDATE_AD,   // svadu: write back PTE with A/D bits set
+        PTW_FAULT        // page fault detected
     } ptw_state_t;
 
     ptw_state_t ptw_state, ptw_next;
@@ -227,19 +230,23 @@ module mmu_sv32 (
     wire mega_misaligned = (|pte_ppn0);
 
     // Permission check for the PTE being walked
-    logic ptw_perm_fault;
+    // Separated into hard faults (missing R/W/X) vs soft faults (A/D not set).
+    // Svadu: soft faults trigger a PTE write-back instead of a page fault.
+    logic ptw_rwx_fault;   // hard: wrong permission bits
+    logic ptw_ad_needed;   // soft: A or D bit needs updating
     always_comb begin
         if (ptw_for_insn) begin
-            // Instruction: need X, A
-            ptw_perm_fault = !pte_x || !pte_a;
+            ptw_rwx_fault = !pte_x;
+            ptw_ad_needed = !pte_a;
         end else if (ptw_for_store) begin
-            // Store: need W, D, A
-            ptw_perm_fault = !pte_w || !pte_d || !pte_a;
+            ptw_rwx_fault = !pte_w;
+            ptw_ad_needed = !pte_a || !pte_d;
         end else begin
-            // Load: need R (or X if MXR), A
-            ptw_perm_fault = !(pte_r || (mxr_bit && pte_x)) || !pte_a;
+            ptw_rwx_fault = !(pte_r || (mxr_bit && pte_x));
+            ptw_ad_needed = !pte_a;
         end
     end
+    wire ptw_perm_fault = ptw_rwx_fault;
 
     // U/S permission check
     logic ptw_priv_fault;
@@ -267,6 +274,8 @@ module mmu_sv32 (
 
     // Latched L1 PTE for address construction during L0
     logic [31:0] ptw_l1_pte_saved;
+    // Saved PTE address for svadu write-back (L1 or L0 address of the leaf PTE)
+    logic [31:0] ptw_pte_addr;
 
     // PTW FSM
     always_ff @(posedge clk_i or posedge reset_i) begin
@@ -280,6 +289,7 @@ module mmu_sv32 (
             ptw_priv <= 2'b11;
             ptw_sum <= 1'b0;
             ptw_l1_pte_saved <= '0;
+            ptw_pte_addr <= '0;
         end else if (flush_i || flush_prev) begin
             // Pipeline flush (trap/interrupt): abort any in-flight PTW walk.
             // Also suppress for 1 cycle after flush to prevent stale d_req_i
@@ -325,6 +335,7 @@ module mmu_sv32 (
                                 ptw_state <= PTW_FAULT;
                             end else begin
                                 ptw_mega <= 1'b1;
+                                ptw_pte_addr <= ptw_l1_addr; // save for svadu write-back
                                 ptw_state <= PTW_FILL;
                             end
                         end else begin
@@ -351,6 +362,7 @@ module mmu_sv32 (
                         end else if (ptw_data_i[1] || ptw_data_i[3]) begin
                             // Leaf at level 0 = 4KB page
                             ptw_mega <= 1'b0;
+                            ptw_pte_addr <= ptw_l0_addr; // save for svadu write-back
                             ptw_state <= PTW_FILL;
                         end else begin
                             // Pointer at level 0 = invalid
@@ -360,12 +372,31 @@ module mmu_sv32 (
                 end
 
                 PTW_FILL: begin
-                    // Permission check, then fill TLB or fault
+                    // Permission/privilege check, then fill TLB or fault.
+                    // Svadu: if only A/D bits are missing (no RWX fault),
+                    // write the updated PTE back to memory before filling TLB.
                     if (ptw_perm_fault || ptw_priv_fault) begin
                         ptw_state <= PTW_FAULT;
+                    end else if (ptw_ad_needed) begin
+                        // Set A (always) and D (if store) in the PTE,
+                        // then write back to page table memory.
+                        ptw_pte[6] <= 1'b1;                   // A = 1
+                        if (ptw_for_store) ptw_pte[7] <= 1'b1; // D = 1
+                        ptw_state <= PTW_UPDATE_AD;
                     end else begin
                         ptw_state <= PTW_IDLE;
                         // TLB fill happens via separate logic below
+                    end
+                end
+
+                PTW_UPDATE_AD: begin
+                    // Svadu: write the modified PTE (with A/D set) back
+                    // to the page table in memory. Wait for the write to
+                    // complete (!ptw_stall_i), then fill TLB and go idle.
+                    if (!ptw_stall_i) begin
+                        ptw_state <= PTW_IDLE;
+                        // TLB fill happens via separate logic below
+                        // (ptw_pte now has A/D bits set)
                     end
                 end
 
@@ -380,14 +411,22 @@ module mmu_sv32 (
     end
 
     // PTW memory interface — suppress request on PMP denial
-    wire ptw_in_read = (ptw_state == PTW_L1) || (ptw_state == PTW_L0);
-    assign ptw_active_o = ptw_in_read && !ptw_pmp_denied;
+    wire ptw_in_read  = (ptw_state == PTW_L1) || (ptw_state == PTW_L0);
+    wire ptw_in_write = (ptw_state == PTW_UPDATE_AD);
+    assign ptw_active_o = (ptw_in_read && !ptw_pmp_denied) || ptw_in_write;
     assign ptw_req_o    = ptw_active_o;
-    assign ptw_addr_o   = (ptw_state == PTW_L1) ? ptw_l1_addr :
-                          (ptw_state == PTW_L0) ? ptw_l0_addr : 32'b0;
+    assign ptw_we_o     = ptw_in_write;
+    assign ptw_wdata_o  = ptw_pte;  // PTE with A/D bits already set in PTW_FILL
+    assign ptw_addr_o   = (ptw_state == PTW_L1)        ? ptw_l1_addr :
+                          (ptw_state == PTW_L0)         ? ptw_l0_addr :
+                          (ptw_state == PTW_UPDATE_AD)  ? ptw_pte_addr : 32'b0;
 
     // ── TLB fill logic ───────────────────────────────────────────
-    wire tlb_fill = (ptw_state == PTW_FILL) && !ptw_perm_fault && !ptw_priv_fault;
+    // TLB fill: after successful permission check (PTW_FILL with no A/D issue)
+    // or after svadu write-back completes (PTW_UPDATE_AD → IDLE).
+    wire tlb_fill_direct = (ptw_state == PTW_FILL) && !ptw_perm_fault && !ptw_priv_fault && !ptw_ad_needed;
+    wire tlb_fill_after_ad = (ptw_state == PTW_UPDATE_AD) && !ptw_stall_i;
+    wire tlb_fill = tlb_fill_direct || tlb_fill_after_ad;
 
     tlb_entry_t fill_entry;
     always_comb begin

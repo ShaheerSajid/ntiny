@@ -197,6 +197,8 @@ logic        mmu_i_fault_ptw,        mmu_i_access_fault_ptw;
 logic [31:0] mmu_i_fault_ptw_addr,   mmu_i_access_fault_ptw_addr;
 logic [31:0] ptw_addr;
 logic        ptw_req, ptw_active;
+logic        ptw_we;
+logic [31:0] ptw_wdata;
 logic        d_store_for_mmu;
 
 // Track whether PTW had a read request on the bus last cycle.
@@ -1781,8 +1783,12 @@ mmu_sv32 mmu_inst (
   // PTW memory interface
   .ptw_addr_o     (ptw_addr),
   .ptw_req_o      (ptw_req),
+  .ptw_we_o       (ptw_we),
+  .ptw_wdata_o    (ptw_wdata),
   .ptw_data_i     (dmem_port.rdata),
-  .ptw_stall_i    (ptw_req ? ~ptw_rvalid : ~dmem_port.ready),
+  // Read stall: wait for rvalid. Write stall (svadu): wait for ready.
+  .ptw_stall_i    (ptw_we ? ~dmem_port.ready :
+                   ptw_req ? ~ptw_rvalid : ~dmem_port.ready),
   .ptw_active_o   (ptw_active),
   // PMP
   .pmpcfg_i              (pmpcfg_csr),
@@ -1921,10 +1927,10 @@ assign dmem_port.req   = ptw_active ? ptw_req :
                          (mmu_d_access_fault || mmu_d_fault) ? 1'b0 :  // PMP/page fault: suppress bus
                          amo_active ? (amo_dbus_read | amo_dbus_write) :
                                       (c2a_read | c2a_write);
-assign dmem_port.we    = ptw_active ? 1'b0 :
+assign dmem_port.we    = ptw_active ? ptw_we :
                          (mmu_d_access_fault || mmu_d_fault) ? 1'b0 :  // PMP/page fault: suppress bus
                          amo_active ? amo_dbus_write : c2a_write;
-assign dmem_port.wdata = ptw_active ? 32'b0 :
+assign dmem_port.wdata = ptw_active ? ptw_wdata :
                          amo_active ? amo_dbus_writedata  : c2a_writedata;
 
 always_ff@(posedge clk_i or posedge reset_i)
