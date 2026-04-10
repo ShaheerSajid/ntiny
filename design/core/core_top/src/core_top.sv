@@ -459,8 +459,81 @@ privilege_unit privilege_unit_inst (
     .illegal_insn_id_o  (illegal_insn_id)
 );
 
-// MMU instruction-side privilege view: just the live priv_level. The old
-// MRET/SRET override path is gone (see comment above).
+// ── xret_fetch_ctrl FSM ─────────────────────────────────────────────────
+// Sequences the post-xRET (mret/sret) instruction fetch when the target
+// is in a lower privilege mode that uses Sv32 translation.
+//
+// Problem: on the wb_xret_fire cycle, priv_level hasn't clocked yet.
+// The fetch issues at M-mode priv → no Sv32 → PA=VA (wrong). Any
+// combinational override of mmu_priv creates races with the ITLB stall,
+// PTW abort, and fault paths.
+//
+// Solution: a 3-state FSM that sequences the fetch cleanly:
+//   IDLE         — normal operation
+//   XRET_WAIT    — entered on wb_xret_fire; suppress fetch for 1 cycle
+//                   so priv_level can clock to the target value
+//   XRET_FETCH   — drive i_vaddr from the saved target VA; the MMU now
+//                   sees the correct priv and can start a PTW if the
+//                   ITLB misses; when fb_push accepts the target word
+//                   (or a trap fires), return to IDLE
+//
+// The FSM controls:
+//   xret_hold_pc   — stall program_counter (hold pc_out at target)
+//   xret_drive_va  — override i_vaddr to use xret_target_q
+//   xret_suppress  — suppress imem_port.req (in XRET_WAIT only)
+//   xret_drop_push — drop the stale rvalid from the wrong-priv fetch
+typedef enum logic [1:0] {
+    XRET_IDLE  = 2'd0,
+    XRET_WAIT  = 2'd1,
+    XRET_FETCH = 2'd2
+} xret_fsm_e;
+
+xret_fsm_e xret_state, xret_next;
+logic [31:0] xret_target_q;
+
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        xret_state    <= XRET_IDLE;
+        xret_target_q <= 32'b0;
+    end else begin
+        xret_state <= xret_next;
+        if (wb_xret_fire)
+            xret_target_q <= pc_in;  // pc_in = epc/sepc on xret cycle
+    end
+end
+
+always_comb begin
+    xret_next = xret_state;
+    case (xret_state)
+        XRET_IDLE:
+            if (wb_xret_fire)
+                xret_next = XRET_WAIT;
+        XRET_WAIT:
+            // 1 cycle: priv has now settled at the clock edge
+            xret_next = XRET_FETCH;
+        XRET_FETCH:
+            // Stay here until the fetch completes (buffer accepts the
+            // target word) or a trap/interrupt fires (which flushes
+            // everything and takes over).
+            if (fb_push || interrupt_valid)
+                xret_next = XRET_IDLE;
+        default:
+            xret_next = XRET_IDLE;
+    endcase
+    // A trap during WAIT also aborts the xret sequence.
+    if (xret_state != XRET_IDLE && interrupt_valid)
+        xret_next = XRET_IDLE;
+end
+
+wire xret_hold_pc   = (xret_state == XRET_WAIT) || (xret_state == XRET_FETCH);
+wire xret_drive_va  = (xret_state == XRET_FETCH);
+wire xret_suppress  = (xret_state == XRET_WAIT);
+wire xret_drop_push = (xret_state == XRET_WAIT);
+
+// MMU instruction-side privilege view: just the live priv_level.
+// No combinational override needed — the xret_fetch_ctrl FSM waits
+// 1 cycle (XRET_WAIT) for priv_level to settle before issuing the
+// fetch (XRET_FETCH), so the MMU naturally sees the correct priv.
 wire [1:0] mmu_priv = priv_level;
 
 // exception_from_ie now driven by interrupt_ctrl (misalign detection moved there)
@@ -697,8 +770,10 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 	// IE stage, insert_bubble is permanently 0 — the IE-stage forwarding
 	// handles the load-use case for branches without any pipeline
 	// bubble. That guard is dead and removed.)
+	// Phase 4.8: xret_hold_pc keeps pc_out parked at the xret target
+	// while the FSM waits for priv to settle and the fetch to complete.
 	.stall_i	((interrupt_valid | ret_pulse | arb_redirect_valid) ? 1'b0 :
-	             (fetch_producer_stall | pending_target_v_q)),
+	             (fetch_producer_stall | pending_target_v_q | xret_hold_pc)),
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
@@ -711,7 +786,10 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 // latched target so the MMU sees a stable VA across the entire PTW window
 // (otherwise pc_in would advance and the MMU would walk the wrong page
 // once the original PTW completes).
+// Phase 4.8: xret_drive_va overrides i_vaddr to the saved target so the
+// MMU translates the correct VA at the now-settled priv_level.
 wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_after_trap) ? pc_out :
+                      xret_drive_va                                   ? xret_target_q :
                       pending_target_v_q                              ? pending_target_q :
                                                                         pc_in;
 assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
@@ -735,9 +813,12 @@ assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
 // i_paddr_o defaults to {PPN=0, offset} until the PTW finishes and
 // fills the ITLB. Without this gate the bus would issue a fetch with
 // that bogus PA and the aligner would buffer garbage.
+// Phase 4.8: xret_suppress holds off the fetch during XRET_WAIT (priv
+// settling). XRET_FETCH lets the normal ~fetch_producer_stall path issue
+// the req at the correct priv (mmu_i_stall gates naturally if PTW needed).
 assign imem_port.req   = refetch_after_trap |
-                         (arb_redirect_valid & ~mmu_i_stall) |
-                         ~fetch_producer_stall;
+                         (arb_redirect_valid & ~mmu_i_stall & ~xret_suppress) |
+                         (~fetch_producer_stall & ~xret_suppress);
 assign imem_port.we    = 1'b0;
 assign imem_port.be    = 4'b1111;
 assign imem_port.wdata = 32'b0;
@@ -881,7 +962,10 @@ end
 // first instruction at the reset PC, leading to a "first instruction
 // after reset is silently skipped" bug. inflight_q is still used by
 // fetch_stall to anticipate the buffer fill 1 cycle early.
-wire fb_push = imem_port.rvalid && !arb_redirect_valid;
+// Phase 4.8: xret_drop_push drops the stale rvalid from the wrong-priv
+// fetch that was issued on the wb_xret_fire cycle (before the FSM could
+// suppress it). The rdata is from PA=VA (untranslated) and is garbage.
+wire fb_push = imem_port.rvalid && !arb_redirect_valid && !xret_drop_push;
 
 fetch_pkg::fetch_buffer_entry_t fb_push_entry;
 assign fb_push_entry.word  = imem_port.rdata;
@@ -1578,11 +1662,10 @@ mmu_sv32 mmu_inst (
   .i_priv_i       (mmu_priv),     // instruction-side: overridden on MRET/SRET
   .mstatus_i      (status_csr),
   .sfence_i       (ctrl_bus_ie.sfence_vma),
-  // Phase 4.3: ret_valid (legacy ID-stage xRET signal) replaced by
-  // wb_xret_fire (IWB-stage xRET commitment) for the MMU PTW abort.
-  // The MMU needs to drop any in-flight PTW state when control flow
-  // changes — branch_taken still applies (branch is at IE, redirect
-  // is one cycle later), and the new xRET path fires from IWB.
+  // MMU PTW abort: traps, branches, and xRET invalidate in-flight PTW
+  // (the VA context changes). The xret_fetch_ctrl FSM ensures the
+  // flush+flush_prev 2-cycle dead zone passes during XRET_WAIT, so the
+  // fresh PTW in XRET_FETCH starts cleanly without a livelock.
   .flush_i        (interrupt_valid | (~if_id_stall & branch_taken_valid) | wb_xret_fire),
   // Instruction translation
   .i_vaddr_i      (i_vaddr),
