@@ -236,7 +236,15 @@ logic [31:0] mmu_i_access_fault_addr_r, mmu_d_access_fault_addr_r;
 // PC X with PC+4 in a no-perm region or on an A-bit-clear page; the
 // speculative fetch's fault would otherwise fire as a trap before the
 // jump can commit). See the big comment near `inflight_i_fault_q`.
-wire i_buf_fault_squash = branch_taken_valid | ret_valid_valid | debug_valid;
+// Suppress buffer-routed faults during xret pipeline transit:
+// - xret_at_decode: the aligner emitted mret/sret THIS cycle. The
+//   wrong-path entry behind it is now the buffer head — suppress its
+//   fault immediately (1-cycle-before-DRAIN gap fix).
+// - xret_draining: mret is in IE/IMEM/IWB, pipeline draining.
+// Without these, a speculative PMP fault fires at M-mode priv before
+// the mret commits → MPP=M → handler uses wrong save area base.
+wire i_buf_fault_squash = branch_taken_valid | ret_valid_valid | debug_valid |
+                          xret_at_decode | xret_draining;
 wire i_buf_access_fault =
     aligner_valid && aligner_fault && (aligner_cause == 5'd1)  && !i_buf_fault_squash;
 wire i_buf_page_fault =
@@ -484,12 +492,35 @@ privilege_unit privilege_unit_inst (
 //   xret_drop_push — drop the stale rvalid from the wrong-priv fetch
 typedef enum logic [1:0] {
     XRET_IDLE  = 2'd0,
-    XRET_WAIT  = 2'd1,
-    XRET_FETCH = 2'd2
+    XRET_DRAIN = 2'd1,
+    XRET_WAIT  = 2'd2,
+    XRET_FETCH = 2'd3
 } xret_fsm_e;
 
+// The FSM has 4 states:
+//
+//   IDLE       — normal operation
+//
+//   XRET_DRAIN — entered the cycle AFTER the aligner emits an mret/sret.
+//                The mret is now in IE; all buffer entries behind it are
+//                wrong-path (fetched speculatively at the old privilege).
+//                Actions: flush the buffer, suppress fetches, suppress
+//                buffer-routed faults, NOP the IE register wall.
+//                Stay here until the mret commits at IWB (wb_xret_fire).
+//
+//   XRET_WAIT  — entered on wb_xret_fire. The priv CSR update clocks at
+//                the edge. Suppress fetch for 1 cycle so priv settles.
+//
+//   XRET_FETCH — priv has settled. Drive i_vaddr from xret_target_q.
+//                The MMU sees the correct priv and translates correctly.
+//                Wait for fb_push (target word accepted) then → IDLE.
+//
 xret_fsm_e xret_state, xret_next;
 logic [31:0] xret_target_q;
+
+// Detect mret/sret at aligner output (decode time, forward ref to ctrl_bus_if_id)
+wire xret_at_decode = aligner_valid && !ie_stall &&
+                      (ctrl_bus_if_id.mret == TRUE || ctrl_bus_if_id.sret == TRUE);
 
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
@@ -506,29 +537,40 @@ always_comb begin
     xret_next = xret_state;
     case (xret_state)
         XRET_IDLE:
+            // Enter DRAIN the cycle after the aligner emits mret/sret.
+            // The mret enters IE at the current edge; next cycle the
+            // buffer head is the first wrong-path instruction.
+            if (xret_at_decode)
+                xret_next = XRET_DRAIN;
+        XRET_DRAIN:
+            // Wait for the mret to propagate IE → IMEM → IWB.
+            // wb_xret_fire signals it has committed.
             if (wb_xret_fire)
                 xret_next = XRET_WAIT;
         XRET_WAIT:
-            // 1 cycle: priv has now settled at the clock edge
+            // 1 cycle: priv has now settled at the clock edge.
             xret_next = XRET_FETCH;
         XRET_FETCH:
-            // Stay here until the fetch completes (buffer accepts the
-            // target word) or a trap/interrupt fires (which flushes
-            // everything and takes over).
+            // Stay here until the fetch completes or a trap takes over.
             if (fb_push || interrupt_valid)
                 xret_next = XRET_IDLE;
         default:
             xret_next = XRET_IDLE;
     endcase
-    // A trap during WAIT also aborts the xret sequence.
+    // A trap/interrupt at any point aborts the sequence — the trap
+    // handler takes over the fetch path.
     if (xret_state != XRET_IDLE && interrupt_valid)
         xret_next = XRET_IDLE;
 end
 
-wire xret_hold_pc   = (xret_state == XRET_WAIT) || (xret_state == XRET_FETCH);
-wire xret_drive_va  = (xret_state == XRET_FETCH);
-wire xret_suppress  = (xret_state == XRET_WAIT);
-wire xret_drop_push = (xret_state == XRET_WAIT);
+// DRAIN: flush buffer, suppress faults, NOP IE captures, hold PC
+// WAIT:  suppress fetch (priv settling), drop wrong-priv rvalid
+// FETCH: drive target VA, wait for fb_push
+wire xret_draining = (xret_state == XRET_DRAIN);
+wire xret_hold_pc  = xret_draining || (xret_state == XRET_WAIT) || (xret_state == XRET_FETCH);
+wire xret_drive_va = (xret_state == XRET_FETCH);
+wire xret_suppress = xret_draining || (xret_state == XRET_WAIT);
+wire xret_drop_push= xret_draining || (xret_state == XRET_WAIT);
 
 // MMU instruction-side privilege view: just the live priv_level.
 // No combinational override needed — the xret_fetch_ctrl FSM waits
@@ -860,7 +902,10 @@ assign imem_port.wdata = 32'b0;
 // arbiter so there is one arbiter for the new path and one mux for
 // the legacy producer (pc_in mux at line 422), kept consistent by the
 // SVA cross-check assertions just below the arbiter instantiation.
-wire fetch_flush = arb_redirect_valid;
+// Phase 4.9: flush on xret_at_decode (same-cycle as mret pops from
+// buffer, clearing the wrong-path entry behind it) and xret_draining
+// (continuous flush while mret transits IE→IWB).
+wire fetch_flush = arb_redirect_valid | xret_at_decode | xret_draining;
 
 // inflight_vaddr_q latches i_vaddr on every cycle imem_port.req is
 // high. The vaddr register itself has NO reset (so a request issued in
@@ -1394,7 +1439,10 @@ always_ff@(posedge clk_i or posedge reset_i)
 			// the faulting PC for trace fidelity; the trap's epc comes
 			// from i_access_fault_addr_r (= aligner_pc_id at latch
 			// time) so the value of pc_ie doesn't reach the CSR.
-			ctrl_bus_ie <= aligner_fault ? CTRL_BUS_NOP() : ctrl_bus_if_id;
+			// Phase 4.8: NOP on aligner_fault (buffer-routed PMP/page fault)
+			// Phase 4.9+: NOP on xret_draining (wrong-path speculative
+			//   instructions after mret/sret, before it commits at IWB)
+			ctrl_bus_ie <= (aligner_fault || xret_draining) ? CTRL_BUS_NOP() : ctrl_bus_if_id;
 			pc_ie <= pc_id;
 			imm_ie <= imm_id;
 			rs1_forwarded_ie <= rs1_forwarded_id;
