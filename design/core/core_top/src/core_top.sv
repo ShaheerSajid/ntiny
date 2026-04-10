@@ -490,14 +490,15 @@ privilege_unit privilege_unit_inst (
 //   xret_drive_va  — override i_vaddr to use xret_target_q
 //   xret_suppress  — suppress imem_port.req (in XRET_WAIT only)
 //   xret_drop_push — drop the stale rvalid from the wrong-priv fetch
-typedef enum logic [1:0] {
-    XRET_IDLE  = 2'd0,
-    XRET_DRAIN = 2'd1,
-    XRET_WAIT  = 2'd2,
-    XRET_FETCH = 2'd3
+typedef enum logic [2:0] {
+    XRET_IDLE    = 3'd0,
+    XRET_DRAIN   = 3'd1,
+    XRET_WAIT    = 3'd2,
+    XRET_FETCH   = 3'd3,
+    XRET_ADVANCE = 3'd4
 } xret_fsm_e;
 
-// The FSM has 4 states:
+// The FSM has 5 states:
 //
 //   IDLE       — normal operation
 //
@@ -553,7 +554,13 @@ always_comb begin
         XRET_FETCH:
             // Stay here until the fetch completes or a trap takes over.
             if (fb_push || interrupt_valid)
-                xret_next = XRET_IDLE;
+                xret_next = XRET_ADVANCE;
+        XRET_ADVANCE:
+            // 1 cycle: xret_hold_pc is released, pc_out advances to
+            // target+4. Suppress the normal fetch path so it doesn't
+            // re-fetch at the old pc_out=target before the advance
+            // propagates through program_counter.
+            xret_next = XRET_IDLE;
         default:
             xret_next = XRET_IDLE;
     endcase
@@ -567,10 +574,16 @@ end
 // WAIT:  suppress fetch (priv settling), drop wrong-priv rvalid
 // FETCH: drive target VA, wait for fb_push
 wire xret_draining = (xret_state == XRET_DRAIN);
-wire xret_hold_pc  = xret_draining || (xret_state == XRET_WAIT) || (xret_state == XRET_FETCH);
+wire xret_fetching = (xret_state == XRET_FETCH);
+wire xret_hold_pc  = xret_draining || (xret_state == XRET_WAIT) || xret_fetching;
 wire xret_drive_va = (xret_state == XRET_FETCH);
-wire xret_suppress = xret_draining || (xret_state == XRET_WAIT);
-wire xret_drop_push= xret_draining || (xret_state == XRET_WAIT);
+// Phase 4.10b: XRET_ADVANCE suppresses normal-path fetch for 1 cycle
+// while pc_out advances from target to target+4. Without this, the
+// normal path re-fetches at pc_out=target → duplicate buffer entry →
+// corrupted straddled instruction (Linux JAL bug at 0x80400002).
+wire xret_advance = (xret_state == XRET_ADVANCE);
+wire xret_suppress = xret_draining || (xret_state == XRET_WAIT) || xret_advance;
+wire xret_drop_push= xret_draining || (xret_state == XRET_WAIT) || xret_advance;
 
 // MMU instruction-side privilege view: just the live priv_level.
 // No combinational override needed — the xret_fetch_ctrl FSM waits
@@ -1041,6 +1054,7 @@ end
 // Phase 4.8: xret_drop_push drops the stale rvalid from the wrong-priv
 // fetch that was issued on the wb_xret_fire cycle (before the FSM could
 // suppress it). The rdata is from PA=VA (untranslated) and is garbage.
+//
 wire fb_push = imem_port.rvalid && !arb_redirect_valid && !xret_drop_push;
 
 fetch_pkg::fetch_buffer_entry_t fb_push_entry;
