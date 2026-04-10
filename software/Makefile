@@ -90,9 +90,12 @@ TESTS += pwm
 pwm_MAIN = tests/pwm/main.c
 pwm_SRCS = $(PWM_SW)/pwm_test.c
 
+TESTS += clint
+clint_MAIN = tests/clint/main.c
+
 # ─── Peripheral test flags ────────────────────────────────────────────────────
 # -DPeak_poke selects register peek/poke tests (works without external hardware)
-TEST_CFLAGS = -DPeak_poke
+TEST_CFLAGS = -DPeak_poke -DVERILATOR
 
 # ─── Boot text ────────────────────────────────────────────────────────────────
 BOOT_TEXT = $(BUILDDIR)/boot.text

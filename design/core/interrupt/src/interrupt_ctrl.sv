@@ -24,8 +24,9 @@ module interrupt_ctrl (
     input [31:0] status_i,
 
     // ── Program counters ────────────────────────────────────────────────
-    input [31:0] pc_id_i,              // ID-stage PC
+    input [31:0] pc_id_i,              // ID-stage PC (from aligner — 0 when buffer empty)
     input [31:0] pc_ie_i,              // IE-stage PC
+    input [31:0] pc_out_i,             // fetch PC (next instruction address)
 
     // ── Privilege and delegation ────────────────────────────────────────
     input [1:0]  priv_i,
@@ -120,6 +121,15 @@ wire store_access_fault = data_access_fault_i &  data_access_fault_is_store_i;
 wire [31:0] pc_for_id = insn_page_fault_i  ? insn_fault_addr_i :
                         insn_access_fault_i ? insn_access_fault_addr_i : pc_id_i;
 
+// PC for async interrupts: when the fetch buffer is between entries
+// (aligner gap cycle), pc_id_i drops to 0 while the previous
+// instruction has already moved to IE. If the interrupt fires on
+// that exact gap cycle, mepc must be the IE-stage PC (the oldest
+// in-flight instruction that the flush will kill) so it gets
+// re-executed after mret. When pc_id IS valid, it's the ID-stage
+// instruction about to enter IE — that's the standard mepc.
+wire [31:0] pc_for_async = (pc_id_i != 32'h0) ? pc_id_i : pc_ie_i;
+
 // Page fault address: data fault has priority over instruction fault
 wire [31:0] page_fault_addr = data_page_fault_i ? data_fault_addr_i : insn_fault_addr_i;
 
@@ -202,17 +212,17 @@ always_comb begin
     end else if (ebreak_valid) begin
         cause_code = 8'd3;  epc_out = pc_for_id; mtval_out = pc_for_id; is_interrupt = 1'b0;
     end else if (external_valid && m_ie_global) begin
-        cause_code = 8'd11; epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+        cause_code = 8'd11; epc_out = pc_for_async; mtval_out = 32'h0; is_interrupt = 1'b1;
     end else if (software_valid && m_ie_global) begin
-        cause_code = 8'd3;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+        cause_code = 8'd3;  epc_out = pc_for_async; mtval_out = 32'h0; is_interrupt = 1'b1;
     end else if (timer_valid && m_ie_global) begin
-        cause_code = 8'd7;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+        cause_code = 8'd7;  epc_out = pc_for_async; mtval_out = 32'h0; is_interrupt = 1'b1;
     end else if (s_external_valid && s_ie_global) begin
-        cause_code = 8'd9;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+        cause_code = 8'd9;  epc_out = pc_for_async; mtval_out = 32'h0; is_interrupt = 1'b1;
     end else if (s_software_valid && s_ie_global) begin
-        cause_code = 8'd1;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+        cause_code = 8'd1;  epc_out = pc_for_async; mtval_out = 32'h0; is_interrupt = 1'b1;
     end else if (s_timer_valid && s_ie_global) begin
-        cause_code = 8'd5;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b1;
+        cause_code = 8'd5;  epc_out = pc_for_async; mtval_out = 32'h0; is_interrupt = 1'b1;
     end else begin
         cause_code = 8'd0;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
     end

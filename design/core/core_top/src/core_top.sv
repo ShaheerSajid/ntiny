@@ -1379,6 +1379,7 @@ interrupt_ctrl interrupt_ctrl_inst
   // Program counters
   .pc_id_i            (pc_id),
   .pc_ie_i            (pc_ie),
+  .pc_out_i           (pc_out),
   // Privilege and delegation
   .priv_i             (priv_level),
   .medeleg_i          (medeleg),
