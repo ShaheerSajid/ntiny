@@ -958,6 +958,17 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
         inflight_i_fault_q <= 1'b0;
         inflight_i_cause_q <= 5'd0;
+    end else if (arb_redirect_valid && !imem_port.req) begin
+        // A redirect (trap/branch/xret) invalidates any in-flight fault
+        // from the previous fetch direction. Without this clear, a stale
+        // fault flag persists when the redirect's handler fetch is blocked
+        // by mmu_i_stall (ITLB miss at old priv), and the next fb_push
+        // (from refetch_after_trap) inherits the stale fault — creating a
+        // spurious 2nd trap at the wrong privilege (pmp_check_on_pa bug).
+        // The `!imem_port.req` guard ensures we don't clear when the
+        // redirect itself issues a new fetch (which might also fault).
+        inflight_i_fault_q <= 1'b0;
+        inflight_i_cause_q <= 5'd0;
     end else if (imem_port.req) begin
         if (mmu_i_access_fault) begin
             inflight_i_fault_q <= 1'b1;
