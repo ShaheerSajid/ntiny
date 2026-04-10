@@ -90,9 +90,14 @@ module fetch_buffer
             end
             count_q <= '0;
         end else if (flush_i) begin
-            // single-cycle clear; entry data left as-is (will be overwritten
-            // on next push) — only count is reset
+            // single-cycle clear: reset count AND scrub fault flags so a
+            // stale fault=1 cannot leak through the aligner if a wrong-path
+            // rvalid pushes into the buffer before the redirect's handler
+            // fetch overwrites the entry (pmp_check_on_pa root cause:
+            // see inflight_i_fault_q comments in core_top.sv).
             count_q <= '0;
+            for (i = 0; i < DEPTH; i = i + 1)
+                entries[i].fault <= 1'b0;
         end else begin
             // Decode push/pop combinations
             case ({push_i, pop_i})

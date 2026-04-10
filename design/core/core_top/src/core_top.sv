@@ -858,9 +858,21 @@ assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
 // Phase 4.8: xret_suppress holds off the fetch during XRET_WAIT (priv
 // settling). XRET_FETCH lets the normal ~fetch_producer_stall path issue
 // the req at the correct priv (mmu_i_stall gates naturally if PTW needed).
+//
+// Phase 4.10: suppress the redirect-cycle fetch for TRAP redirects
+// (~interrupt_valid gate). On a trap, priv_level hasn't settled yet
+// (csr_unit updates it at posedge), so the PMP check on the handler
+// fetch would use the OLD priv — e.g. priv=S instead of M, causing a
+// spurious access fault that re-captures inflight_i_fault_q=1 and
+// creates a 2nd trap with MPP=M. Deferring the handler fetch to the
+// refetch_after_trap cycle (1 cycle later) lets priv_level settle
+// first. Branch/xret/debug redirects keep the same-cycle fetch because
+// their priv_level is unchanged.
 assign imem_port.req   = refetch_after_trap |
-                         (arb_redirect_valid & ~mmu_i_stall & ~xret_suppress) |
-                         (~fetch_producer_stall & ~xret_suppress);
+                         (arb_redirect_valid & ~mmu_i_stall & ~xret_suppress
+                          & ~interrupt_valid) |
+                         (~fetch_producer_stall & ~xret_suppress
+                          & ~interrupt_valid);
 assign imem_port.we    = 1'b0;
 assign imem_port.be    = 4'b1111;
 assign imem_port.wdata = 32'b0;
@@ -967,6 +979,14 @@ always_ff @(posedge clk_i or posedge reset_i) begin
         // spurious 2nd trap at the wrong privilege (pmp_check_on_pa bug).
         // The `!imem_port.req` guard ensures we don't clear when the
         // redirect itself issues a new fetch (which might also fault).
+        //
+        // For TRAP redirects, the handler fetch is suppressed on the
+        // redirect cycle (see the ~interrupt_valid gate on imem_port.req)
+        // so imem_port.req=0 and this clear fires. This avoids the
+        // stale-priv PMP bug where the handler fetch at PA 0x80000e00
+        // would see priv=S instead of M and spuriously re-capture
+        // fault=1 into inflight_i_fault_q (confirmed by VCD cycles
+        // 1482–1486 before this fix).
         inflight_i_fault_q <= 1'b0;
         inflight_i_cause_q <= 5'd0;
     end else if (imem_port.req) begin
