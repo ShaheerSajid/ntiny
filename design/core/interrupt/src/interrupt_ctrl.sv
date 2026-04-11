@@ -136,7 +136,18 @@ wire [31:0] pc_for_id = insn_page_fault_i  ? insn_fault_addr_i :
 // in-flight instruction that the flush will kill) so it gets
 // re-executed after mret. When pc_id IS valid, it's the ID-stage
 // instruction about to enter IE — that's the standard mepc.
-wire [31:0] pc_for_async = (pc_id_i != 32'h0) ? pc_id_i : pc_ie_i;
+//
+// Phase 4.13c: when BOTH pc_id_i and pc_ie_i are 0 (the cycle
+// right after a wb_xret_fire — pipeline is freshly starting to
+// fetch the post-xret target, no instruction has reached IE yet),
+// fall back to pc_out_i which holds the xret target latched into
+// program_counter on the xret commit cycle. Without this, an
+// async interrupt firing one cycle after sret/mret saved mepc=0
+// and the M-mode handler returned to PC=0 — causing a NULL fetch
+// page fault later in S-mode.
+wire [31:0] pc_for_async = (pc_id_i != 32'h0) ? pc_id_i :
+                           (pc_ie_i != 32'h0) ? pc_ie_i :
+                                                pc_out_i;
 
 // Page fault address: data fault has priority over instruction fault
 wire [31:0] page_fault_addr = data_page_fault_i ? data_fault_addr_i : insn_fault_addr_i;
