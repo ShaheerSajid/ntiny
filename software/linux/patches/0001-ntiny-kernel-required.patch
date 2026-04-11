@@ -1,0 +1,29 @@
+diff --git a/arch/riscv/boot/dts/Makefile b/arch/riscv/boot/dts/Makefile
+index f60a280ab..03669f658 100644
+--- a/arch/riscv/boot/dts/Makefile
++++ b/arch/riscv/boot/dts/Makefile
+@@ -2,6 +2,7 @@
+ subdir-y += allwinner
+ subdir-y += canaan
+ subdir-y += microchip
++subdir-y += ntiny
+ subdir-y += renesas
+ subdir-y += sifive
+ subdir-y += starfive
+diff --git a/arch/riscv/kernel/head.S b/arch/riscv/kernel/head.S
+index 3710ea5d1..d5ef2063d 100644
+--- a/arch/riscv/kernel/head.S
++++ b/arch/riscv/kernel/head.S
+@@ -298,6 +298,12 @@ clear_bss_done:
+ 	la sp, init_thread_union + THREAD_SIZE
+ 	XIP_FIXUP_OFFSET sp
+ 	addi sp, sp, -PT_SIZE_ON_STACK
++	/* ntiny: initialize kernel_sp in thread_info so S-mode traps
++	 * during early boot (before any context switch) use the correct
++	 * kernel stack pointer. Without this, the trap handler's
++	 * _save_context loads a stale kernel_sp, and the trap frame
++	 * overlaps with the active call stack, corrupting saved registers. */
++	REG_S sp, TASK_TI_KERNEL_SP(tp)
+ #ifdef CONFIG_BUILTIN_DTB
+ 	la a0, __dtb_start
+ 	XIP_FIXUP_OFFSET a0

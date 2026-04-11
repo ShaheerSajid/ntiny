@@ -1,64 +1,18 @@
-# ntiny minimal Linux kernel config for RV32IMACSU + Sv32 MMU
-# Target: single-hart, 128MB RAM, OpenSBI, UART console
-#
-# This is the WITH-C build (compressed instructions enabled).
-# For the rv32ima (no-C) variant used to bypass c_controller alignment
-# edge cases during the fetch revamp, use ntiny_no_c_defconfig.
-
-# Architecture
-CONFIG_ARCH_RV32I=y
-CONFIG_NONPORTABLE=y
-# CONFIG_SMP is not set
-CONFIG_MMU=y
-
-# SoC — use generic/virt as base
-CONFIG_SOC_VIRT=y
-
-# Memory
 CONFIG_BLK_DEV_INITRD=y
-
-# Disable heavy features
-# CONFIG_MODULES is not set
-# CONFIG_VIRTUALIZATION is not set
-# CONFIG_PM is not set
-# CONFIG_CPU_IDLE is not set
-# CONFIG_HIGH_RES_TIMERS is not set
-# CONFIG_PROFILING is not set
-# CONFIG_BPF_SYSCALL is not set
-# CONFIG_CGROUPS is not set
-# CONFIG_NAMESPACES is not set
-# CONFIG_NET is not set
-# CONFIG_BLOCK is not set
-# CONFIG_SWAP is not set
-
-# Console — must enable RISCV_SBI_V01 because both HVC_RISCV_SBI and
-# SERIAL_EARLYCON_RISCV_SBI depend on it. Without RISCV_SBI_V01=y, olddefconfig
-# silently drops HVC_RISCV_SBI/EARLYCON_RISCV_SBI and the kernel boots in
-# total silence (bug #12, see docs/linux_boot_bugs_and_fixes.md).
+CONFIG_INITRAMFS_SOURCE="@NTINY_LINUX@/initramfs.cpio"
+CONFIG_EXPERT=y
+CONFIG_SOC_VIRT=y
+CONFIG_NONPORTABLE=y
+CONFIG_ARCH_RV32I=y
+# CONFIG_IRQ_STACKS is not set
 CONFIG_RISCV_SBI_V01=y
-CONFIG_TTY=y
-CONFIG_SERIAL_EARLYCON=y
-CONFIG_SERIAL_EARLYCON_RISCV_SBI=y
-CONFIG_HVC_RISCV_SBI=y
-CONFIG_PRINTK=y
-
-# Boot command line
 CONFIG_CMDLINE="earlycon=sbi console=hvc0"
 CONFIG_CMDLINE_FORCE=y
-
-# Initramfs — must point at the cpio.gz that gets baked into the kernel image.
-# Empty string here causes a "VFS: Unable to mount root fs on unknown-block(0,0)"
-# panic at kernel_init → prepare_namespace → mount_root_generic.
-CONFIG_BLK_DEV_INITRD=y
-CONFIG_INITRAMFS_SOURCE="/home/shaheer/Documents/github/ntiny/software/linux/initramfs.cpio.gz"
-
-# Minimal filesystem
-CONFIG_PROC_FS=y
-CONFIG_SYSFS=y
-CONFIG_TMPFS=y
+# CONFIG_STACKPROTECTOR is not set
+# CONFIG_BLOCK is not set
 CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
-
-# Disable debug for size
-# CONFIG_DEBUG_KERNEL is not set
+CONFIG_SERIAL_EARLYCON_RISCV_SBI=y
+CONFIG_HVC_RISCV_SBI=y
+CONFIG_TMPFS=y
 # CONFIG_FTRACE is not set
