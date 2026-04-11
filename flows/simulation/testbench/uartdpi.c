@@ -76,13 +76,15 @@ char uartdpi_read(void* obj) {
 
 void uartdpi_write(void *obj, int data)
 {
-   uartdpi_t *dpi = (uartdpi_t*) obj;
+  uartdpi_t *dpi = (uartdpi_t*) obj;
 
+  /* Forward the byte to the PTY only. The previous fputc-to-stderr
+   * mirror leaked the slow bit-by-bit serialized stream into the
+   * terminal where Vtb_soc_top runs, garbling per-character output
+   * (interleaved with the testbench's fast bus capture in uart.log).
+   * The PTY is still available for interactive sessions. */
   int rv = write(dpi->master, &data, 1);
   (void) rv;
-
-  /* Print directly to terminal and log file */
-  fputc(data, stderr);
   if (dpi->logfile)
     fputc(data, dpi->logfile);
 }
