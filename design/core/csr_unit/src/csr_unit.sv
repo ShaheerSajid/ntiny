@@ -442,9 +442,9 @@ module csr_unit (
 			INSTRETH:       csr_value_o = _MINSTRETH;
 			MSTATUS:        csr_value_o = {mstatus_sd, _MSTATUS[30:0]};
 `ifdef FPU
-			MISA:           csr_value_o = 32'h40141127; // RV32IMAFCSU
+			MISA:           csr_value_o = 32'h40141125; // RV32IMAFCSU (no B — only Zba+Zbb, not full B)
 `else
-			MISA:           csr_value_o = 32'h40141107; // RV32IMACSU
+			MISA:           csr_value_o = 32'h40141105; // RV32IMACSU (no B — only Zba+Zbb, not full B)
 `endif
 			MIE:            csr_value_o = _MIE;
 			MTVEC:          csr_value_o = _MTVEC;
