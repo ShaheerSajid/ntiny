@@ -169,7 +169,11 @@ end
 // Captures UART TX register writes directly from the bus, bypassing
 // the slow bit-by-bit UART serializer. Characters appear immediately.
 integer sim_con_fd;
-initial sim_con_fd = $fopen("uart.log", "w");
+integer sim_dbg_fd;
+initial begin
+	sim_con_fd = $fopen("uart.log", "w");
+	sim_dbg_fd = $fopen("debug.log", "w");
+end
 
 always @(posedge clk) begin
 	if (!reset &&
@@ -182,6 +186,34 @@ always @(posedge clk) begin
 	end
 end
 
+// ── Trap / mret monitor ──
+always @(posedge clk) begin
+	if (!reset) begin
+		if (soc_top_inst.core_top_inst.interrupt_valid) begin
+			$fwrite(sim_dbg_fd, "TRAP @%0d pc=%08h cause=%08h priv=%0d→%0d tval=%08h epc=%08h satp=%08h\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_out,
+				soc_top_inst.core_top_inst.ecause_csr,
+				soc_top_inst.core_top_inst.csr_unit_inst.priv_level,
+				soc_top_inst.core_top_inst.trap_to_s ? 2'd1 : 2'd3,
+				soc_top_inst.core_top_inst.mtval_csr,
+				soc_top_inst.core_top_inst.epc_csr,
+				soc_top_inst.core_top_inst.csr_unit_inst._SATP);
+			$fflush(sim_dbg_fd);
+		end
+		if (soc_top_inst.core_top_inst.wb_xret_fire) begin
+			$fwrite(sim_dbg_fd, "XRET @%0d pc=%08h priv=%0d satp=%08h\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_out,
+				soc_top_inst.core_top_inst.csr_unit_inst.priv_level,
+				soc_top_inst.core_top_inst.csr_unit_inst._SATP);
+			$fflush(sim_dbg_fd);
+		end
+	end
+end
+
+
+
 // ── Lightweight PC sampler (every 1M cycles) ────────────────────
 // Useful for finding cycle numbers to feed --vcd-start-cycle / --vcd-stop-cycle.
 reg [31:0] pc_sample_cnt;
@@ -191,12 +223,13 @@ always @(posedge clk) begin
 	else begin
 		pc_sample_cnt <= pc_sample_cnt + 1;
 		if (pc_sample_cnt[19:0] == 20'h0) begin // every ~1M cycles
-			$fwrite(sim_con_fd, "PC[%0d] pc=%08h priv=%0d satp=%08h\n",
+			$fwrite(sim_dbg_fd, "PC[%0d] pc=%08h priv=%0d satp=%08h fdt0=%08h\n",
 				pc_sample_cnt,
 				soc_top_inst.core_top_inst.pc_out,
 				soc_top_inst.core_top_inst.csr_unit_inst.priv_level,
-				soc_top_inst.core_top_inst.csr_unit_inst._SATP);
-			$fflush(sim_con_fd);
+				soc_top_inst.core_top_inst.csr_unit_inst._SATP,
+				soc_top_inst.ram_inst.mem[32'h880000]);  // FDT magic at phys 0x82200000
+			$fflush(sim_dbg_fd);
 		end
 	end
 end
