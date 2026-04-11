@@ -212,6 +212,37 @@ always @(posedge clk) begin
 	end
 end
 
+// ── sbi_putc auipc/jalr trace ──
+// Targeted at the NULL pointer crash from sbi_putc's jalr to
+// sbi_console_putchar (c0150e52). Capture pc_id, pc_ie, pc_iwb, ra
+// register, fb head/next vaddrs, and fb_push events whenever we're
+// near sbi_putc (PC range c0150e44..c0150e60). The crash should fire
+// roughly 1 cycle after the jalr executes — so log the few cycles
+// AROUND the auipc + jalr execution.
+always @(posedge clk) begin
+	if (!reset) begin
+		// IE / IWB activity inside sbi_putc
+		if ((soc_top_inst.core_top_inst.pc_ie  >= 32'hc0150e44 &&
+		     soc_top_inst.core_top_inst.pc_ie  <= 32'hc0150e5c) ||
+		    (soc_top_inst.core_top_inst.pc_iwb >= 32'hc0150e44 &&
+		     soc_top_inst.core_top_inst.pc_iwb <= 32'hc0150e5c)) begin
+			$fwrite(sim_dbg_fd, "PUTC @%0d pc_id=%08h pc_ie=%08h pc_iwb=%08h wr=%0b@x%0d=%08h ra=%08h fb_cnt=%0d hva=%08h nva=%08h\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_id,
+				soc_top_inst.core_top_inst.pc_ie,
+				soc_top_inst.core_top_inst.pc_iwb,
+				soc_top_inst.core_top_inst.rf_wr_en,
+				soc_top_inst.core_top_inst.rf_wr_addr,
+				soc_top_inst.core_top_inst.rf_wr_data,
+				soc_top_inst.core_top_inst.regfile_inst.regfile[1],
+				soc_top_inst.core_top_inst.fb_count,
+				soc_top_inst.core_top_inst.fb_head.vaddr,
+				soc_top_inst.core_top_inst.fb_next.vaddr);
+			$fflush(sim_dbg_fd);
+		end
+	end
+end
+
 
 
 // ── Lightweight PC sampler (every 1M cycles) ────────────────────
