@@ -10,6 +10,25 @@ index f60a280ab..03669f658 100644
  subdir-y += renesas
  subdir-y += sifive
  subdir-y += starfive
+diff --git a/arch/riscv/kernel/cpufeature.c b/arch/riscv/kernel/cpufeature.c
+index 1cfbba65d..468d6b170 100644
+--- a/arch/riscv/kernel/cpufeature.c
++++ b/arch/riscv/kernel/cpufeature.c
+@@ -651,7 +651,13 @@ static int check_unaligned_access_boot_cpu(void)
+ 	return 0;
+ }
+ 
+-arch_initcall(check_unaligned_access_boot_cpu);
++/* ntiny: disabled — the busy-loop-on-jiffies inside check_unaligned_access
++ * spins waiting for the timer IRQ to bump jiffies, but at this initcall
++ * stage our SBI timer chain hasn't yet started servicing the kernel side
++ * predictably enough; the loop never exits and Linux hangs early in boot.
++ * Skipping this only loses the per-cpu unaligned-access-speed hwcap, which
++ * we don't use anyway. */
++//arch_initcall(check_unaligned_access_boot_cpu);
+ 
+ #ifdef CONFIG_RISCV_ALTERNATIVE
+ /*
 diff --git a/arch/riscv/kernel/head.S b/arch/riscv/kernel/head.S
 index 3710ea5d1..d5ef2063d 100644
 --- a/arch/riscv/kernel/head.S
