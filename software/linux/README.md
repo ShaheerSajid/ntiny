@@ -9,11 +9,16 @@ Toolchain: OpenSBI v1.8 → Linux v6.6 → Buildroot busybox initramfs → Veril
 cd software/linux
 make prepare      # one-time: clone Linux/OpenSBI, apply ntiny patches
 make build        # rebuild kernel + opensbi + ram.hex (run after RTL changes)
-make run          # launch the verilator sim and stream uart.log
+make run          # launch the verilator sim and tail uart.log
+
+# in a second terminal (optional, watch boot live):
+tail -f flows/simulation/uart.log
 ```
 
 `make run` expects `flows/simulation/Vtb_soc_top` to exist (built separately by
-the verilator flow). Output goes to `flows/simulation/uart.log`.
+the verilator flow). Output goes to `flows/simulation/uart.log`. We do not
+mirror UART bytes to the simulator's stdout — verilator's own stdout buffer
+interleaves with `$write()` calls and the per-character output gets garbled.
 
 ## Repos and versions
 

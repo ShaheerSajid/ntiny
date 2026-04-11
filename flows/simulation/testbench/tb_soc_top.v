@@ -168,8 +168,10 @@ end
 // ── Fast simulation console ─────────────────────────────────────
 // Captures UART TX register writes directly from the bus, bypassing
 // the slow bit-by-bit UART serializer. Characters appear immediately
-// in uart.log AND mirror to stdout so a `make`/Verilator console run
-// shows the boot live.
+// in uart.log. Watch the boot live with `tail -f uart.log` in a
+// second terminal — Verilator's own stdout buffering interleaves
+// $write() calls with verilator-internal output and produces
+// garbled per-character output, so we don't mirror to stdout.
 integer sim_con_fd;
 initial sim_con_fd = $fopen("uart.log", "w");
 
@@ -180,7 +182,6 @@ always @(posedge clk) begin
 	    soc_top_inst.dmem_bus.addr == 32'h10000004) begin  // UART TX @ 0x10000004
 		$fwrite(sim_con_fd, "%c", soc_top_inst.dmem_bus.wdata[7:0]);
 		$fflush(sim_con_fd);
-		$write("%c", soc_top_inst.dmem_bus.wdata[7:0]);
 	end
 end
 
