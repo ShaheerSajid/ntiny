@@ -752,37 +752,35 @@ wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
 //      target+4) and the MMU starts a SECOND PTW for the wrong VA.
 //
 //   2. After PTW finishes and the bus fetches the target, sequential
-//      fetches resume immediately (target+4, target+8, ...). For a
-//      target at the top of the address space (e.g. 0xfffffffc with the
-//      vm_VA_all_ones test) this wraps to VA 0x00000000, whose PTE has
-//      A=0, and the wrong-path PTW faults — squashing the in-pipeline
-//      target instruction (which would have redirected away if given
-//      the chance to commit).
+//      fetches resume immediately (target+4, target+8, ...).
 //
 // Fix: latch the redirect target into a "pending fetch" register on the
 // cycle of a deferred redirect, drive `i_vaddr` from it while pending,
 // hold `pc_out` so the off-by-one doesn't break, and only clear the
 // pending bit when the target instruction has REACHED IE — i.e., when
-// `pc_ie == pending_target_q`. By that point the target is committing
-// (or stalling) in IE; if it's a branch / xRET / trap it has already
-// fired its own redirect on the same cycle and `pc_in` reflects the
-// new direction; if it's a sequential instruction `pc_in = target + 4`
-// is the right next fetch.
+// `pc_ie == pending_target_q`.
 //
-// Clearing on `imem_port.req` (the bus-issue cycle) was the original
-// implementation but allowed sequential wrong-path fetches to start
-// before the target reached IE — which is exactly what triggered
-// vm_VA_all_ones. Clearing on `pc_ie == pending_target_q` is the
-// right point.
+// Duplicate-push problem (the _printk c.addi16sp sp,-64 sp drift bug):
+// while pending_target_v_q is held, pc_out is held and i_vaddr is driven
+// from pending_target_q, but `imem_port.req` keeps firing every cycle
+// (gated only by fetch_producer_stall). Each cycle the producer issues
+// a duplicate fetch to the same address, both rvalids push duplicate
+// entries into the fetch_buffer, and the aligner emits each compressed
+// instruction twice — c.addi16sp sp,-64 then commits twice, leaking
+// 64 bytes of stack per deferred redirect.
 //
-// This is the pipelined equivalent of spike's non-speculative fetch:
-// don't issue the fetch past the redirect target until the target's
-// own commit-stage decision is known. The pending register acts as a
-// 1-instruction "barrier" that drains naturally when the target retires.
+// Fix (Phase 4.11): track whether the target's fetch_buffer push has
+// already happened with `pending_pushed_q`, and gate `fb_push` on
+// `~(pending_target_v_q && pending_pushed_q)`. This drops duplicate
+// pushes WITHOUT blocking the producer (so the pipeline can't deadlock
+// if a flush squashes the entry mid-flight — the next push naturally
+// re-fills).
 logic [31:0] pending_target_q;
 logic        pending_target_v_q;
 wire         redirect_deferred = arb_redirect_valid & mmu_i_stall;
 wire         pending_target_drained = pending_target_v_q && (pc_ie == pending_target_q);
+// Forward declaration: actual flop sits beside fb_push (after fetch_flush)
+logic        pending_first_push_done_q;
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
         pending_target_q   <= 32'b0;
@@ -791,11 +789,66 @@ always_ff @(posedge clk_i or posedge reset_i) begin
         // Capture (or re-capture on a nested redirect) the deferred target.
         pending_target_q   <= pc_in;
         pending_target_v_q <= 1'b1;
+    end else if (arb_redirect_valid) begin
+        // Non-deferred redirect (mmu_i_stall=0) takes priority and is
+        // fetched directly via the arb_red path of imem_port.req. The
+        // old pending target is abandoned — without this branch,
+        // pending_target_v_q would never clear and the producer would
+        // never see normal pc_out advance.
+        pending_target_v_q <= 1'b0;
     end else if (pending_target_drained) begin
         // Target instruction has reached IE — release the override.
         pending_target_v_q <= 1'b0;
     end
 end
+
+// Phase 4.13b: straddled-instruction support for half-aligned pending
+// targets.
+//
+// A 4-byte instruction at a half-aligned VA (e.g. paging_init's
+// `lui a0, 0x9dbfe` at c04046f6 after a sfence.vma triggers a deferred
+// PTW redirect to that VA) STRADDLES two consecutive icache words. The
+// compressed_aligner needs both `[word @ target & ~3, word @ (target+4) & ~3]`
+// to assemble the instruction. While `pending_target_v_q` holds pc_out
+// at the target, the producer can only fetch the FIRST word; the second
+// word is unreachable, the aligner stalls, pc_ie never reaches the
+// target, and the pipeline deadlocks.
+//
+// Fix: track whether the FIRST fb_push for the pending target has
+// landed. For half-aligned targets only, release pc_out after the first
+// push so the producer can advance to fetch the second word. For
+// word-aligned targets we keep the original behaviour (hold until
+// pc_ie==target) — that path is needed by vm_VA_all_ones (target at
+// 0xfffffffc, target+4 wraps to 0 which is unmapped, the wrong-path
+// fetch faults and squashes the legitimate target).
+//
+// pending_release_for_straddle is high once the first push for a
+// half-aligned target has been observed. It releases both the pc_out
+// hold and the i_vaddr override. The producer then advances normally,
+// fetches the next word, the aligner assembles the straddled
+// instruction, and pc_ie eventually reaches the target — clearing
+// pending_target_v_q via the existing pending_target_drained path.
+//
+// pending_first_push_done_q is reset on:
+//   - reset_i
+//   - redirect_deferred (new pending session captured a fresh target)
+//   - fetch_flush (fb was squashed; the entry is gone, allow re-fetch)
+//   - pending_target_drained (session ended)
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        pending_first_push_done_q <= 1'b0;
+    end else if (redirect_deferred || fetch_flush || pending_target_drained) begin
+        pending_first_push_done_q <= 1'b0;
+    end else if (pending_target_v_q && fb_push) begin
+        pending_first_push_done_q <= 1'b1;
+    end
+end
+
+wire pending_release_for_straddle = pending_target_v_q
+                                 && pending_target_q[1]
+                                 && pending_first_push_done_q;
+wire pending_holds_pc        = pending_target_v_q && !pending_release_for_straddle;
+wire pending_overrides_vaddr = pending_target_v_q && !pending_release_for_straddle;
 
 `ifdef BOOT
 program_counter #(.DEFAULT(32'h00001000)) program_counter_inst
@@ -830,7 +883,7 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 	// Phase 4.8: xret_hold_pc keeps pc_out parked at the xret target
 	// while the FSM waits for priv to settle and the fetch to complete.
 	.stall_i	((interrupt_valid | ret_pulse | arb_redirect_valid) ? 1'b0 :
-	             (fetch_producer_stall | pending_target_v_q | xret_hold_pc)),
+	             (fetch_producer_stall | pending_holds_pc | xret_hold_pc)),
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
@@ -847,7 +900,7 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 // MMU translates the correct VA at the now-settled priv_level.
 wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_after_trap) ? pc_out :
                       xret_drive_va                                   ? xret_target_q :
-                      pending_target_v_q                              ? pending_target_q :
+                      pending_overrides_vaddr                         ? pending_target_q :
                                                                         pc_in;
 assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
 // Force req=1 during refetch even when the producer is otherwise stalled.
@@ -1056,8 +1109,7 @@ end
 // Phase 4.8: xret_drop_push drops the stale rvalid from the wrong-priv
 // fetch that was issued on the wb_xret_fire cycle (before the FSM could
 // suppress it). The rdata is from PA=VA (untranslated) and is garbage.
-//
-wire fb_push = imem_port.rvalid && !arb_redirect_valid && !xret_drop_push;
+wire fb_push_raw = imem_port.rvalid && !arb_redirect_valid && !xret_drop_push;
 
 fetch_pkg::fetch_buffer_entry_t fb_push_entry;
 assign fb_push_entry.word  = imem_port.rdata;
@@ -1075,6 +1127,66 @@ assign fb_push_entry.vaddr = {inflight_vaddr_q[31:2], 2'b00};
 // keep firing through the legacy direct mmu_i_*_fault_ptw path.
 assign fb_push_entry.fault = inflight_i_fault_q;
 assign fb_push_entry.cause = inflight_i_cause_q;
+
+// Phase 4.13: vaddr-based duplicate-push dedup.
+//
+// The producer's imem_port.req is held high every cycle that
+// ~fetch_producer_stall. While pending_target_v_q is held (for a
+// deferred redirect whose target needs PTW), pc_out is parked and
+// i_vaddr is driven from pending_target_q (a fixed value), so the
+// producer issues 2+ identical fetches back-to-back. Both rvalids
+// push duplicate entries into the fetch_buffer, the aligner emits the
+// same compressed instructions twice, and IE re-runs them with rs1
+// FORWARDED from the first commit (so the second commit computes a
+// new value, e.g. `c.addi16sp sp,-64` shifts sp by 64 a second time).
+// Across hundreds of SBI ecalls during early boot the sp drift
+// accumulates and breaks setup_arch's epilogue.
+//
+// Earlier attempts to fix this in the producer (Phase 4.10/4.11/4.12
+// FSM and pending_req_block variants) deadlocked: a 4-byte instruction
+// straddled across two icache words (e.g. `lui a0` at half-aligned
+// c04046f6, after a sfence.vma flushes the ITLB and forces a deferred
+// PTW redirect to the next sequential instruction) needs the producer
+// to issue TWO different fetches in a row. Blocking the producer at
+// the second fetch leaves the aligner with only one half of the
+// instruction; pc_ie never reaches the target; FSM never exits.
+//
+// The proper fix lives at the buffer push gate, where we can compare
+// vaddrs and drop only the truly duplicate ones:
+//
+//   - Track the previous successful push's vaddr in last_pushed_vaddr_q.
+//   - On a new push attempt, drop it if the vaddr matches the last
+//     pushed vaddr (i.e. the producer just over-issued).
+//   - Clear the history on fetch_flush so a re-push after a
+//     branch/xret/trap is not falsely dropped.
+//
+// Straddled instructions: the two halves come from different
+// word-aligned vaddrs (c04046f4 and c04046f8), so the vaddr comparison
+// does NOT trip and both pushes go through. ✓
+//
+// Normal sequential: pc_out advances every cycle, every push has a
+// different vaddr. ✓
+//
+// Duplicate-fetch bug: the second push has the same vaddr as the
+// first → dropped. ✓
+//
+// This fix is downstream of the producer (no req throttling) so it
+// cannot deadlock on multi-word fetch sequences.
+logic [31:0] last_pushed_vaddr_q;
+logic        last_pushed_valid_q;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i || fetch_flush) begin
+        last_pushed_vaddr_q <= 32'b0;
+        last_pushed_valid_q <= 1'b0;
+    end else if (fb_push_raw) begin
+        last_pushed_vaddr_q <= fb_push_entry.vaddr;
+        last_pushed_valid_q <= 1'b1;
+    end
+end
+
+wire fb_push_dup = last_pushed_valid_q
+                && (fb_push_entry.vaddr == last_pushed_vaddr_q);
+wire fb_push     = fb_push_raw && !fb_push_dup;
 
 // Aligner output wires (forward declared so the producer back-pressure
 // computed below can reference fb_full / fb_count from the buffer).
