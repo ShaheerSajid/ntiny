@@ -673,6 +673,231 @@ the c_controller's clock enable (not just the IE register wall). See
 
 ---
 
+## 19. Duplicate fb_push During Deferred-Redirect (sp drift in setup_arch)
+
+**Symptom**: Linux runs through ~450 SBI ecalls during early boot,
+then `setup_arch`'s epilogue reads `ra` from a local-variable spill
+slot, jumps to a garbage VA `0xc7b06c40`, and traps with "Unable to
+handle kernel paging request". sp had drifted by 64 bytes per
+deferred-redirect during boot (e.g., once per `_printk` call).
+
+**Root Cause**: When `arb_redirect_valid & mmu_i_stall`
+(`redirect_deferred`), the producer latches `pending_target_q` and
+holds `pc_out` so `i_vaddr` stays at the deferred target. But there
+was **no gate against duplicate issue** — `imem_port.req` fired every
+cycle that `~fetch_producer_stall`. Each cycle's identical fetch
+returned a separate rvalid, both pushed identical entries into the
+fetch_buffer, the compressed_aligner emitted the same compressed
+instructions twice, and IE re-ran them with `rs1` *forwarded* from the
+first commit (so `c.addi16sp sp,-64` decremented sp twice, etc.).
+
+**Fix** (Phase 4.13, commit `3d8c004`): vaddr-based fb_push dedup.
+Track the previous successful push's vaddr (`last_pushed_vaddr_q`) and
+drop a new push that matches it. Reset on `fetch_flush` so post-redirect
+re-pushes are not falsely dropped.
+
+**Why earlier producer-side FSM attempts (FSM v1/v2/Phase 4.11/4.12)
+all deadlocked**: Phase 4.13b below.
+
+---
+
+## 20. Straddled-Instruction Deadlock at Half-Aligned Deferred Targets
+
+**Symptom**: After Phase 4.13 (fb_push dedup), Linux hangs in
+`paging_init` at `c04046f6` (`lui a0, 0x9dbfe`) — the instruction
+right after `local_flush_tlb_page`'s `sfence.vma`. PC sampler shows
+`pc_out` stuck at the same address for tens of millions of cycles.
+
+**Root Cause**: `c04046f6` is a 4-byte instruction at a half-aligned
+VA. It straddles two 4-byte icache words: bytes from word `c04046f4`
++ bytes from word `c04046f8`. The `sfence.vma` flushes the ITLB; the
+next fetch faults; `arb_redirect_valid & mmu_i_stall` fires
+`redirect_deferred` with `pending_target_q = c04046f6`. Pending then
+holds `pc_out = c04046f6` and drives `i_vaddr` from
+`pending_target_q`, so the producer can only fetch the **first** word.
+The second word never enters the buffer, the aligner can't assemble
+the straddled instruction, `pc_ie` never reaches the target, pending
+never clears.
+
+**Fix** (Phase 4.13b, commit `3d8c004`): track whether the target's
+first push has happened (`pending_first_push_done_q`). For
+**half-aligned** pending targets *only*, release `pc_out` after the
+first push so the producer can advance to fetch the next word.
+Word-aligned targets keep the original behaviour (hold until
+`pc_ie==target`) — that path is still needed by `vm_VA_all_ones`.
+
+Also added: `pending_target_v_q` clears on non-deferred
+`arb_redirect_valid` so an abandoned target can no longer block
+subsequent fetches.
+
+---
+
+## 21. Post-xret Async-Interrupt mepc=0
+
+**Symptom**: After Linux boots through `setup_arch` and into late
+initcalls, kernel oops with `epc=0`, `cause=0xc` (S-mode insn page
+fault). dump shows the prior trap had `cause=0x80000007` (M-mode
+timer) with `epc=0` saved.
+
+**Trace evidence** (cycle 10664685):
+```
+XRET @10664684 pc=8000052a priv=3 satp=80081880      ← mret to S-mode
+TRAP @10664685 pc=c000501c cause=80000007 epc=00000000
+XRET @10665010 pc=8000052a priv=3 satp=80081880      ← mret back to mepc=0
+TRAP @10665016 pc=00000000 cause=0000000c epc=00000000  ← S-mode fetch fault @ 0
+```
+
+**Root Cause**: The cycle right after `wb_xret_fire`, both `pc_id_i`
+and `pc_ie_i` are 0 — the pipeline is freshly starting to fetch the
+post-xret target and no instruction has reached IE yet. Phase 4.10b's
+fix `pc_for_async = (pc_id_i != 0) ? pc_id_i : pc_ie_i` had a hole
+for this exact case: both are 0, so `pc_for_async = 0` and `mepc`
+gets latched as 0. The M-mode handler returns to PC=0 and S-mode then
+faults on the fetch.
+
+**Fix** (Phase 4.13c, commit `0816f0f`): extend the fallback chain to
+`pc_out_i` (which holds the xret target latched into program_counter
+on the xret commit cycle):
+```verilog
+wire [31:0] pc_for_async = (pc_id_i != 32'h0) ? pc_id_i :
+                           (pc_ie_i != 32'h0) ? pc_ie_i :
+                                                pc_out_i;
+```
+`pc_out_i` was already plumbed into `interrupt_ctrl` as part of
+Phase 4.10b ("for future use") — now consumed.
+
+---
+
+## 22. Kernel head.S Missing Early TASK_TI_KERNEL_SP Init
+
+**Symptom**: Linux's first S-mode trap during early boot corrupts the
+saved register frame. `_save_context` reads `lw sp, 8(tp)`
+(TASK_TI_KERNEL_SP), gets a stale value (whatever happened to be at
+`init_task->thread_info.kernel_sp`), and writes the trap frame on top
+of the live kernel stack — clobbering saved regs.
+
+**Root Cause**: Linux's normal context-switch path writes
+`TASK_TI_KERNEL_SP` on every switch, but **before any switch ever
+happens** (during early boot from start_kernel through setup_arch),
+the slot was never initialized. Most cores never trip this because
+they don't take an S-mode trap before `init_task`'s first
+`switch_to()`. ntiny does (early SBI ecalls during bringup).
+
+**Fix** (kernel patch in
+`software/linux/patches/0001-ntiny-kernel-required.patch`):
+```asm
+# arch/riscv/kernel/head.S, after the second `addi sp, sp, -PT_SIZE_ON_STACK`
+REG_S sp, TASK_TI_KERNEL_SP(tp)
+```
+6 lines including a comment. **The single most important kernel
+patch**: without it, every other Linux fix is moot.
+
+---
+
+## 23. cpufeature.c check_unaligned_access Busy-Loops on jiffies
+
+**Symptom**: After 23M cycles of progress through early boot Linux
+hangs at `c0002b90..c0002b9c`, a 16-byte loop. Function:
+`check_unaligned_access` (cpufeature.c). Loop:
+```c
+preempt_disable();
+start_jiffies = jiffies;
+while ((now = jiffies) == start_jiffies)
+    cpu_relax();
+```
+
+**Root Cause**: At this `arch_initcall` stage on ntiny the SBI timer
+chain doesn't service the kernel side predictably enough — the loop's
+`READ_ONCE(jiffies)` never observes an update. The kernel makes
+progress through other initcalls fine (timer IRQs *do* fire), so the
+window is specific to this very early initcall. Under deep
+investigation the root cause is one of:
+1. SBI set_timer not yet armed at this initcall stage
+2. STIP→sip→sstatus.SIE delivery race specific to this preempt_disable+pause loop
+3. D-cache returning a stale `jiffies` line (less likely on a single-hart)
+
+**Fix** (kernel patch — `cpufeature.c` 1-line disable):
+```diff
+-arch_initcall(check_unaligned_access_boot_cpu);
++//arch_initcall(check_unaligned_access_boot_cpu);
+```
+Loses the per-cpu unaligned-access-speed hwcap, which is only used by
+`hwprobe(2)` syscall consumers. ntiny doesn't query it. **Workaround,
+not root-cause fix.** Real fix path is in `docs/post_linux_roadmap.md`.
+
+---
+
+## 24. cpio Missing /dev/console Causes Init to Run with Closed FDs
+
+**Symptom**: First time running with the mini initramfs, kernel reaches
+`Run /init as init process`, then immediately panics with
+`Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100`.
+Just before that: `Warning: unable to open an initial console.`
+
+**Root Cause**: The cpio archive was created from a directory tree
+without root, so `/dev` ended up empty (no `/dev/console` device node).
+The kernel runs `/init` with `fd 0/1/2` not connected, init's printf
+goes nowhere, init tries `execve("/bin/sh")` which fails, init returns
+1, kernel panics because init can never exit.
+
+**Fix**: Use `usr/gen_init_cpio` (Linux source-tree host tool) with a
+spec file that explicitly creates `/dev/console`:
+```
+dir  /dev      0755 0 0
+nod  /dev/console 0600 0 0 c 5 1
+file /init     /path/to/init 0755 0 0
+```
+gen_init_cpio can create device nodes from the spec without needing
+root, unlike `cpio -i`. Also documented in
+`software/linux/initramfs_src/cpio_list`.
+
+---
+
+## 25. CONFIG_INITRAMFS_COMPRESSION_GZIP Re-Gzips an Already-Uncompressed cpio
+
+**Symptom**: After fixing #24 and switching to a 4MB busybox cpio, boot
+spends ~30M cycles in `inflate_fast` (`c010cce4..c010cf38`) before
+actually starting the rootfs. PC sampler shows `pc_out` confined to a
+few hundred bytes for tens of millions of cycles.
+
+**Root Cause**: `CONFIG_INITRAMFS_COMPRESSION_GZIP=y` is the default
+for arm/x86/risc-v defconfigs. `usr/Makefile` re-gzips whatever
+`CONFIG_INITRAMFS_SOURCE=` points at, even if it's already an
+uncompressed `.cpio`. So even when we feed in raw bytes the kernel
+embeds the gzipped form and decompresses it at boot.
+
+**Fix**: Switch to `CONFIG_INITRAMFS_COMPRESSION_NONE=y` (commit
+`daaf7b7`). The `usr/initramfs_inc_data` blob then matches the source
+cpio bit-for-bit. Boot skips inflate entirely.
+
+---
+
+## 26. uartdpi Mirroring to stderr Garbles the Verilator Console
+
+**Symptom**: Running `Vtb_soc_top` directly in a terminal produces
+random-looking character soup like `nIexS otSeneBEice:tro'pbo0eeIuO`.
+`uart.log` is clean, but the terminal where verilator runs is garbled.
+
+**Root Cause**: `uartdpi.c::uartdpi_write()` did
+`fputc(data, stderr)` for every byte that came out of the bit-by-bit
+serializer, on top of forwarding it to the PTY. That stderr mirror
+leaked the slow serialized stream into the terminal where Vtb_soc_top
+runs (verilator inherits the user's stderr), interleaving with the
+testbench's fast bus capture and producing per-character noise.
+
+**Fix** (commit `d227741`): drop the `fputc(stderr)`. The clean copy
+already lives in `uart.log` via the testbench's fast UART TX bus
+monitor; the PTY is still available for interactive sessions via
+`/dev/pts/N`. Recommended workflow:
+```
+# Terminal 1
+./Vtb_soc_top --timeout 1000000000
+# Terminal 2
+tail -f uart.log
+```
+
+---
+
 ## Summary Table
 
 ### Pre-Linux (MMU, FPU, Core)
@@ -701,7 +926,7 @@ the c_controller's clock enable (not just the IE register wall). See
 | 6 | CLINT/PLIC reads | Critical | clint.sv, plic_rv.sv | Bus timing mismatch |
 | 7 | TIME CSR zero | Critical | csr_unit | Missing HW wiring |
 | 8 | No misaligned HW | Major | core2avl, interrupt_ctrl | Missing feature |
-| 9 | Kernel spin loop | Major | Linux kernel | Single-hart edge case |
+| 9 | Kernel spin loop (SRET) | Major | Linux kernel | Single-hart edge case |
 | 10 | UART TX stall | Major | platform.c | Sim vs HW mismatch |
 | 11 | UART log conflict | Minor | uartdpi.c, tb_soc_top.v | Dual writers |
 | 12 | No kernel console | Config | Linux .config | Missing drivers |
@@ -711,5 +936,14 @@ the c_controller's clock enable (not just the IE register wall). See
 | 16 | trap_seq SRET_WAIT suppresses real i-fault | Critical | trap_sequencer | FSM exit on wrong condition |
 | 17 | privilege_unit ie_stall_i unwired | Critical | core_top | Port instantiation gap |
 | 18 | IE wall latches stale decode at trap entry | Critical | core_top, hazard_unit | Combinational decode of in-flight fetch |
+| 19 | Duplicate fb_push (sp drift in setup_arch) | Critical | core_top fetch path | Producer issues duplicate reqs while pc_out is held |
+| 20 | Straddled-insn deadlock at half-aligned target | Critical | core_top pending logic | pc_out hold prevents 2nd word fetch |
+| 21 | Post-xret async mepc=0 | Critical | interrupt_ctrl | pc_for_async fallback missed pc_out |
+| 22 | head.S missing early kernel_sp init | Critical | Linux kernel | Untested code path on slow cores |
+| 23 | check_unaligned_access spin (jiffies) | Major | Linux kernel | initcall ordering / SBI timer race |
+| 24 | cpio missing /dev/console | Major | initramfs | mknod-needs-root limitation |
+| 25 | INITRAMFS_COMPRESSION_GZIP re-gzips | Major | Linux kernel build | Misleading defconfig default |
+| 26 | uartdpi stderr mirror garbles terminal | Minor | uartdpi.c | Dual writers (stderr + uart.log) |
 
-**Total: 27 bugs found and fixed across 4 development phases.**
+**Total: 35 bugs found and fixed across 5 development phases.**
+**Linux fully boots to busybox userspace as of fetch-revamp Phase 4.13c.**
