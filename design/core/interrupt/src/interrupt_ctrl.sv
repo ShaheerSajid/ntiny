@@ -149,6 +149,15 @@ wire [31:0] pc_for_async = (pc_id_i != 32'h0) ? pc_id_i :
                            (pc_ie_i != 32'h0) ? pc_ie_i :
                                                 pc_out_i;
 
+// Phase 4.14b (Bug 29): PC for IE-stage synchronous data faults.
+// When a DTLB miss triggers a PTW walk, ie_stall holds pc_ie at the
+// faulting load/store. But on the exact cycle mmu_d_stall drops and
+// the fault fires, the IE wall may clear pc_ie to 0 (interrupt_valid
+// flush). Use pc_out_i as fallback — it still holds the fetch VA of
+// the faulting instruction's vicinity (close enough for re-execution
+// after the handler maps the page).
+wire [31:0] pc_for_ie = (pc_ie_i != 32'h0) ? pc_ie_i : pc_out_i;
+
 // Page fault address: data fault has priority over instruction fault
 wire [31:0] page_fault_addr = data_page_fault_i ? data_fault_addr_i : insn_fault_addr_i;
 
@@ -206,19 +215,19 @@ logic [31:0] mtval_out;
 always_comb begin
     // IE-stage data access faults (PMP) — highest priority
     if (load_access_fault) begin
-        cause_code = 8'd5;  epc_out = pc_ie_i; mtval_out = data_access_fault_addr_i; is_interrupt = 1'b0;
+        cause_code = 8'd5;  epc_out = pc_for_ie; mtval_out = data_access_fault_addr_i; is_interrupt = 1'b0;
     end else if (store_access_fault) begin
-        cause_code = 8'd7;  epc_out = pc_ie_i; mtval_out = data_access_fault_addr_i; is_interrupt = 1'b0;
+        cause_code = 8'd7;  epc_out = pc_for_ie; mtval_out = data_access_fault_addr_i; is_interrupt = 1'b0;
     end else if (load_page_fault) begin
-        cause_code = 8'd13; epc_out = pc_ie_i; mtval_out = page_fault_addr; is_interrupt = 1'b0;
+        cause_code = 8'd13; epc_out = pc_for_ie; mtval_out = page_fault_addr; is_interrupt = 1'b0;
     end else if (store_page_fault) begin
-        cause_code = 8'd15; epc_out = pc_ie_i; mtval_out = page_fault_addr; is_interrupt = 1'b0;
+        cause_code = 8'd15; epc_out = pc_for_ie; mtval_out = page_fault_addr; is_interrupt = 1'b0;
     end else if (misalign_load) begin
-        cause_code = 8'd4;  epc_out = pc_ie_i; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
+        cause_code = 8'd4;  epc_out = pc_for_ie; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
     end else if (misalign_store || misalign_amo) begin
-        cause_code = 8'd6;  epc_out = pc_ie_i; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
+        cause_code = 8'd6;  epc_out = pc_for_ie; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
     end else if (ie_csr_illegal) begin
-        cause_code = 8'd2;  epc_out = pc_ie_i; mtval_out = 32'h0; is_interrupt = 1'b0;
+        cause_code = 8'd2;  epc_out = pc_for_ie; mtval_out = 32'h0; is_interrupt = 1'b0;
     // IF/ID-stage instruction access fault (PMP) — before page fault
     end else if (insn_access_fault_i) begin
         cause_code = 8'd1;  epc_out = pc_for_id; mtval_out = insn_access_fault_addr_i; is_interrupt = 1'b0;
