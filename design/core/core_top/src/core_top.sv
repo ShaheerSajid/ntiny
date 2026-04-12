@@ -883,7 +883,7 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 	// Phase 4.8: xret_hold_pc keeps pc_out parked at the xret target
 	// while the FSM waits for priv to settle and the fetch to complete.
 	.stall_i	((interrupt_valid | ret_pulse | arb_redirect_valid) ? 1'b0 :
-	             (fetch_producer_stall | pending_holds_pc | xret_hold_pc)),
+	             (fetch_producer_stall | pending_holds_pc | xret_hold_pc | refetch_pending_q)),
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
@@ -898,10 +898,30 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 // once the original PTW completes).
 // Phase 4.8: xret_drive_va overrides i_vaddr to the saved target so the
 // MMU translates the correct VA at the now-settled priv_level.
-wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_after_trap) ? pc_out :
-                      xret_drive_va                                   ? xret_target_q :
-                      pending_overrides_vaddr                         ? pending_target_q :
-                                                                        pc_in;
+// Phase 4.14b (Bug 28): extend refetch_after_trap to hold i_vaddr = pc_out
+// until the first req actually fires. refetch_after_trap is a 1-cycle pulse,
+// but if mmu_i_stall is high (ITLB miss → PTW), the pulse expires before
+// the req can fire. Without extending it, i_vaddr falls back to pc_in =
+// pc_out+4 and the first fetch after PTW skips the handler's first
+// instruction (csrrw tp,sscratch,tp at c0002de4) → tp never swaps →
+// _save_context writes to user VA → crash.
+logic refetch_pending_q;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i)
+        refetch_pending_q <= 1'b0;
+    else if (refetch_after_trap)
+        refetch_pending_q <= 1'b1;
+    else if (imem_port.req || arb_redirect_valid)
+        // Clear once the first req fires (refetch consumed) or a new
+        // redirect overrides (trap/branch/xret takes priority).
+        refetch_pending_q <= 1'b0;
+end
+wire refetch_extended = refetch_after_trap | refetch_pending_q;
+
+wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_extended) ? pc_out :
+                      xret_drive_va                                 ? xret_target_q :
+                      pending_overrides_vaddr                       ? pending_target_q :
+                                                                      pc_in;
 assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
 // Force req=1 during refetch even when the producer is otherwise stalled.
 // Phase 3: gate by fetch_producer_stall (NOT if_id_stall) so the fetch
@@ -945,7 +965,7 @@ assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
 // instruction bytes from an unrelated physical address.
 // Confirmed by CYC trace: i_pa=0x00000de4 (low bits of VA
 // c0002de4) with itlb_hit=0 and imem_req=1 at cycle 127483735.
-assign imem_port.req   = (refetch_after_trap & ~mmu_i_stall) |
+assign imem_port.req   = (refetch_extended & ~mmu_i_stall) |
                          (arb_redirect_valid & ~mmu_i_stall & ~xret_suppress
                           & ~interrupt_valid) |
                          (~fetch_producer_stall & ~xret_suppress
