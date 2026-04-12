@@ -290,10 +290,20 @@ module mmu_sv32 (
             ptw_sum <= 1'b0;
             ptw_l1_pte_saved <= '0;
             ptw_pte_addr <= '0;
-        end else if (flush_i || flush_prev) begin
-            // Pipeline flush (trap/interrupt): abort any in-flight PTW walk.
-            // Also suppress for 1 cycle after flush to prevent stale d_req_i
-            // from starting a new walk with wrong privilege (trap changed priv).
+        end else if (flush_i || flush_prev || sfence_i) begin
+            // Pipeline flush (trap/interrupt) or sfence.vma: abort any
+            // in-flight PTW walk.
+            //
+            // flush_i/flush_prev: suppress for 1 cycle after flush to
+            // prevent stale d_req_i from starting a new walk with wrong
+            // privilege (trap changed priv).
+            //
+            // sfence_i (Bug 27): the ITLB/DTLB write blocks clear all
+            // entries on sfence, but without aborting the PTW an
+            // in-flight walk completes with stale page-table data and
+            // immediately re-fills the just-cleared TLB. The stale
+            // entry then causes the next trap-handler fetch to hit with
+            // a wrong PPN → wrong instruction bytes → crash.
             ptw_state <= PTW_IDLE;
         end else begin
             case (ptw_state)
