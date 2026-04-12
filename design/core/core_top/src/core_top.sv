@@ -936,7 +936,16 @@ assign imem_port.addr  = i_paddr;  // MMU translates i_vaddr → i_paddr
 // refetch_after_trap cycle (1 cycle later) lets priv_level settle
 // first. Branch/xret/debug redirects keep the same-cycle fetch because
 // their priv_level is unchanged.
-assign imem_port.req   = refetch_after_trap |
+// Phase 4.14 (Bug 27): gate refetch_after_trap by ~mmu_i_stall.
+// When a trap redirects to the handler VA but the ITLB has no
+// entry for it (evicted by user PTW FIFO fills during dynamic
+// linker mmap), the combinational i_paddr_out defaults to the
+// low VA bits (from the zero-init itlb_entry). Without the gate,
+// the bus req fires with this garbage PA and fetches wrong
+// instruction bytes from an unrelated physical address.
+// Confirmed by CYC trace: i_pa=0x00000de4 (low bits of VA
+// c0002de4) with itlb_hit=0 and imem_req=1 at cycle 127483735.
+assign imem_port.req   = (refetch_after_trap & ~mmu_i_stall) |
                          (arb_redirect_valid & ~mmu_i_stall & ~xret_suppress
                           & ~interrupt_valid) |
                          (~fetch_producer_stall & ~xret_suppress
