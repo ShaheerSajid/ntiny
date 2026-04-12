@@ -186,13 +186,129 @@ always @(posedge clk) begin
 end
 
 // ── Lightweight PC sampler (every 1M cycles) ────────────────────
-// Useful for finding cycle numbers to feed --vcd-start-cycle / --vcd-stop-cycle.
+// Logs pc_out + priv every ~1M cycles into pc_sample.log so a tight
+// Linux loop can be diagnosed without rebuilding. Each line:
+//   PC[<cycle>] pc=<hex> priv=<0|1|3>
+integer sim_pc_fd;
+integer sim_dbg_fd;
+initial begin
+	sim_pc_fd = $fopen("pc_sample.log", "w");
+	sim_dbg_fd = $fopen("debug.log", "w");
+end
+
 reg [31:0] pc_sample_cnt;
 always @(posedge clk) begin
 	if (reset)
 		pc_sample_cnt <= 0;
-	else
+	else begin
 		pc_sample_cnt <= pc_sample_cnt + 1;
+		if (pc_sample_cnt[19:0] == 20'h0) begin // every ~1M cycles
+			$fwrite(sim_pc_fd, "PC[%0d] pc=%08h priv=%0d\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_out,
+				soc_top_inst.core_top_inst.csr_unit_inst.priv_level);
+			$fflush(sim_pc_fd);
+		end
+	end
+end
+
+// ── CYC trace: re-arm on every U-mode trap, capture 60 cycles each.
+// The last capture in the log is the failing trap.
+reg [31:0] cyc_count;
+reg [31:0] cyc_trap_idx;
+always @(posedge clk) begin
+	if (reset) begin
+		cyc_count    <= 32'hffffffff;
+		cyc_trap_idx <= 0;
+	end else begin
+		// Each interrupt firing from U-mode starts a fresh 60-cycle window
+		if (soc_top_inst.core_top_inst.interrupt_valid &&
+		    soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'd0) begin
+			cyc_count    <= 0;
+			cyc_trap_idx <= cyc_trap_idx + 1;
+		end
+		if (cyc_count < 60) begin
+			$fwrite(sim_dbg_fd, "CYC[%0d] @%0d pc_out=%08h pc_id=%08h pc_ie=%08h pc_iwb=%08h iv=%0b ie_st=%0b hv=%0b hva=%08h hword=%08h hix=%0d is_c=%0b aln_pop=%0b fb_cnt=%0d tp=%08h\n",
+				cyc_trap_idx,
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_out,
+				soc_top_inst.core_top_inst.pc_id,
+				soc_top_inst.core_top_inst.pc_ie,
+				soc_top_inst.core_top_inst.pc_iwb,
+				soc_top_inst.core_top_inst.interrupt_valid,
+				soc_top_inst.core_top_inst.ie_stall,
+				soc_top_inst.core_top_inst.fb_head_valid,
+				soc_top_inst.core_top_inst.fb_head.vaddr,
+				soc_top_inst.core_top_inst.fb_head.word,
+				soc_top_inst.core_top_inst.compressed_aligner_inst.half_index_q,
+				soc_top_inst.core_top_inst.compressed_aligner_inst.is_compressed_o,
+				soc_top_inst.core_top_inst.aligner_pop,
+				soc_top_inst.core_top_inst.fb_count,
+				soc_top_inst.core_top_inst.regfile_inst.regfile[4]);
+			$fflush(sim_dbg_fd);
+			cyc_count <= cyc_count + 1;
+		end
+	end
+end
+
+// ── U-mode debug — track entries/exits + wild jumps to high VA ──
+// Records:
+//   USTART  — first cycle pc_out is in U-mode (priv=0) after each xret
+//             from S-mode (sret); shows the entry point Linux jumped to
+//   UTRAP   — interrupt_valid in U-mode (every U-mode trap into S-mode)
+//   HIGHVA  — pc_out in [0xffff0000, 0xffffffff] regardless of priv
+//             (catches the kernel/vdso wild-jump pattern from the
+//             init crash where epc=0xfffff0f6)
+reg [1:0] last_priv;
+always @(posedge clk) begin
+	if (reset) begin
+		last_priv <= 2'd3;
+	end else begin
+		// USTART: first cycle in U-mode (priv 1→0 transition)
+		if (soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'd0 &&
+		    last_priv != 2'd0) begin
+			$fwrite(sim_dbg_fd, "USTART @%0d pc=%08h satp=%08h\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_out,
+				soc_top_inst.core_top_inst.csr_unit_inst._SATP);
+			$fflush(sim_dbg_fd);
+		end
+		// UTRAP: interrupt fires while we're in U-mode
+		if (soc_top_inst.core_top_inst.interrupt_valid &&
+		    soc_top_inst.core_top_inst.csr_unit_inst.priv_level == 2'd0) begin
+			$fwrite(sim_dbg_fd, "UTRAP @%0d cause=%08h epc=%08h tval=%08h\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.ecause_csr,
+				soc_top_inst.core_top_inst.epc_csr,
+				soc_top_inst.core_top_inst.mtval_csr);
+			$fflush(sim_dbg_fd);
+		end
+		// HIGHVA: pc_out in the very high VA range — any time
+		if (soc_top_inst.core_top_inst.pc_out[31:16] == 16'hffff) begin
+			$fwrite(sim_dbg_fd, "HIGHVA @%0d pc=%08h priv=%0d stvec=%08h vec_o=%08h\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_out,
+				soc_top_inst.core_top_inst.csr_unit_inst.priv_level,
+				soc_top_inst.core_top_inst.csr_unit_inst._STVEC,
+				soc_top_inst.core_top_inst.csr_unit_inst.vec_o);
+			$fflush(sim_dbg_fd);
+		end
+		// On every interrupt_valid (trap firing), dump stvec/mtvec/vec_o
+		// so we can see what target the HW is about to use.
+		if (soc_top_inst.core_top_inst.interrupt_valid) begin
+			$fwrite(sim_dbg_fd, "TRAP @%0d cause=%08h epc=%08h priv=%0d→%0d stvec=%08h mtvec=%08h vec_o=%08h\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.ecause_csr,
+				soc_top_inst.core_top_inst.epc_csr,
+				soc_top_inst.core_top_inst.csr_unit_inst.priv_level,
+				soc_top_inst.core_top_inst.trap_to_s ? 2'd1 : 2'd3,
+				soc_top_inst.core_top_inst.csr_unit_inst._STVEC,
+				soc_top_inst.core_top_inst.csr_unit_inst._MTVEC,
+				soc_top_inst.core_top_inst.csr_unit_inst.vec_o);
+			$fflush(sim_dbg_fd);
+		end
+		last_priv <= soc_top_inst.core_top_inst.csr_unit_inst.priv_level;
+	end
 end
 
 `ifndef VERILATOR_SIM
