@@ -48,6 +48,7 @@ module trap_sequencer (
     input  logic [31:0] mmu_i_fault_addr_i,
     input  logic        mmu_d_fault_i,
     input  logic [31:0] mmu_d_fault_addr_i,
+    input  logic        mmu_d_fault_is_store_i,  // Bug 30: latch is-store flag
     input  logic        mmu_i_access_fault_i,
     input  logic [31:0] mmu_i_access_fault_addr_i,
     input  logic        mmu_d_access_fault_i,
@@ -58,6 +59,7 @@ module trap_sequencer (
     output logic [31:0] i_fault_addr_r_o,
     output logic        d_fault_r_o,
     output logic [31:0] d_fault_addr_r_o,
+    output logic        d_fault_is_store_r_o,  // Bug 30: registered is-store flag
     output logic        i_access_fault_r_o,
     output logic [31:0] i_access_fault_addr_r_o,
     output logic        d_access_fault_r_o,
@@ -166,16 +168,24 @@ module trap_sequencer (
     end
 
     // Data page fault (cause 13/15)
+    // Bug 30: also latch is-store flag. interrupt_valid is gated by
+    // !insn_valid_id which may delay the trap by 1+ cycles. By then
+    // the IE stage can flush and d_store_for_mmu drops to 0, causing
+    // the interrupt_ctrl to report cause=13 (load) instead of cause=15
+    // (store). The registered flag survives until the trap fires.
     always_ff @(posedge clk_i or posedge reset_i) begin
         if (reset_i) begin
-            d_fault_r_o      <= 1'b0;
-            d_fault_addr_r_o <= 32'b0;
+            d_fault_r_o           <= 1'b0;
+            d_fault_addr_r_o      <= 32'b0;
+            d_fault_is_store_r_o  <= 1'b0;
         end else if (clear_other) begin
-            d_fault_r_o      <= 1'b0;
-            d_fault_addr_r_o <= 32'b0;
+            d_fault_r_o           <= 1'b0;
+            d_fault_addr_r_o      <= 32'b0;
+            d_fault_is_store_r_o  <= 1'b0;
         end else begin
-            d_fault_r_o      <= mmu_d_fault_i;
-            d_fault_addr_r_o <= mmu_d_fault_addr_i;
+            d_fault_r_o           <= mmu_d_fault_i;
+            d_fault_addr_r_o      <= mmu_d_fault_addr_i;
+            d_fault_is_store_r_o  <= mmu_d_fault_is_store_i;
         end
     end
 

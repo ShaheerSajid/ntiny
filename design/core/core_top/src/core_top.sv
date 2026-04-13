@@ -219,6 +219,7 @@ wire ptw_rvalid = dmem_port.rvalid & ptw_req_prev;
 // - i_fault_r: clears on trap + branch/ret + SRET ITLB stall (FSM)
 // - d_fault_r, i_access_fault_r, d_access_fault_r: clear on trap ONLY
 logic        mmu_i_fault_r,      mmu_d_fault_r;
+logic        mmu_d_fault_is_store_r;  // Bug 30: registered is-store flag
 logic [31:0] mmu_i_fault_addr_r, mmu_d_fault_addr_r;
 logic        mmu_i_access_fault_r,      mmu_d_access_fault_r;
 logic [31:0] mmu_i_access_fault_addr_r, mmu_d_access_fault_addr_r;
@@ -284,6 +285,7 @@ trap_sequencer trap_seq_inst (
                                                  : aligner_pc_id),
     .mmu_d_fault_i              (mmu_d_fault),
     .mmu_d_fault_addr_i         (mmu_d_fault_addr),
+    .mmu_d_fault_is_store_i     (d_store_for_mmu),  // Bug 30: latch is-store
     // Phase 4.8: i-side PMP access fault has TWO sources after the
     // wrong-path bug fix:
     //   (a) i_buf_access_fault — the comb portion of mmu_i_access_fault_o
@@ -309,6 +311,7 @@ trap_sequencer trap_seq_inst (
     .i_fault_addr_r_o           (mmu_i_fault_addr_r),
     .d_fault_r_o                (mmu_d_fault_r),
     .d_fault_addr_r_o           (mmu_d_fault_addr_r),
+    .d_fault_is_store_r_o       (mmu_d_fault_is_store_r),
     .i_access_fault_r_o         (mmu_i_access_fault_r),
     .i_access_fault_addr_r_o    (mmu_i_access_fault_addr_r),
     .d_access_fault_r_o         (mmu_d_access_fault_r),
@@ -1562,7 +1565,7 @@ interrupt_ctrl interrupt_ctrl_inst
   // Registered to break combinational loop (d_fault → trap → flush → d_fault).
   // Stale faults during flush are discarded by interrupt_valid priority clear.
   .data_page_fault_i  (mmu_d_fault_r),
-  .data_fault_is_store_i(d_store_for_mmu),
+  .data_fault_is_store_i(mmu_d_fault_is_store_r),  // Bug 30: use registered flag
   .data_fault_addr_i  (mmu_d_fault_addr_r),
   // PMP access faults
   .insn_access_fault_i       (mmu_i_access_fault_r),
@@ -1571,7 +1574,7 @@ interrupt_ctrl interrupt_ctrl_inst
   // d_pmp_fault → trap_valid → interrupt_valid → flush_i → settles wrong.
   // Registered path — IE stall holds the faulting instruction for 1 cycle
   .data_access_fault_i       (mmu_d_access_fault_r),
-  .data_access_fault_is_store_i(d_store_for_mmu),
+  .data_access_fault_is_store_i(mmu_d_fault_is_store_r),  // Bug 30: use registered flag
   .data_access_fault_addr_i  (mmu_d_access_fault_addr_r),
   // Outputs
   .trap_valid_o       (trap_true),
