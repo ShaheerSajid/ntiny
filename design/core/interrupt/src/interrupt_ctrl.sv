@@ -153,10 +153,26 @@ wire [31:0] pc_for_async = (pc_id_i != 32'h0) ? pc_id_i :
 // When a DTLB miss triggers a PTW walk, ie_stall holds pc_ie at the
 // faulting load/store. But on the exact cycle mmu_d_stall drops and
 // the fault fires, the IE wall may clear pc_ie to 0 (interrupt_valid
-// flush). Use pc_out_i as fallback — it still holds the fetch VA of
-// the faulting instruction's vicinity (close enough for re-execution
-// after the handler maps the page).
-wire [31:0] pc_for_ie = (pc_ie_i != 32'h0) ? pc_ie_i : pc_out_i;
+// flush).
+//
+// Bug 29b: the original fallback `pc_out_i` is the FETCH-stage PC
+// (several instructions ahead of IE) — NOT the faulting load's PC.
+// Using it as sepc causes the kernel to return past the faulting load,
+// which never re-executes, and the same address re-faults from a
+// later instruction → infinite page-fault loop.
+//
+// Fix: latch pc_ie_i into a holding register whenever it's non-zero
+// (= a real instruction is in IE, not a bubble). This register
+// survives through the PTW stall and is available as a fallback
+// when the fault fires with pc_ie already cleared to 0.
+logic [31:0] pc_ie_saved_q;
+always_ff @(posedge clk_i or posedge rst_i) begin
+    if (rst_i)
+        pc_ie_saved_q <= 32'h0;
+    else if (pc_ie_i != 32'h0)
+        pc_ie_saved_q <= pc_ie_i;
+end
+wire [31:0] pc_for_ie = (pc_ie_i != 32'h0) ? pc_ie_i : pc_ie_saved_q;
 
 // Page fault address: data fault has priority over instruction fault
 wire [31:0] page_fault_addr = data_page_fault_i ? data_fault_addr_i : insn_fault_addr_i;
