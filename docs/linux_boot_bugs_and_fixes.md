@@ -945,5 +945,11 @@ tail -f uart.log
 | 25 | INITRAMFS_COMPRESSION_GZIP re-gzips | Major | Linux kernel build | Misleading defconfig default |
 | 26 | uartdpi stderr mirror garbles terminal | Minor | uartdpi.c | Dual writers (stderr + uart.log) |
 
-**Total: 35 bugs found and fixed across 5 development phases.**
-**Linux fully boots to busybox userspace as of fetch-revamp Phase 4.13c.**
+| 27 | refetch_after_trap fires req with garbage PA on ITLB miss | Critical | core_top fetch path | ITLB miss + unguarded req |
+| 28 | refetch pulse consumed during PTW; handler's csrrw skipped | Critical | core_top fetch path | 1-cycle pulse expires before PTW done |
+| 29 | Sync data fault saves epc=0 (pc_ie cleared on interrupt_valid) | Critical | interrupt_ctrl | Same class as Phase 4.13c but for data faults |
+| 29b | pc_out fallback wrong for data faults (fetch PC ≠ IE PC) | Critical | interrupt_ctrl | pc_out is fetch stage, not IE stage |
+| 30 | Store fault reported as cause=13 (load) → infinite page-fault loop | Critical | trap_sequencer, interrupt_ctrl | data_fault_is_store is combinational, IE flushes before trap fires |
+
+**Total: 39 bugs found and fixed across 6 development phases.**
+**Linux boots busybox dynamic linker to /bin/mount (init script) as of Bug 30 fix.**
