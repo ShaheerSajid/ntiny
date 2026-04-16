@@ -138,6 +138,27 @@ module alu
 		.out_ror_o(out_ror_o)
 	);
 
+	// Zbs — single-bit ops. Uses rs1 as in1 and b_i[4:0] as shift amount
+	// (already correctly muxed by the decoder/forwarding for both reg and
+	// imm forms — imm shamt sits in b_i[4:0]).
+	logic [31:0] out_bclr_o, out_bext_o, out_binv_o, out_bset_o;
+	zbs zbs_inst (
+		.in1_i   (a_i),
+		.shamt_i (b_i[4:0]),
+		.bclr_o  (out_bclr_o),
+		.bext_o  (out_bext_o),
+		.binv_o  (out_binv_o),
+		.bset_o  (out_bset_o)
+	);
+
+	// Zbc — carry-less multiply (single-cycle XOR tree).
+	logic [63:0] clmul_result;
+	clmul clmul_inst (
+		.in1_i    (a_i),
+		.in2_i    (b_i),
+		.result_o (clmul_result)
+	);
+
 	always_comb
 	begin
 		case(bit_op_i)
@@ -161,6 +182,15 @@ module alu
 			ROR,RORI:	bit_result = out_ror_o;
 			ORCB:	bit_result = out_orc_o;
 			REV8:	bit_result = out_rev8_o;
+			// Zbs (reg + imm forms share datapath)
+			BCLR, BCLRI: bit_result = out_bclr_o;
+			BEXT, BEXTI: bit_result = out_bext_o;
+			BINV, BINVI: bit_result = out_binv_o;
+			BSET, BSETI: bit_result = out_bset_o;
+			// Zbc
+			CLMUL:  bit_result = clmul_result[31:0];
+			CLMULH: bit_result = clmul_result[63:32];
+			CLMULR: bit_result = clmul_result[62:31];
 			default	:	bit_result = 0;
 		endcase
 	end

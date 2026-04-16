@@ -143,6 +143,9 @@ begin
                             3'b000: alu_op = ADD;//addi
                             3'b001: case(funct7)
                                         7'b0000000: alu_op = SLL;//slli
+                                        7'b0010100: bit_op = BSETI;//bseti
+                                        7'b0100100: bit_op = BCLRI;//bclri
+                                        7'b0110100: bit_op = BINVI;//binvi
                                         7'b0110000: case(funct5)
                                                         5'b00000: bit_op = CLZ;//clz
                                                         5'b00001: bit_op = CTZ;//ctz
@@ -150,13 +153,14 @@ begin
                                                         5'b00100: bit_op = SEXTB;//sext.b
                                                         5'b00101: bit_op = SEXTH;//sext.h
                                                     endcase
-                                    endcase 
+                                    endcase
                             3'b010: alu_op = SLT;//slti
                             3'b011: alu_op = SLTU;//sltiu
                             3'b100: alu_op = XOR;//xori
                             3'b101: casez({funct7,funct5})
                                         {7'b0000000,5'b?????}: alu_op = SRL;//srli
                                         {7'b0100000,5'b?????}: alu_op = SRA;//srai
+                                        {7'b0100100,5'b?????}: bit_op = BEXTI;//bexti
                                         {7'b0110000,5'b?????}: bit_op = RORI;//rori
                                         {7'b0010100,5'b00111}: bit_op = ORCB;//orc.b
                                         {7'b0110100,5'b11000}: bit_op = REV8;//rev8
@@ -198,6 +202,9 @@ begin
                                             3'b110: bit_op = SH3ADD;
                                         endcase
                             7'b0000101: case(instruction_i[14:12])
+                                            3'b001: bit_op = CLMUL;
+                                            3'b010: bit_op = CLMULR;
+                                            3'b011: bit_op = CLMULH;
                                             3'b100: bit_op = MIN;
                                             3'b101: bit_op = MINU;
                                             3'b110: bit_op = MAX;
@@ -206,9 +213,20 @@ begin
                             7'b0110000: case(instruction_i[14:12])
                                             3'b001: bit_op = ROL;
                                             3'b101: bit_op = ROR;
-                                        endcase  
+                                        endcase
                             7'b0000100: case(instruction_i[14:12])
                                             3'b100: bit_op = ZEXTH;
+                                        endcase
+                            // Zbs (reg form) — funct7s for bclr/bext/binv/bset
+                            7'b0100100: case(instruction_i[14:12])
+                                            3'b001: bit_op = BCLR;
+                                            3'b101: bit_op = BEXT;
+                                        endcase
+                            7'b0110100: case(instruction_i[14:12])
+                                            3'b001: bit_op = BINV;
+                                        endcase
+                            7'b0010100: case(instruction_i[14:12])
+                                            3'b001: bit_op = BSET;
                                         endcase
                         endcase
                         exec_result = ALU_RES;

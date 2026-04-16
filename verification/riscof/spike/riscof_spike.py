@@ -60,6 +60,10 @@ class spike(pluginTemplate):
             self.isa += '_zba'
         if "Zbb" in ispec["ISA"]:
             self.isa += '_zbb'
+        if "Zbc" in ispec["ISA"]:
+            self.isa += '_zbc'
+        if "Zbs" in ispec["ISA"]:
+            self.isa += '_zbs'
 
     def runTests(self, testList, cgf_file=None):
         if os.path.exists(self.work_dir + "/Makefile." + self.name[:-1]):

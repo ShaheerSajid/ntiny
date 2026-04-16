@@ -63,7 +63,7 @@ typedef enum logic[3:0] {
 } alu_op_e;
 
 //bit
-typedef enum logic[4:0] {
+typedef enum logic[5:0] {
 	SH1ADD,
 	SH2ADD,
 	SH3ADD,
@@ -85,6 +85,20 @@ typedef enum logic[4:0] {
 	RORI,
 	ORCB,
 	REV8,
+	// Zbc — carry-less multiply
+	CLMUL,
+	CLMULH,
+	CLMULR,
+	// Zbs — single-bit ops (reg + imm variants share datapath; the
+	// reg/imm distinction is via the `b` operand source in the ALU mux)
+	BCLR,
+	BCLRI,
+	BEXT,
+	BEXTI,
+	BINV,
+	BINVI,
+	BSET,
+	BSETI,
 	NO_BIT_OP
 } bit_op_e;
 

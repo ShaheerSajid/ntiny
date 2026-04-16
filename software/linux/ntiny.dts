@@ -21,8 +21,8 @@
             reg = <0>;
             compatible = "riscv";
             riscv,isa-base = "rv32i";
-            riscv,isa = "rv32imac_zicsr_zifencei_zkr";
-            riscv,isa-extensions = "i", "m", "a", "c", "zicsr", "zifencei", "zkr";
+            riscv,isa = "rv32imac_zicsr_zifencei_zba_zbb_zbc_zbs_zkr";
+            riscv,isa-extensions = "i", "m", "a", "c", "zicsr", "zifencei", "zba", "zbb", "zbc", "zbs", "zkr";
             mmu-type = "riscv,sv32";
 
             interrupt-controller {

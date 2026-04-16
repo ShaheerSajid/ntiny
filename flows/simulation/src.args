@@ -37,6 +37,8 @@
 ../../design/uncore/spi/src/spi.sv
 ../../design/core/alu/src/divider.sv
 ../../design/core/alu/src/zba_zbb.sv
+../../design/core/alu/src/zbs.sv
+../../design/core/alu/src/clmul.sv
 ../../design/core/control_path/src/decoder.sv
 ../../design/core/imm_gen/src/imm_gen.sv
 ../../design/uncore/pwm/src/pwm_top.sv
