@@ -43,6 +43,8 @@ module redirect_arbiter
     input  logic        branch_taken_i,    // bpu_mispredict (level)
     input  logic        ret_valid_i,       // ret_valid (level, while xRET in ID)
     input  logic        sret_select_i,     // 1 = SRET (use sepc), 0 = MRET (use mepc)
+    input  logic        bpu_pred_fire_i,    // BPU ID-stage RAS (above PC+4, below xRET)
+    input  logic        bpu_if_fire_i,      // BPU IF-stage BHT/BTB (lowest, no flush)
 
     // ── Targets ─────────────────────────────────────────────────────────
     input  logic [31:0] handler_addr_i,    // mtvec/stvec base + cause*4
@@ -50,6 +52,8 @@ module redirect_arbiter
     input  logic [31:0] sepc_i,
     input  logic [31:0] mepc_i,
     input  logic [31:0] dpc_i,
+    input  logic [31:0] bpu_pred_target_i,
+    input  logic [31:0] bpu_if_target_i,
 
     // ── Outputs ─────────────────────────────────────────────────────────
     output logic            redirect_valid_o,
@@ -79,6 +83,14 @@ module redirect_arbiter
             redirect_valid_o  = 1'b1;
             redirect_target_o = sret_select_i ? sepc_i : mepc_i;
             redirect_kind_o   = RDR_XRET;
+        end else if (bpu_pred_fire_i) begin
+            redirect_valid_o  = 1'b1;
+            redirect_target_o = bpu_pred_target_i;
+            redirect_kind_o   = RDR_BPU;
+        end else if (bpu_if_fire_i) begin
+            redirect_valid_o  = 1'b1;
+            redirect_target_o = bpu_if_target_i;
+            redirect_kind_o   = RDR_BPU_IF;
         end
     end
 

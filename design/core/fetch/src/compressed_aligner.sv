@@ -70,7 +70,11 @@ module compressed_aligner
     output logic                 instruction_valid_o,
     output logic                 instruction_fault_o,
     output logic [4:0]           instruction_cause_o,
-    output logic                 is_compressed_o
+    output logic                 is_compressed_o,
+    // BPU at IF: forward the prediction stored in the head entry to ID.
+    // Only meaningful when instruction_valid_o is high.
+    output logic                 pred_taken_o,
+    output logic [31:0]          pred_target_o
 );
 
     logic        half_index_q;
@@ -78,6 +82,28 @@ module compressed_aligner
     logic        pop_internal;
     logic [15:0] expand_in;
     logic [31:0] expand_out;
+    logic        instruction_valid_raw;  // pre-squash emit (internal)
+
+    // ── Post-branch squash FSM ─────────────────────────────────────────
+    // When the aligner emits an IF-stage predicted-taken branch, any
+    // remaining halves of the current entry and any subsequent entries
+    // in the fetch_buffer are WRONG-PATH (the BPU redirect fires at IF
+    // without flushing the buffer, so pre-redirect residue stays).
+    //
+    // In squash:
+    //   - instruction_valid_o = 0 (don't emit anything)
+    //   - pop_o drains the buffer autonomously (independent of consumer)
+    //   - exit when the head entry's word matches the predicted target's
+    //     word-aligned vaddr; reseat half_index_q to target[1]
+    //
+    // This is required for correctness when an RVC branch sits at the
+    // lower half of a word: the upper half is wrong-path, and without
+    // squash the aligner would emit garbage (worst case: a straddled
+    // 32-bit instruction stitched across the current head and the next
+    // buffer entry — which is already the target's word after the IF
+    // redirect, producing a decode-level "mash-up" that corrupts regs).
+    logic        squash_q;
+    logic [31:0] squash_target_q;
 
     // Reuse the existing c_dec compressed-to-32-bit expander
     c_dec aligner_c_dec_inst (
@@ -86,17 +112,33 @@ module compressed_aligner
     );
 
     // ── Combinational emit ─────────────────────────────────────────────
+    // BPU pred is per-half: the head entry carries {pred_lo_*, pred_hi_*}
+    // filled in at IF time for vaddr+0 and vaddr+2 respectively. The
+    // aligner fires the prediction on the emit whose half_index matches
+    // the predicted branch's half, ensuring a two-RVC word with a branch
+    // at the upper half doesn't fire pred on the lower-half emit.
+    //
+    // Straddle case (32-bit branch at head[31:16]+next[15:0]) also fires
+    // on half_index=1 and naturally consumes pred_hi_*.
+    logic lo_consumed_q, hi_consumed_q;
+    wire  use_lo = head_valid_i && (half_index_q == 1'b0);
+    wire  use_hi = head_valid_i && (half_index_q == 1'b1);
+    assign pred_taken_o  = (use_lo && head_i.pred_lo_taken && !lo_consumed_q)
+                         || (use_hi && head_i.pred_hi_taken && !hi_consumed_q);
+    assign pred_target_o = (half_index_q == 1'b0) ? head_i.pred_lo_target
+                                                   : head_i.pred_hi_target;
+
     always_comb begin
         // Defaults: no emission
-        instruction_o        = 32'b0;
-        pc_id_o              = 32'b0;
-        instruction_valid_o  = 1'b0;
-        instruction_fault_o  = 1'b0;
-        instruction_cause_o  = 5'b0;
-        is_compressed_o      = 1'b0;
-        pop_internal         = 1'b0;
-        next_half_index      = half_index_q;
-        expand_in            = 16'b0;
+        instruction_o          = 32'b0;
+        pc_id_o                = 32'b0;
+        instruction_valid_raw  = 1'b0;
+        instruction_fault_o    = 1'b0;
+        instruction_cause_o    = 5'b0;
+        is_compressed_o        = 1'b0;
+        pop_internal           = 1'b0;
+        next_half_index        = half_index_q;
+        expand_in              = 16'b0;
 
         if (head_valid_i) begin
             case (half_index_q)
@@ -104,25 +146,25 @@ module compressed_aligner
                     // Lower half of head
                     if (head_i.word[1:0] == 2'b11) begin
                         // 32-bit aligned at head[15:0]
-                        instruction_o       = head_i.word;
-                        pc_id_o             = head_i.vaddr;
-                        instruction_valid_o = 1'b1;
-                        instruction_fault_o = head_i.fault;
-                        instruction_cause_o = head_i.cause;
-                        is_compressed_o     = 1'b0;
-                        pop_internal        = 1'b1;
-                        next_half_index     = 1'b0;
+                        instruction_o         = head_i.word;
+                        pc_id_o               = head_i.vaddr;
+                        instruction_valid_raw = 1'b1;
+                        instruction_fault_o   = head_i.fault;
+                        instruction_cause_o   = head_i.cause;
+                        is_compressed_o       = 1'b0;
+                        pop_internal          = 1'b1;
+                        next_half_index       = 1'b0;
                     end else begin
                         // 16-bit compressed at head[15:0]
-                        expand_in           = head_i.word[15:0];
-                        instruction_o       = expand_out;
-                        pc_id_o             = head_i.vaddr;
-                        instruction_valid_o = 1'b1;
-                        instruction_fault_o = head_i.fault;
-                        instruction_cause_o = head_i.cause;
-                        is_compressed_o     = 1'b1;
-                        pop_internal        = 1'b0;  // upper half still in head
-                        next_half_index     = 1'b1;
+                        expand_in             = head_i.word[15:0];
+                        instruction_o         = expand_out;
+                        pc_id_o               = head_i.vaddr;
+                        instruction_valid_raw = 1'b1;
+                        instruction_fault_o   = head_i.fault;
+                        instruction_cause_o   = head_i.cause;
+                        is_compressed_o       = 1'b1;
+                        pop_internal          = 1'b0;  // upper half still in head
+                        next_half_index       = 1'b1;
                     end
                 end
 
@@ -131,40 +173,57 @@ module compressed_aligner
                     if (head_i.word[17:16] == 2'b11) begin
                         // 32-bit straddled across head[31:16]+next[15:0]
                         if (next_valid_i) begin
-                            instruction_o       = {next_i.word[15:0], head_i.word[31:16]};
-                            pc_id_o             = head_i.vaddr + 32'd2;
-                            instruction_valid_o = 1'b1;
-                            instruction_fault_o = head_i.fault | next_i.fault;
-                            instruction_cause_o = head_i.fault ? head_i.cause : next_i.cause;
-                            is_compressed_o     = 1'b0;
-                            pop_internal        = 1'b1;
+                            instruction_o         = {next_i.word[15:0], head_i.word[31:16]};
+                            pc_id_o               = head_i.vaddr + 32'd2;
+                            instruction_valid_raw = 1'b1;
+                            instruction_fault_o   = head_i.fault | next_i.fault;
+                            instruction_cause_o   = head_i.fault ? head_i.cause : next_i.cause;
+                            is_compressed_o       = 1'b0;
+                            pop_internal          = 1'b1;
                             // After popping head, next becomes the new head.
                             // We've already consumed bits [15:0] of "next" as
                             // the upper half of the straddled insn, so the
                             // next instruction starts at bits [31:16] of the
                             // new head → half_index = 1.
-                            next_half_index     = 1'b1;
+                            next_half_index       = 1'b1;
                         end
-                        // else: wait for next entry — instruction_valid_o stays 0
+                        // else: wait for next entry — instruction_valid_raw stays 0
                     end else begin
                         // 16-bit compressed at head[31:16]
-                        expand_in           = head_i.word[31:16];
-                        instruction_o       = expand_out;
-                        pc_id_o             = head_i.vaddr + 32'd2;
-                        instruction_valid_o = 1'b1;
-                        instruction_fault_o = head_i.fault;
-                        instruction_cause_o = head_i.cause;
-                        is_compressed_o     = 1'b1;
-                        pop_internal        = 1'b1;
-                        next_half_index     = 1'b0;
+                        expand_in             = head_i.word[31:16];
+                        instruction_o         = expand_out;
+                        pc_id_o               = head_i.vaddr + 32'd2;
+                        instruction_valid_raw = 1'b1;
+                        instruction_fault_o   = head_i.fault;
+                        instruction_cause_o   = head_i.cause;
+                        is_compressed_o       = 1'b1;
+                        pop_internal          = 1'b1;
+                        next_half_index       = 1'b0;
                     end
                 end
             endcase
         end
     end
 
-    // Pop is gated by consumer take and emission validity
-    assign pop_o = pop_internal && consumer_take_i && instruction_valid_o;
+    // ── Squash gating ─────────────────────────────────────────────────
+    // In squash state: suppress all emits and drain the buffer.
+    wire [31:0] squash_target_word     = {squash_target_q[31:2], 2'b00};
+    wire        squash_head_is_target  = head_valid_i
+                                      && (head_i.vaddr == squash_target_word);
+    // Enter squash when the current emit is a predicted-taken branch.
+    wire        enter_squash = !squash_q
+                            && instruction_valid_raw
+                            && consumer_take_i
+                            && pred_taken_o;
+
+    assign instruction_valid_o = squash_q ? 1'b0 : instruction_valid_raw;
+
+    // Pop: in squash, drain the buffer autonomously (not gated by
+    // consumer_take_i, since the consumer sees instruction_valid_o=0).
+    // Stop popping once the head is the target's word — that's our
+    // re-entry point for normal emits.
+    assign pop_o = squash_q ? (head_valid_i && !squash_head_is_target)
+                             : (pop_internal && consumer_take_i && instruction_valid_raw);
 
     // ── half_index state update ────────────────────────────────────────
     // Priority: reset > redirect > flush > consumed-emit advance
@@ -186,8 +245,46 @@ module compressed_aligner
             half_index_q <= redirect_target_i[1];
         else if (flush_i)
             half_index_q <= 1'b0;
+        else if (squash_q && squash_head_is_target)
+            // On squash exit, reseat to the target's half within its word.
+            half_index_q <= squash_target_q[1];
         else if (instruction_valid_o && consumer_take_i)
             half_index_q <= next_half_index;
+    end
+
+    // Per-half consumed flags. Clear on pop (new head arrives) or any
+    // flush/redirect. Each flag sets only when the matching half emits.
+    always_ff @(posedge clk_i or posedge reset_i) begin
+        if (reset_i || flush_i || redirect_valid_i) begin
+            lo_consumed_q <= 1'b0;
+            hi_consumed_q <= 1'b0;
+        end else if (pop_o) begin
+            lo_consumed_q <= 1'b0;
+            hi_consumed_q <= 1'b0;
+        end else if (squash_q && squash_head_is_target) begin
+            // On squash exit, the new emit starts fresh on the target half.
+            lo_consumed_q <= 1'b0;
+            hi_consumed_q <= 1'b0;
+        end else if (instruction_valid_o && consumer_take_i) begin
+            if (use_lo) lo_consumed_q <= 1'b1;
+            if (use_hi) hi_consumed_q <= 1'b1;
+        end
+    end
+
+    // ── Squash state register ──────────────────────────────────────────
+    // Cleared by reset, flush, or an external redirect (those already
+    // reseat the aligner). Set on the cycle a predicted-taken branch
+    // emits. Cleared once the buffer head is the predicted target's word.
+    always_ff @(posedge clk_i or posedge reset_i) begin
+        if (reset_i || flush_i || redirect_valid_i) begin
+            squash_q        <= 1'b0;
+            squash_target_q <= 32'b0;
+        end else if (enter_squash) begin
+            squash_q        <= 1'b1;
+            squash_target_q <= pred_target_o;
+        end else if (squash_q && squash_head_is_target) begin
+            squash_q <= 1'b0;
+        end
     end
 
 endmodule

@@ -42,6 +42,7 @@ module hazard_unit (
     // ── Phase 3: fetch path validity / redirect ─────────────────────────
     input  logic        aligner_valid_i,    // 1 = aligner has a real ID-stage instruction
     input  logic        redirect_valid_i,   // any redirect (trap/xRET/branch/debug)
+    input  redirect_kind_e redirect_kind_i, // which source won the arbiter (RDR_BPU is ID-stage)
 
     // ── IE-stage exception flag ─────────────────────────────────────────
     input  logic        exception_from_ie_i,
@@ -135,7 +136,16 @@ always_comb begin
         4'b1110: {ie_flush_o, imem_flush_o, iwb_flush_o} = 3'b001;
         default: {ie_flush_o, imem_flush_o, iwb_flush_o} = 3'b000;
     endcase
-    if (redirect_valid_i)
+    // IE-stage redirects (trap/mispredict/xret) must squash the wrong-path
+    // instruction at ID by NOPping the ID->IE capture. BPU speculative
+    // redirects originate AT ID: the branch itself is the correct path and
+    // must propagate to IE (its resolution at IE validates the prediction).
+    // Gate on the arbiter's actual winner, not the BPU's fire intent, so
+    // that when an IE-stage mispredict wins over a would-be BPU redirect
+    // the wrong-path in ID is still squashed.
+    if (redirect_valid_i
+        && redirect_kind_i != RDR_BPU
+        && redirect_kind_i != RDR_BPU_IF)
         ie_flush_o = TRUE;
     // Phase 4: when wb_trap_unit commits a trap/xret/dret in IWB, kill
     // all 4 wrong-path stages (IF via fetch_flush, ID/IE/IMEM/IWB-on-

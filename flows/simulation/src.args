@@ -65,6 +65,10 @@
 ../../design/uncore/i2c/src/i2c_master_bit_ctrl.sv
 ../../design/uncore/i2c/src/i2c_master_byte_ctrl.sv
 ../../design/core/branch/src/branch_target_address.sv
+../../design/core/bpu/src/bht.sv
+../../design/core/bpu/src/btb.sv
+../../design/core/bpu/src/ras.sv
+../../design/core/bpu/src/bpu.sv
 ../../design/core/fetch/src/fetch_pkg.sv
 ../../design/core/fetch/src/fetch_buffer.sv
 ../../design/core/fetch/src/compressed_aligner.sv

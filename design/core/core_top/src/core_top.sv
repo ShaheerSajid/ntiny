@@ -73,10 +73,13 @@ logic [31:0] imm_iwb;
 onebit_sig_e branch_taken;
 onebit_sig_e bpu_mispredict;       // BPU: prediction != resolution
 logic [31:0] predicted_pc_id;      // BPU: fall-through PC at ID stage
+logic [31:0] predicted_target_id;  // BPU: predicted branch target at ID (meaningful when predicted_taken=TRUE)
+logic [31:0] predicted_target_ie;  // flopped through ID->IE for target-mismatch check
 logic [31:0] predicted_pc_ie;      // BPU: fall-through PC flopped into IE
 onebit_sig_e interrupt_valid;
 onebit_sig_e debug_valid;
 ctrl_bus_e ctrl_bus_if_id;
+ctrl_bus_e ctrl_bus_if_id_raw;  // BPU Step 2: decoder output before predicted_taken override
 ctrl_bus_e ctrl_bus_ie;
 ctrl_bus_e ctrl_bus_imem;
 ctrl_bus_e ctrl_bus_iwb;
@@ -178,6 +181,7 @@ logic [31:0]medeleg;
 logic [31:0]mideleg;
 logic       trap_to_s;
 logic [31:0]satp_csr;
+logic       menvcfg_adue;
 logic [31:0] pmpcfg_csr  [4];
 logic [31:0] pmpaddr_csr [16];
 
@@ -423,6 +427,7 @@ hazard_unit hazard_unit_inst (
     // forward references inside a single module scope are legal.
     .aligner_valid_i    (aligner_valid),
     .redirect_valid_i   (arb_redirect_valid),
+    .redirect_kind_i    (arb_redirect_kind),
     .exception_from_ie_i(exception_from_ie),
     // Processor state
     .halted_i           (halted_o),
@@ -611,9 +616,30 @@ assign fence_i_o = (ctrl_bus_ie.fence_i == TRUE) && !stale_ie;
 // at the IE stage, so the prediction it must be compared against is
 // the IE-stage `predicted_taken` (latched into ctrl_bus_ie at the IE
 // register wall). Was ctrl_bus_if_id.predicted_taken in the legacy.
-assign bpu_mispredict = onebit_sig_e'(branch_taken != ctrl_bus_ie.predicted_taken);
+// BPU Step 3 mispredict:
+//   A) direction wrong (pred != actual)
+//   B) direction right (both taken), but predicted target != actual target.
+//      This can only happen for dynamic targets — i.e., a RAS-predicted
+//      JALR where the callee actually returned somewhere else.
+wire bpu_dir_mismatch = (branch_taken != ctrl_bus_ie.predicted_taken);
+// Target-mismatch check for dynamic-target predictions (RAS). Required when
+// RAS is predicting JALR returns: if RAS top differs from the actual return
+// address (branch_target_address at IE), recover to branch_target_address.
+wire bpu_tgt_mismatch = (branch_taken == TRUE)
+                     && (ctrl_bus_ie.predicted_taken == TRUE)
+                     && (branch_target_address != predicted_target_ie);
+assign bpu_mispredict = onebit_sig_e'(bpu_dir_mismatch || bpu_tgt_mismatch);
 
-wire branch_taken_valid = bpu_mispredict;  // redirect on mispredict, not raw branch_taken
+wire branch_taken_valid = bpu_mispredict;
+
+// Recovery target:
+//   pred=T, actual=NT  -> predicted_pc_ie (fall-through)
+//   pred=T, actual=T, wrong target -> branch_target_address (real target)
+//   pred=NT, actual=T  -> branch_target_address
+wire [31:0] branch_recovery_target =
+	(bpu_dir_mismatch && (ctrl_bus_ie.predicted_taken == TRUE))
+	    ? predicted_pc_ie
+	    : branch_target_address;
 // Phase 4.3: xRET commits at IWB via wb_trap_unit. The legacy `ret_valid`
 // from privilege_unit (driven from ID) is no longer used as a redirect
 // trigger — wb_xret_fire from IWB is the new source. ret_valid_valid stays
@@ -623,24 +649,25 @@ wire ret_valid_valid    = wb_xret_fire;
 
 always_comb
 begin
-	// Priority: debug > interrupt/trap > branch > ret > PC+4
-	if (debug_valid)             pc_sel = BRANCH_DPC;
-	else if (interrupt_valid)    pc_sel = INTERRUPT;
-	else if (branch_taken_valid) pc_sel = BRANCH_PC;
-	else if (ret_valid_valid)    pc_sel = RET;
-	else                         pc_sel = PC_plus_4;
+	// Priority: debug > interrupt/trap > branch > ret > RAS > BPU-IF > PC+4
+	if (debug_valid)                pc_sel = BRANCH_DPC;
+	else if (interrupt_valid)       pc_sel = INTERRUPT;
+	else if (branch_taken_valid)    pc_sel = BRANCH_PC;
+	else if (ret_valid_valid)       pc_sel = RET;
+	else if (bpu_redirect_fire)     pc_sel = BPU_PRED;
+	else if (bpu_if_redirect_fire)  pc_sel = BPU_IF;
+	else                            pc_sel = PC_plus_4;
 end
 always_comb
 begin
 	case(pc_sel)
 		PC_plus_4: pc_in = pc_out + 4;
-		BRANCH_PC: pc_in = branch_target_address;
+		BRANCH_PC: pc_in = branch_recovery_target;
     INTERRUPT: pc_in = handler_addr;
-    // Phase 4.3: xRET target now comes from the IWB-stage carrier
-    // (the mret/sret being committed by wb_trap_unit), not the
-    // ID-stage instruction.
     RET      : pc_in = (ctrl_bus_iwb.sret == TRUE) ? sepc : epc;
 		BRANCH_DPC:pc_in = dpc;
+		BPU_PRED : pc_in = bpu_redirect_target;
+		BPU_IF   : pc_in = bpu_if_redirect_target;
 		default: pc_in = pc_out + 4;
 	endcase
 end
@@ -664,12 +691,16 @@ redirect_arbiter redirect_arbiter_inst (
     .ret_valid_i     (ret_valid_valid),
     // Phase 4.3: sret/mret distinction comes from the IWB carrier.
     .sret_select_i   (ctrl_bus_iwb.sret == TRUE),
+    .bpu_pred_fire_i (bpu_redirect_fire),
+    .bpu_if_fire_i   (bpu_if_redirect_fire),
 
     .handler_addr_i  (handler_addr),
-    .branch_target_i (branch_target_address),
+    .branch_target_i (branch_recovery_target),
     .sepc_i          (sepc),
     .mepc_i          (epc),
     .dpc_i           (dpc),
+    .bpu_pred_target_i (bpu_redirect_target),
+    .bpu_if_target_i   (bpu_if_redirect_target),
 
     .redirect_valid_o  (arb_redirect_valid),
     .redirect_target_o (arb_redirect_target),
@@ -1017,7 +1048,12 @@ assign imem_port.wdata = 32'b0;
 // Phase 4.9: flush on xret_at_decode (same-cycle as mret pops from
 // buffer, clearing the wrong-path entry behind it) and xret_draining
 // (continuous flush while mret transits IE→IWB).
-wire fetch_flush = arb_redirect_valid | xret_at_decode | xret_draining;
+// IF-stage BPU redirects do NOT flush the buffer or drop in-flight pushes —
+// the branch's own fetch word must still populate the buffer so it can reach
+// IE for resolution. Higher-priority redirects (trap/branch/xret/RAS) still
+// flush.
+wire arb_redirect_flushing = arb_redirect_valid && (arb_redirect_kind != RDR_BPU_IF);
+wire fetch_flush = arb_redirect_flushing | xret_at_decode | xret_draining;
 
 // inflight_vaddr_q latches i_vaddr on every cycle imem_port.req is
 // high. The vaddr register itself has NO reset (so a request issued in
@@ -1141,7 +1177,7 @@ end
 // Phase 4.8: xret_drop_push drops the stale rvalid from the wrong-priv
 // fetch that was issued on the wb_xret_fire cycle (before the FSM could
 // suppress it). The rdata is from PA=VA (untranslated) and is garbage.
-wire fb_push_raw = imem_port.rvalid && !arb_redirect_valid && !xret_drop_push;
+wire fb_push_raw = imem_port.rvalid && !arb_redirect_flushing && !xret_drop_push;
 
 fetch_pkg::fetch_buffer_entry_t fb_push_entry;
 assign fb_push_entry.word  = imem_port.rdata;
@@ -1159,6 +1195,11 @@ assign fb_push_entry.vaddr = {inflight_vaddr_q[31:2], 2'b00};
 // keep firing through the legacy direct mmu_i_*_fault_ptw path.
 assign fb_push_entry.fault = inflight_i_fault_q;
 assign fb_push_entry.cause = inflight_i_cause_q;
+// IF-stage predictions: per-half, latched at imem.req (see §3d below)
+assign fb_push_entry.pred_lo_taken  = inflight_pred_lo_taken_q;
+assign fb_push_entry.pred_hi_taken  = inflight_pred_hi_taken_q;
+assign fb_push_entry.pred_lo_target = inflight_pred_lo_target_q;
+assign fb_push_entry.pred_hi_target = inflight_pred_hi_target_q;
 
 // Phase 4.13: vaddr-based duplicate-push dedup.
 //
@@ -1268,7 +1309,11 @@ compressed_aligner compressed_aligner_inst (
     .next_valid_i        (fb_next_valid),
     .pop_o               (aligner_pop),
 
-    .redirect_valid_i    (arb_redirect_valid),
+    // RDR_BPU_IF must NOT reseat the aligner: the buffer isn't flushed
+    // (the branch's own word is still in-flight), so reseating half_index
+    // to the predicted target's [1] bit would corrupt the current emit
+    // position within the un-flushed head entry.
+    .redirect_valid_i    (arb_redirect_valid && arb_redirect_kind != RDR_BPU_IF),
     .redirect_target_i   (arb_redirect_target),
 
     .instruction_o       (aligner_inst),
@@ -1276,8 +1321,12 @@ compressed_aligner compressed_aligner_inst (
     .instruction_valid_o (aligner_valid),
     .instruction_fault_o (aligner_fault),
     .instruction_cause_o (aligner_cause),
-    .is_compressed_o     (aligner_is_compressed)
+    .is_compressed_o     (aligner_is_compressed),
+    .pred_taken_o        (aligner_pred_taken),
+    .pred_target_o       (aligner_pred_target)
 );
+logic        aligner_pred_taken;
+logic [31:0] aligner_pred_target;
 
 // Producer back-pressure: hold pc_out and gate imem_port.req when the
 // buffer would overflow on the next rvalid.
@@ -1351,6 +1400,10 @@ assign c_busy  = onebit_sig_e'(~aligner_valid | inflight_q);
 // Static not-taken: predicted_pc is always the sequential address.
 // Future BTB will override this with the predicted target when predicted_taken=1.
 assign predicted_pc_id = pc_id + (c_valid ? 32'd2 : 32'd4);
+// IF-stage prediction (carried in the fetch_buffer entry) wins; fall back
+// to ID-stage target for BHT/BTB/RAS redirects that fire at ID.
+assign predicted_target_id = aligner_pred_is_branch ? aligner_pred_target
+                                                      : bpu_redirect_target;
 
 // ============================================================
 // DECODE STAGE (ID)
@@ -1358,8 +1411,28 @@ assign predicted_pc_id = pc_id + (c_valid ? 32'd2 : 32'd4);
 decoder decoder_inst
 (
   .instruction_i	(instruction_pipe),
-	.ctrl_bus_o		    (ctrl_bus_if_id)
+	.ctrl_bus_o		    (ctrl_bus_if_id_raw)
 );
+
+// BPU override: predicted_taken reflects IF-stage (aligner carries it
+// in the fetch_buffer entry) OR ID-stage (bpu_redirect_fire = BHT/BTB
+// at ID + RAS). Either path must flag the IE stage so it can validate
+// the prediction and redirect on mispredict.
+//
+// Gate aligner_pred_taken by decoded inst_type: the IF-stage prediction
+// is per-fetch-word and may fire for a non-branch instruction if the
+// BTB entry trained on a prior branch at the same address still hits
+// (the same word is re-fetched in a different execution context, e.g.,
+// after a trap/mret redirects back through overlapping code).  Setting
+// predicted_taken on a non-branch would cause a spurious mispredict
+// redirect at IE (branch_comp returns FALSE for non-branches).
+wire aligner_pred_is_branch = aligner_pred_taken
+                           && (ctrl_bus_if_id_raw.inst_type == BRANCH
+                            || ctrl_bus_if_id_raw.inst_type == JUMP);
+always_comb begin
+	ctrl_bus_if_id = ctrl_bus_if_id_raw;
+	ctrl_bus_if_id.predicted_taken = onebit_sig_e'(aligner_pred_is_branch | bpu_redirect_fire);
+end
 // ── JAL/JALR rd write on instruction page fault ──────────────
 // Per RISC-V spec, JAL/JALR writes rd = PC+4 before the instruction
 // fetch at the target can fault. If the target fetch triggers an
@@ -1608,6 +1681,7 @@ always_ff@(posedge clk_i or posedge reset_i)
 			c_valid_ie <= FALSE;
 			stale_ie <= 1'b0;
 			predicted_pc_ie <= 0;
+			predicted_target_ie <= 0;
 		end
 		else if(ie_flush || interrupt_valid) begin
 			ctrl_bus_ie <= CTRL_BUS_NOP();
@@ -1619,6 +1693,7 @@ always_ff@(posedge clk_i or posedge reset_i)
 			c_valid_ie <= FALSE;
 			stale_ie <= 1'b0;
 			predicted_pc_ie <= 0;
+			predicted_target_ie <= 0;
 		end
 		else if(!ie_stall && aligner_valid) begin
 			// Phase 4.8: a fault marker from the fetch_buffer (an entry
@@ -1642,6 +1717,7 @@ always_ff@(posedge clk_i or posedge reset_i)
 			rs2_forwarded_ie <= rs2_forwarded_id;
 			rs3_forwarded_ie <= rs3_forwarded_id;
 			predicted_pc_ie <= predicted_pc_id;
+			predicted_target_ie <= predicted_target_id;
 			c_valid_ie <= c_valid;
 			stale_ie <= stale_id;
 		end
@@ -1663,6 +1739,7 @@ always_ff@(posedge clk_i or posedge reset_i)
 			c_valid_ie <= FALSE;
 			stale_ie <= 1'b0;
 			predicted_pc_ie <= 0;
+			predicted_target_ie <= 0;
 		end
 		else begin
 			// During a real IE stall (load in flight, AMO, MMU PTW etc.),
@@ -1777,6 +1854,260 @@ branch_target_address branch_target_address_inst
 	.target_o	(branch_target_address)
 );
 
+// ── BPU — IF-stage prediction (per-half, registered redirect) + ID fallback + RAS ──
+//
+// The BPU reads combinationally at i_vaddr and i_vaddr+2 (the fetch
+// address being presented to the I-cache this cycle). The redirect
+// fires from a REGISTERED output one cycle later to break the
+// combinational loop: i_vaddr → BPU → pc_sel → pc_in → i_vaddr.
+//
+// Timing (non-straddle branch at address P):
+//   Cycle N  : i_vaddr=P, imem_req(P), BPU predicts taken→T. Registered.
+//   Cycle N+1: bpu_if_redirect_fire_q=1, pc_sel=BPU_IF, pc_in=T.
+//              i_vaddr=T (skipping P+4 which would be wrong-path).
+//              The branch's own word (P) was already fetched in cycle N
+//              and enters the buffer on rvalid — no flush needed.
+//
+// Straddle (32-bit branch at upper half): needs TWO words before decode.
+//   Cycle N  : i_vaddr=P, BPU predicts upper-half straddle→T. Registered.
+//   Cycle N+1: HOLD redirect (straddle_pending). i_vaddr=P+4 (normal advance).
+//   Cycle N+2: straddle fires. pc_sel=BPU_IF, pc_in=T.
+//
+// Per-half predictions are latched into inflight_pred_*_q at imem.req
+// time and ride into the fetch_buffer entry. The aligner fires prediction
+// on the correct half via lo_consumed_q/hi_consumed_q.
+wire        bpu_if_pred_taken;          // Port A: ID-stage read at pc_id
+wire        bpu_if_pred_valid;
+wire [31:0] bpu_if_pred_target;
+wire        bpu_if_pred_is_compressed;  // unused at ID stage
+
+// Port B — IF-stage lower half (vaddr+0)
+wire        bpu_if_lo_taken;
+wire        bpu_if_lo_valid;
+wire [31:0] bpu_if_lo_target;
+wire        bpu_if_lo_is_comp;
+
+// Port C — IF-stage upper half (vaddr+2)
+wire        bpu_if_hi_taken;
+wire        bpu_if_hi_valid;
+wire [31:0] bpu_if_hi_target;
+wire        bpu_if_hi_is_comp;
+
+// BPU IF reads at the TWO HALVES of the WORD being fetched (always
+// word-aligned), regardless of i_vaddr[1]. The entry stored in the
+// fetch_buffer is word-aligned (fb_push_entry.vaddr = inflight_vaddr_q
+// rounded to word), so the per-half predictions (pred_lo at vaddr+0,
+// pred_hi at vaddr+2) must match the word's halves.
+//
+// BUG (2026-04-20, Dhrystone "IInt_Glob" corruption root cause):
+//   The old version read at (i_vaddr, i_vaddr+2). When i_vaddr was
+//   half-aligned (e.g., i_vaddr=0x...c16 after a redirect to an
+//   upper-half target), port B read at 0xc16 (upper half of word
+//   0xc14) and port C read at 0xc18 (lower half of NEXT word 0xc18).
+//   The entry at 0xc14 then stored pred_hi_taken = port C fire, but
+//   port C was predicting a branch in word 0xc18 — not in word 0xc14.
+//   The aligner fired pred_taken on the mv at 0xc16, triggering the
+//   ID-stage mispredict path spuriously.
+wire [31:0] bpu_if_word_aligned = {i_vaddr[31:2], 2'b00};
+wire [31:0] bpu_if_pc_lo = bpu_if_word_aligned;                 // vaddr+0
+wire [31:0] bpu_if_pc_hi = bpu_if_word_aligned | 32'd2;         // vaddr+2
+
+// Raw fire: BPU hit + predicted taken (combinational, NOT used for redirect)
+wire lo_fire_raw = bpu_if_lo_valid && bpu_if_lo_taken;
+wire hi_fire_raw = bpu_if_hi_valid && bpu_if_hi_taken;
+
+// When i_vaddr[1]=1 (half-aligned redirect target), the lower half's
+// instruction is skipped by the aligner (it starts at half_index=1).
+// So no need to predict for the lower half — the prediction would
+// never fire at the aligner.
+wire lo_fire = lo_fire_raw && (i_vaddr[1] == 1'b0);
+wire hi_fire = hi_fire_raw;
+
+// Program order: lo beats hi (lo executes first).
+// The post-branch wrong-path emit bug (2026-04-20 Dhrystone corruption)
+// is fixed in compressed_aligner.sv via the squash FSM: on a predicted-
+// taken branch emit, the aligner drains the fetch_buffer without emitting
+// until an entry matching the predicted target vaddr appears.
+wire pick_lo = lo_fire;
+wire pick_hi = !lo_fire && hi_fire;
+
+// Straddle: 32-bit branch starting at upper half spans into next word.
+wire hi_is_straddle = pick_hi && !bpu_if_hi_is_comp;
+
+// Pick a winner for the combinational prediction (for inflight latches).
+wire        if_any_fire      = pick_lo || pick_hi;
+wire [31:0] if_pick_target   = pick_lo ? bpu_if_lo_target : bpu_if_hi_target;
+
+// ── Registered redirect FSM (one-at-a-time policy) ─────────────────────
+// States:
+//   IDLE           — no pending IF-stage prediction.
+//   FIRE           — prediction registered; fire redirect this cycle.
+//   STRADDLE_WAIT  — straddle prediction; wait 1 cycle for tail word.
+//
+// bpu_if_pending_q: set when FIRE fires (prediction enters pipeline).
+// Cleared when a branch resolves at IE (bpu_bht_train_en) or a higher-
+// priority redirect overrides. While pending=1, the FSM stays in IDLE —
+// no new IF prediction can fire until the pipeline has made forward
+// progress. This prevents the infinite redirect loop that caused PMP/
+// trap test hangs: the BPU must wait for IE to validate (or invalidate)
+// the current prediction before issuing the next one.
+localparam [1:0] BPU_IF_IDLE          = 2'd0,
+                 BPU_IF_FIRE          = 2'd1,
+                 BPU_IF_STRADDLE_WAIT = 2'd2;
+
+logic [1:0]  bpu_if_state_q;
+logic [31:0] bpu_if_target_q;
+logic        bpu_if_pending_q;
+
+wire hp_redirect = arb_redirect_valid && arb_redirect_kind != RDR_BPU_IF;
+
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) begin
+        bpu_if_state_q   <= BPU_IF_IDLE;
+        bpu_if_target_q  <= 32'b0;
+        bpu_if_pending_q <= 1'b0;
+    end else begin
+        // Pending flag: clear on branch-resolve or higher-priority redirect
+        if (hp_redirect)
+            bpu_if_pending_q <= 1'b0;
+        else if (bpu_bht_train_en)
+            bpu_if_pending_q <= 1'b0;
+
+        // FSM
+        if (hp_redirect) begin
+            bpu_if_state_q <= BPU_IF_IDLE;
+        end else begin
+            case (bpu_if_state_q)
+                BPU_IF_IDLE: begin
+                    // fb_head_valid: don't fire until the pipeline has at
+                    // least one buffered instruction from the current path.
+                    // After a flush the buffer is empty; this gate prevents
+                    // the BPU from redirecting before the first instruction
+                    // from the new path has even entered the pipeline.
+                    if (if_any_fire && imem_port.req
+                        && !arb_redirect_valid && !bpu_if_pending_q
+                        && fb_head_valid) begin
+                        bpu_if_target_q <= if_pick_target;
+                        bpu_if_state_q  <= hi_is_straddle ? BPU_IF_STRADDLE_WAIT
+                                                          : BPU_IF_FIRE;
+                    end
+                end
+                BPU_IF_FIRE: begin
+                    bpu_if_pending_q <= 1'b1;
+                    bpu_if_state_q   <= BPU_IF_IDLE;
+                end
+                BPU_IF_STRADDLE_WAIT: begin
+                    if (imem_port.req)
+                        bpu_if_state_q <= BPU_IF_FIRE;
+                end
+                default: bpu_if_state_q <= BPU_IF_IDLE;
+            endcase
+        end
+    end
+end
+
+wire        bpu_if_redirect_fire   = (bpu_if_state_q == BPU_IF_FIRE);
+wire [31:0] bpu_if_redirect_target = bpu_if_target_q;
+
+// ID-stage prediction: gated on decoded inst_type (BRANCH or JAL).
+// Suppress when the aligner is already firing this instruction's IF-stage
+// prediction — avoids double redirect on the same branch.
+wire        bpu_is_branch_id = (ctrl_bus_if_id_raw.inst_type == BRANCH);
+wire        bpu_is_jal_id    = (ctrl_bus_if_id_raw.inst_type == JUMP);
+wire        bpu_bht_btb_fire = bpu_if_pred_valid
+                              && ((bpu_is_branch_id && bpu_if_pred_taken) || bpu_is_jal_id)
+                              && insn_valid_id
+                              && aligner_valid
+                              && !aligner_pred_is_branch;
+
+// Return detection at ID
+wire [4:0]  id_rs1 = ctrl_bus_if_id_raw.rs1_int[4:0];
+wire [4:0]  id_rd  = ctrl_bus_if_id_raw.rd_int[4:0];
+wire        id_rs1_is_ra = (id_rs1 == 5'd1) || (id_rs1 == 5'd5);
+wire        id_rd_is_ra  = (id_rd  == 5'd1) || (id_rd  == 5'd5);
+wire        is_return_id = (ctrl_bus_if_id_raw.inst_type == JUMP_R)
+                        && id_rs1_is_ra && !id_rd_is_ra
+                        && insn_valid_id && aligner_valid;
+
+// Call detection at IE
+wire [4:0]  ie_rd = ctrl_bus_ie.rd_int[4:0];
+wire        ie_rd_is_ra = (ie_rd == 5'd1) || (ie_rd == 5'd5);
+wire        is_call_ie = (ctrl_bus_ie.inst_type == JUMP || ctrl_bus_ie.inst_type == JUMP_R)
+                      && ie_rd_is_ra && !stale_ie && !ie_stall;
+
+// RAS
+wire [31:0] ras_top;
+wire        ras_valid;
+wire        id_advancing = !ie_stall && aligner_valid;
+wire        ras_pop_fire = is_return_id && ras_valid && id_advancing;
+wire [31:0] ras_push_addr = pc_ie + (c_valid_ie == TRUE ? 32'd2 : 32'd4);
+ras ras_inst (
+	.clk_i(clk_i), .reset_i(reset_i),
+	.push_i(is_call_ie), .push_addr_i(ras_push_addr),
+	.pop_i(ras_pop_fire), .top_o(ras_top), .valid_o(ras_valid)
+);
+
+// Unified ID-stage redirect: BHT/BTB OR RAS
+wire        bpu_redirect_fire   = bpu_bht_btb_fire || ras_pop_fire;
+wire [31:0] bpu_redirect_target = ras_pop_fire ? ras_top : bpu_if_pred_target;
+
+// Training at IE
+wire        bpu_bht_train_en  = (ctrl_bus_ie.inst_type == BRANCH) && !stale_ie && !ie_stall;
+wire        bpu_btb_alloc_en  = ((ctrl_bus_ie.inst_type == BRANCH && branch_taken == TRUE)
+                              || (ctrl_bus_ie.inst_type == JUMP))
+                              && !stale_ie && !ie_stall;
+// Per-half inflight latches: capture IF-stage predictions at imem.req so
+// they ride the fetch into the buffer entry that arrives on rvalid.
+//
+// Gated by bpu_if_latch_en: only the ONE fetch whose prediction the FSM
+// accepted carries prediction data. All other fetches get pred_*_taken=0
+// so phantom predictions never leak into buffer entries.
+wire bpu_if_latch_en = (bpu_if_state_q == BPU_IF_IDLE)
+                     && if_any_fire && imem_port.req
+                     && !arb_redirect_valid && !bpu_if_pending_q
+                     && fb_head_valid;
+
+logic        inflight_pred_lo_taken_q, inflight_pred_hi_taken_q;
+logic [31:0] inflight_pred_lo_target_q, inflight_pred_hi_target_q;
+always_ff @(posedge clk_i) begin
+    if (imem_port.req) begin
+        inflight_pred_lo_taken_q  <= bpu_if_latch_en ? pick_lo : 1'b0;
+        inflight_pred_hi_taken_q  <= bpu_if_latch_en ? pick_hi : 1'b0;
+        inflight_pred_lo_target_q <= bpu_if_lo_target;
+        inflight_pred_hi_target_q <= bpu_if_hi_target;
+    end
+end
+
+wire        bpu_btb_is_uncond     = (ctrl_bus_ie.inst_type == JUMP);
+wire        bpu_btb_is_compressed = (c_valid_ie == TRUE);
+bpu bpu_inst (
+	.clk_i(clk_i), .reset_i(reset_i),
+	// Port A — ID-stage
+	.pc_id_i             (pc_id),
+	.pred_taken_o        (bpu_if_pred_taken),
+	.pred_valid_o        (bpu_if_pred_valid),
+	.pred_target_o       (bpu_if_pred_target),
+	.pred_is_compressed_o(bpu_if_pred_is_compressed),
+	// Port B — IF-stage lower half
+	.if_lo_pc_i                 (bpu_if_pc_lo),
+	.if_lo_pred_taken_o         (bpu_if_lo_taken),
+	.if_lo_pred_valid_o         (bpu_if_lo_valid),
+	.if_lo_pred_target_o        (bpu_if_lo_target),
+	.if_lo_pred_is_compressed_o (bpu_if_lo_is_comp),
+	// Port C — IF-stage upper half
+	.if_hi_pc_i                 (bpu_if_pc_hi),
+	.if_hi_pred_taken_o         (bpu_if_hi_taken),
+	.if_hi_pred_valid_o         (bpu_if_hi_valid),
+	.if_hi_pred_target_o        (bpu_if_hi_target),
+	.if_hi_pred_is_compressed_o (bpu_if_hi_is_comp),
+	// Update port — IE stage
+	.update_en_i(bpu_bht_train_en), .update_pc_i(pc_ie),
+	.update_taken_i(branch_taken == TRUE), .update_target_i(branch_target_address),
+	.update_btb_alloc_i(bpu_btb_alloc_en),
+	.update_is_uncond_i(bpu_btb_is_uncond),
+	.update_is_compressed_i(bpu_btb_is_compressed)
+);
+
 always_comb
 begin
 	case(ctrl_bus_ie.operand_a)
@@ -1844,6 +2175,7 @@ csr_unit csr_unit_inst
   .medeleg_o            (medeleg),
   .mideleg_o            (mideleg),
   .satp_o               (satp_csr),
+  .menvcfg_adue_o       (menvcfg_adue),
   .pmpcfg_o             (pmpcfg_csr),
   .pmpaddr_o            (pmpaddr_csr)
 );
@@ -1902,6 +2234,7 @@ mmu_sv32 mmu_inst (
   .priv_i         (priv_level),   // data-side: always use actual privilege
   .i_priv_i       (mmu_priv),     // instruction-side: overridden on MRET/SRET
   .mstatus_i      (status_csr),
+  .menvcfg_adue_i (menvcfg_adue),
   .sfence_i       (ctrl_bus_ie.sfence_vma),
   // MMU PTW abort: traps, branches, and xRET invalidate in-flight PTW
   // (the VA context changes). The xret_fetch_ctrl FSM ensures the

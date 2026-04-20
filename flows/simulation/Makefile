@@ -149,6 +149,18 @@ verilator_build:
 	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
 	mv obj_dir/Vtb_soc_top ./
 
+# Build without DV_TRACER for bench (dhrystone/coremark) — avoids the
+# multi-GB trace log that slows down long-running benchmarks. Uses 64KB
+# RAM to match link_bench.ld (default 32KB is too small for Dhrystone
+# which places the stack at 0x80010000).
+verilator_build_bench:
+	verilator $(VERILATOR_COMMON) \
+	+define+RAM_SIZE_BYTES=65536 \
+	$(VERILATOR_INCDIRS) \
+	$(VERILATOR_SRCS)
+	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
+	mv obj_dir/Vtb_soc_top ./
+
 # Run simulation (no waveform by default)
 verilator_run:
 	./Vtb_soc_top

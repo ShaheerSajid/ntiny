@@ -316,7 +316,9 @@ typedef enum logic[2:0] {
 	BRANCH_PC,
 	INTERRUPT,
 	RET,
-	BRANCH_DPC
+	BRANCH_DPC,
+	BPU_PRED,    // ID-stage RAS prediction
+	BPU_IF       // IF-stage BHT/BTB prediction (no fetch_flush, no buffer-drop)
 } pc_sel_e;
 
 // Redirect-arbiter kind enum (fetch revamp Phase 1).
@@ -330,7 +332,9 @@ typedef enum logic [2:0] {
 	RDR_DEBUG  = 3'd2,
 	RDR_TRAP   = 3'd3,
 	RDR_XRET   = 3'd4,
-	RDR_BRANCH = 3'd5
+	RDR_BRANCH = 3'd5,
+	RDR_BPU    = 3'd6,    // ID-stage RAS
+	RDR_BPU_IF = 3'd7     // IF-stage BHT/BTB (no flush, no drop)
 } redirect_kind_e;
 
 // Per-instruction "what to do at writeback" tag (Phase 4 trap revamp).
