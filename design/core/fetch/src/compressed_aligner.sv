@@ -121,11 +121,19 @@ module compressed_aligner
     // Straddle case (32-bit branch at head[31:16]+next[15:0]) also fires
     // on half_index=1 and naturally consumes pred_hi_*.
     logic lo_consumed_q, hi_consumed_q;
-    wire  use_lo = head_valid_i && (half_index_q == 1'b0);
-    wire  use_hi = head_valid_i && (half_index_q == 1'b1);
+    // Effective half index: on the cycle when squash is exiting (head is
+    // the predicted target's word), override the registered half_index_q
+    // with squash_target_q[1]. This lets the aligner emit the target's
+    // first instruction on the SAME cycle the target word arrives at
+    // head, saving the 1-cycle squash-exit delay.
+    wire        squash_exit_now = squash_q && squash_head_is_target;
+    wire        eff_half_idx    = squash_exit_now ? squash_target_q[1]
+                                                   : half_index_q;
+    wire  use_lo = head_valid_i && (eff_half_idx == 1'b0);
+    wire  use_hi = head_valid_i && (eff_half_idx == 1'b1);
     assign pred_taken_o  = (use_lo && head_i.pred_lo_taken && !lo_consumed_q)
                          || (use_hi && head_i.pred_hi_taken && !hi_consumed_q);
-    assign pred_target_o = (half_index_q == 1'b0) ? head_i.pred_lo_target
+    assign pred_target_o = (eff_half_idx == 1'b0) ? head_i.pred_lo_target
                                                    : head_i.pred_hi_target;
 
     always_comb begin
@@ -137,11 +145,11 @@ module compressed_aligner
         instruction_cause_o    = 5'b0;
         is_compressed_o        = 1'b0;
         pop_internal           = 1'b0;
-        next_half_index        = half_index_q;
+        next_half_index        = eff_half_idx;
         expand_in              = 16'b0;
 
         if (head_valid_i) begin
-            case (half_index_q)
+            case (eff_half_idx)
                 1'b0: begin
                     // Lower half of head
                     if (head_i.word[1:0] == 2'b11) begin
@@ -206,24 +214,30 @@ module compressed_aligner
     end
 
     // ── Squash gating ─────────────────────────────────────────────────
-    // In squash state: suppress all emits and drain the buffer.
+    // In squash state: suppress all emits and drain the buffer, UNLESS
+    // the head is the predicted target's word — in that case we're
+    // exiting squash and want to emit target's first instruction on the
+    // same cycle (see eff_half_idx override above).
     wire [31:0] squash_target_word     = {squash_target_q[31:2], 2'b00};
     wire        squash_head_is_target  = head_valid_i
                                       && (head_i.vaddr == squash_target_word);
+    // "Really squashed" = squash_q is set AND head is NOT yet the target.
+    // On the exit cycle (squash_q=1, head=target), eff_squash=0 so emit
+    // and pop behave normally, emitting target's first instruction.
+    wire        eff_squash = squash_q && !squash_head_is_target;
     // Enter squash when the current emit is a predicted-taken branch.
     wire        enter_squash = !squash_q
                             && instruction_valid_raw
                             && consumer_take_i
                             && pred_taken_o;
 
-    assign instruction_valid_o = squash_q ? 1'b0 : instruction_valid_raw;
+    assign instruction_valid_o = eff_squash ? 1'b0 : instruction_valid_raw;
 
-    // Pop: in squash, drain the buffer autonomously (not gated by
+    // Pop: in real-squash, drain the buffer autonomously (not gated by
     // consumer_take_i, since the consumer sees instruction_valid_o=0).
-    // Stop popping once the head is the target's word — that's our
-    // re-entry point for normal emits.
-    assign pop_o = squash_q ? (head_valid_i && !squash_head_is_target)
-                             : (pop_internal && consumer_take_i && instruction_valid_raw);
+    // On the exit cycle, pop per normal emit rules.
+    assign pop_o = eff_squash ? head_valid_i
+                               : (pop_internal && consumer_take_i && instruction_valid_raw);
 
     // ── half_index state update ────────────────────────────────────────
     // Priority: reset > redirect > flush > consumed-emit advance
@@ -238,6 +252,15 @@ module compressed_aligner
     // The flush_i branch is retained for explicit non-redirect flushes
     // (e.g. reset path or future debug halt resync), but in the current
     // wiring it is dominated by the redirect path.
+    //
+    // Combinational squash exit: on the cycle when squash_head_is_target
+    // is true, eff_half_idx already reflects squash_target_q[1] (see
+    // above), and the normal emit path (instruction_valid_o &&
+    // consumer_take_i) drives next_half_index to the correct post-emit
+    // value. So the normal emit-advance clause handles the exit case —
+    // we only need a fallback for "squash exit without emit" (e.g., the
+    // rare straddle-stall where target's upper half is a 32-bit straddle
+    // waiting for the NEXT next_valid_i).
     always_ff @(posedge clk_i or posedge reset_i) begin
         if (reset_i)
             half_index_q <= 1'b0;
@@ -245,15 +268,15 @@ module compressed_aligner
             half_index_q <= redirect_target_i[1];
         else if (flush_i)
             half_index_q <= 1'b0;
-        else if (squash_q && squash_head_is_target)
-            // On squash exit, reseat to the target's half within its word.
-            half_index_q <= squash_target_q[1];
         else if (instruction_valid_o && consumer_take_i)
             half_index_q <= next_half_index;
+        else if (squash_q && squash_head_is_target)
+            half_index_q <= squash_target_q[1];
     end
 
     // Per-half consumed flags. Clear on pop (new head arrives) or any
     // flush/redirect. Each flag sets only when the matching half emits.
+    // Priority: pop clears > emit sets > squash-exit-without-emit clears.
     always_ff @(posedge clk_i or posedge reset_i) begin
         if (reset_i || flush_i || redirect_valid_i) begin
             lo_consumed_q <= 1'b0;
@@ -261,13 +284,13 @@ module compressed_aligner
         end else if (pop_o) begin
             lo_consumed_q <= 1'b0;
             hi_consumed_q <= 1'b0;
-        end else if (squash_q && squash_head_is_target) begin
-            // On squash exit, the new emit starts fresh on the target half.
-            lo_consumed_q <= 1'b0;
-            hi_consumed_q <= 1'b0;
         end else if (instruction_valid_o && consumer_take_i) begin
             if (use_lo) lo_consumed_q <= 1'b1;
             if (use_hi) hi_consumed_q <= 1'b1;
+        end else if (squash_q && squash_head_is_target) begin
+            // Squash exit without emit (rare straddle-stall case).
+            lo_consumed_q <= 1'b0;
+            hi_consumed_q <= 1'b0;
         end
     end
 

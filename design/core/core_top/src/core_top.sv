@@ -1967,10 +1967,17 @@ always_ff @(posedge clk_i or posedge reset_i) begin
         bpu_if_target_q  <= 32'b0;
         bpu_if_pending_q <= 1'b0;
     end else begin
-        // Pending flag: clear on branch-resolve or higher-priority redirect
+        // Pending flag: clear on any CF commit at IE (BRANCH train OR
+        // BRANCH-taken/JUMP alloc) or on higher-priority redirect.
+        //
+        // Using bpu_bht_train_en alone (BRANCH only) was too narrow:
+        // after a JAL prediction, pending stayed set until the next
+        // BRANCH commit, potentially blocking many subsequent IF-stage
+        // predictions. bpu_btb_alloc_en covers JAL (JUMP) commits too,
+        // matching the set of instructions the BTB trains on.
         if (hp_redirect)
             bpu_if_pending_q <= 1'b0;
-        else if (bpu_bht_train_en)
+        else if (bpu_bht_train_en || bpu_btb_alloc_en)
             bpu_if_pending_q <= 1'b0;
 
         // FSM
