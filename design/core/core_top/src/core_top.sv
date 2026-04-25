@@ -2039,7 +2039,18 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     end
 end
 
-wire        bpu_if_redirect_fire   = (bpu_if_state_q == BPU_IF_FIRE);
+// BPU IF (per-half IF-stage prediction) disabled: with Svadu HW A/D
+// updates active, BPU IF speculative fetches interact with the PTW's
+// in-flight PTE writeback in a way that corrupts a kernel data load
+// (Linux v6.6 hits BUG at drivers/of/address.c:401 — of_match_bus's
+// final beqz on the NULL match for the default bus reads as non-NULL,
+// loop falls through to BUG()). Disabling BPU IF lets Linux boot all
+// the way through kernel init to userspace. CoreMark loses ~1%,
+// Dhrystone loses ~4% from this — branch prediction at ID (BHT/BTB,
+// kept enabled below) does most of the work.
+//
+// Pair with the aligner's pred_taken_o tie-off (see compressed_aligner.sv).
+wire        bpu_if_redirect_fire   = 1'b0;
 wire [31:0] bpu_if_redirect_target = bpu_if_target_q;
 
 // ID-stage prediction: gated on decoded inst_type (BRANCH or JAL).

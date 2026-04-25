@@ -131,8 +131,12 @@ module compressed_aligner
                                                    : half_index_q;
     wire  use_lo = head_valid_i && (eff_half_idx == 1'b0);
     wire  use_hi = head_valid_i && (eff_half_idx == 1'b1);
-    assign pred_taken_o  = (use_lo && head_i.pred_lo_taken && !lo_consumed_q)
-                         || (use_hi && head_i.pred_hi_taken && !hi_consumed_q);
+    // BPU IF squash disabled (see core_top.sv bpu_if_redirect_fire). Without
+    // the IF-stage redirect actually firing, signaling pred_taken_o would
+    // make the aligner squash a path that nothing else is going to redirect
+    // away from, deadlocking the squash drain. So gate it with the same
+    // condition: tied to 0 here, re-enable together with bpu_if_redirect_fire.
+    assign pred_taken_o  = 1'b0;
     assign pred_target_o = (eff_half_idx == 1'b0) ? head_i.pred_lo_target
                                                    : head_i.pred_hi_target;
 
