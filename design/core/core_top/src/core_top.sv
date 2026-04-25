@@ -2080,9 +2080,13 @@ ras ras_inst (
 	.pop_i(ras_pop_fire), .top_o(ras_top), .valid_o(ras_valid)
 );
 
-// Unified ID-stage redirect: BHT/BTB OR RAS
-wire        bpu_redirect_fire   = bpu_bht_btb_fire || ras_pop_fire;
-wire [31:0] bpu_redirect_target = ras_pop_fire ? ras_top : bpu_if_pred_target;
+// ID-stage redirect: BHT/BTB only.
+// RAS pop-fire disabled (Linux-boot regression): ras_pop_fire firing the
+// redirect somehow pollutes ITLB/PTW state and breaks the kernel's first
+// csrw satp transition (instruction page fault at c0001058). RAS push/pop
+// logic still runs (no harm), it just doesn't drive the pipeline redirect.
+wire        bpu_redirect_fire   = bpu_bht_btb_fire;
+wire [31:0] bpu_redirect_target = bpu_if_pred_target;
 
 // Training at IE
 wire        bpu_bht_train_en  = (ctrl_bus_ie.inst_type == BRANCH) && !stale_ie && !ie_stall;
