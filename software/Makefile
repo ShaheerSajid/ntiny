@@ -194,9 +194,12 @@ benchmark_coremark: | $(BUILDDIR)
 		-funroll-all-loops \
 		-DITERATIONS=1 \
 		-DCLOCKS_PER_SEC=50000000 \
+		-DVERILATOR \
 		$(BENCH_LDFLAGS)
 	$(ELFSIZE) $(BUILDDIR)/coremark.elf
-	@echo "=== Built benchmark: coremark ==="
+	$(OBJCOPY) -O binary --gap-fill 0 $(BUILDDIR)/coremark.elf $(BUILDDIR)/coremark.bin
+	python3 tools/hex_text.py $(BUILDDIR)/coremark.bin $(SIM_DIR)/ram.hex
+	@echo "=== Built benchmark: coremark (ram.hex in $(SIM_DIR)) ==="
 
 .PHONY: benchmark_dhrystone
 benchmark_dhrystone: | $(BUILDDIR)
@@ -204,20 +207,23 @@ benchmark_dhrystone: | $(BUILDDIR)
 		$(INCLUDES) -I$(DHRYSTONE_DIR) \
 		-Ofast -ffunction-sections -fdata-sections $(BENCH_MARCH) \
 		-std=gnu89 -Wno-implicit -fno-common \
-		-DMSC_CLOCK -DNOENUM -DCLK_TCK=50000000 -DDHRY_ITERS=10000
+		-DMSC_CLOCK -DNOENUM -DCLK_TCK=50000000 -DDHRY_ITERS=10000 -DVERILATOR
 	$(CC) -c -o $(BUILDDIR)/dhry_2.o $(DHRYSTONE_DIR)/dhry_2.c \
 		$(INCLUDES) -I$(DHRYSTONE_DIR) \
 		-Ofast -ffunction-sections -fdata-sections $(BENCH_MARCH) \
 		-std=gnu89 -Wno-implicit -fno-common \
-		-DMSC_CLOCK -DNOENUM -DCLK_TCK=50000000 -DDHRY_ITERS=10000
+		-DMSC_CLOCK -DNOENUM -DCLK_TCK=50000000 -DDHRY_ITERS=10000 -DVERILATOR
 	$(CC) -o $(BUILDDIR)/dhrystone.elf \
 		$(BUILDDIR)/dhry_1.o $(BUILDDIR)/dhry_2.o \
 		$(COMMON)/clock.c \
 		$(SRCS_MINIMAL) $(INCLUDES) \
 		-Ofast -ffunction-sections -fdata-sections $(BENCH_MARCH) \
+		-DVERILATOR \
 		$(BENCH_LDFLAGS)
 	$(ELFSIZE) $(BUILDDIR)/dhrystone.elf
-	@echo "=== Built benchmark: dhrystone ==="
+	$(OBJCOPY) -O binary --gap-fill 0 $(BUILDDIR)/dhrystone.elf $(BUILDDIR)/dhrystone.bin
+	python3 tools/hex_text.py $(BUILDDIR)/dhrystone.bin $(SIM_DIR)/ram.hex
+	@echo "=== Built benchmark: dhrystone (ram.hex in $(SIM_DIR)) ==="
 
 # ─── Baremetal interactive demo ───────────────────────────────────────────────
 .PHONY: baremetal

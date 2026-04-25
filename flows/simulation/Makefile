@@ -161,6 +161,17 @@ verilator_build_bench:
 	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
 	mv obj_dir/Vtb_soc_top ./
 
+# Bench build WITH DV_TRACER (produces trace_core_00000000.log) — for
+# debugging wild-PC bugs in CoreMark. Log is huge (~1M+ lines) so grep.
+verilator_build_bench_trace:
+	verilator $(VERILATOR_COMMON) \
+	-DDV_TRACER \
+	+define+RAM_SIZE_BYTES=65536 \
+	$(VERILATOR_INCDIRS) \
+	$(VERILATOR_SRCS)
+	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
+	mv obj_dir/Vtb_soc_top ./
+
 # Run simulation (no waveform by default)
 verilator_run:
 	./Vtb_soc_top

@@ -587,12 +587,21 @@ wire xret_draining = (xret_state == XRET_DRAIN);
 wire xret_fetching = (xret_state == XRET_FETCH);
 wire xret_hold_pc  = xret_draining || (xret_state == XRET_WAIT) || xret_fetching;
 wire xret_drive_va = (xret_state == XRET_FETCH);
-// Phase 4.10b: XRET_ADVANCE suppresses normal-path fetch for 1 cycle
-// while pc_out advances from target to target+4. Without this, the
-// normal path re-fetches at pc_out=target → duplicate buffer entry →
-// corrupted straddled instruction (Linux JAL bug at 0x80400002).
+// Phase 4.10b: XRET_ADVANCE was originally added to suppress a re-fetch
+// of pc_out=target during the cycle pc_out advances to target+4 (Linux
+// JAL bug at 0x80400002). With DEPTH=4 wider gate, however, suppressing
+// imem.req in XRET_ADVANCE drops the legit fetch for target+4, causing
+// the next instruction after every xret target to be silently skipped
+// (cebreak-01 sw sp, 4(ra) at xret_target+4 never retires; OpenSBI
+// breaks similarly on every M-mode mret).
+//
+// Fix: keep xret_drop_push (catches the duplicate-target rvalid that
+// motivated Phase 4.10b) but remove xret_advance from xret_suppress so
+// the producer can issue the legit target+4 fetch in this cycle.
+// The fb_push_dup vaddr-dedup downstream is a second line of defense
+// against any duplicate-target push that sneaks through.
 wire xret_advance = (xret_state == XRET_ADVANCE);
-wire xret_suppress = xret_draining || (xret_state == XRET_WAIT) || xret_advance;
+wire xret_suppress = xret_draining || (xret_state == XRET_WAIT);
 wire xret_drop_push= xret_draining || (xret_state == XRET_WAIT) || xret_advance;
 
 // MMU instruction-side privilege view: just the live priv_level.
@@ -822,6 +831,21 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     end else if (redirect_deferred) begin
         // Capture (or re-capture on a nested redirect) the deferred target.
         pending_target_q   <= pc_in;
+        pending_target_v_q <= 1'b1;
+    end else if (fb_overflow && !pending_target_v_q) begin
+        // DEPTH=4 overflow recovery: the fetch_buffer dropped this push
+        // because it was full at rvalid time (common with BPU IF FIRE
+        // where target fetch lands 1 cycle after a legitimate concurrent
+        // push filled the last slot). Refetch by reusing the pending
+        // target mechanism — captures the dropped word-aligned vaddr,
+        // drives i_vaddr from it, and clears once the refetched word
+        // reaches IE. Without this, the aligner's squash FSM can never
+        // exit (it waits for head.vaddr==BPU_target which was dropped).
+        //
+        // Guard `!pending_target_v_q`: do NOT overwrite an already-pending
+        // MMU-deferred redirect (would abandon the correct redirect
+        // target and cause VM regressions).
+        pending_target_q   <= fb_push_entry.vaddr;
         pending_target_v_q <= 1'b1;
     end else if (arb_redirect_valid) begin
         // Non-deferred redirect (mmu_i_stall=0) takes priority and is
@@ -1278,9 +1302,9 @@ fetch_pkg::fetch_buffer_entry_t    fb_next;
 logic                              fb_head_valid;
 logic                              fb_next_valid;
 logic                              fb_empty;
-logic [1:0]                        fb_count;
+logic [2:0]                        fb_count;       // DEPTH=4 → 3 bits (0..4)
 
-fetch_buffer #(.DEPTH(2)) fetch_buffer_inst (
+fetch_buffer #(.DEPTH(4)) fetch_buffer_inst (
     .clk_i        (clk_i),
     .reset_i      (reset_i),
     .flush_i      (fetch_flush),
@@ -1338,7 +1362,9 @@ logic [31:0] aligner_pred_target;
 //
 // The combined fetch_stall is the source of producer hold throughout
 // the rest of this file (replaces the role of c_stall on the fetch path).
-wire fetch_stall = fb_full | ((fb_count == 2'd1) && inflight_q);
+// DEPTH=4 wider gate: stall when count==DEPTH-1 + inflight. Max buffer
+// throughput. Overflow on BPU IF target handled by refetch-on-overflow.
+wire fetch_stall = fb_full | ((fb_count == 3'd3) && inflight_q);
 
 // ── Phase 3: legacy c_controller is disconnected from functional paths ─
 // The decoder, IE wall, and predicted_pc_id are now driven by the

@@ -311,6 +311,198 @@ always @(posedge clk) begin
 	end
 end
 
+// ── DEPTH=4 bug hunter ────────────────────────────────────────────────
+// Log events that helped diagnose the DEPTH=4 fetch-buffer perf bug
+// (CoreMark wild-PC + cebreak-01 sw-skip). Kept in-tree for future
+// fetch-pipeline regressions; off the hot path so cost is negligible.
+//   1. TRAP: every interrupt_valid firing (cause + epc + pipeline state)
+//   2. FIRST_WILD: first time pc_out crosses into > 0x8000FFFF
+//   3. JALR: every ret/jalr commit at IE (rs1, target, rd)
+//   4. WRHIGH: dmem store to > RAM_END (stack-pointer corruption hint)
+integer sim_bug_fd;
+initial sim_bug_fd = $fopen("bug.log", "w");
+
+reg [31:0] prev_pc_out;
+reg wild_logged;
+always @(posedge clk) begin
+	if (!reset) begin
+		// Trap events
+		if (soc_top_inst.core_top_inst.interrupt_valid) begin
+			$fwrite(sim_bug_fd, "TRAP @%0d cause=%08h epc=%08h pc_out=%08h pc_id=%08h pc_ie=%08h branch_taken=%0b branch_tgt=%08h\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.ecause_csr,
+				soc_top_inst.core_top_inst.epc_csr,
+				soc_top_inst.core_top_inst.pc_out,
+				soc_top_inst.core_top_inst.pc_id,
+				soc_top_inst.core_top_inst.pc_ie,
+				soc_top_inst.core_top_inst.branch_taken,
+				soc_top_inst.core_top_inst.branch_target_address);
+			$fflush(sim_bug_fd);
+		end
+		// FIRST transition to wild PC — log transition ONCE with full context
+		if (!wild_logged
+		    && soc_top_inst.core_top_inst.pc_out[31:16] >= 16'h8001
+		    && soc_top_inst.core_top_inst.pc_out[31:16] != 16'h8000) begin
+			wild_logged <= 1'b1;
+			$fwrite(sim_bug_fd, "FIRST_WILD @%0d pc_out=%08h prev_pc_out=%08h pc_id=%08h pc_ie=%08h pc_iwb=%08h arb_v=%0b arb_k=%0d arb_tgt=%08h branch_tgt=%08h ras_top=%08h ras_valid=%0b\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_out,
+				prev_pc_out,
+				soc_top_inst.core_top_inst.pc_id,
+				soc_top_inst.core_top_inst.pc_ie,
+				soc_top_inst.core_top_inst.pc_iwb,
+				soc_top_inst.core_top_inst.arb_redirect_valid,
+				soc_top_inst.core_top_inst.arb_redirect_kind,
+				soc_top_inst.core_top_inst.arb_redirect_target,
+				soc_top_inst.core_top_inst.branch_target_address,
+				soc_top_inst.core_top_inst.ras_top,
+				soc_top_inst.core_top_inst.ras_valid);
+			$fflush(sim_bug_fd);
+		end
+		prev_pc_out <= soc_top_inst.core_top_inst.pc_out;
+		// Indirect jump trace at IE (ret / jalr)
+		if (!soc_top_inst.core_top_inst.ie_stall
+		    && !soc_top_inst.core_top_inst.stale_ie
+		    && soc_top_inst.core_top_inst.ctrl_bus_ie.inst_type == 4'd9 /* JUMP_R */) begin
+			$fwrite(sim_bug_fd, "JALR  @%0d pc_ie=%08h rs1=x%0d target=%08h rd=x%0d\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_ie,
+				soc_top_inst.core_top_inst.ctrl_bus_ie.rs1_int,
+				soc_top_inst.core_top_inst.branch_target_address,
+				soc_top_inst.core_top_inst.ctrl_bus_ie.rd_int);
+			$fflush(sim_bug_fd);
+		end
+		// Wild store: dmem write to > RAM_END
+		if (soc_top_inst.core_top_inst.dmem_port.req
+		    && soc_top_inst.core_top_inst.dmem_port.we
+		    && soc_top_inst.core_top_inst.dmem_port.addr >= 32'h80010000
+		    && soc_top_inst.core_top_inst.dmem_port.addr <= 32'h8FFFFFFF) begin
+			$fwrite(sim_bug_fd, "WRHIGH@%0d pc_ie=%08h addr=%08h data=%08h\n",
+				pc_sample_cnt,
+				soc_top_inst.core_top_inst.pc_ie,
+				soc_top_inst.core_top_inst.dmem_port.addr,
+				soc_top_inst.core_top_inst.dmem_port.wdata);
+			$fflush(sim_bug_fd);
+		end
+	end
+end
+
+// ── Performance counters ───────────────────────────────────────────────
+// Dumps a profile line to perf.log every 100K cycles. Useful for finding
+// the actual pipeline bottleneck (which is what revealed fb_empty=22%
+// dominates ifid_stall — DEPTH=2→4 perf fix used these numbers).
+integer sim_perf_fd;
+initial sim_perf_fd = $fopen("perf.log", "w");
+
+reg [31:0] cnt_imem_req, cnt_imem_rvalid;
+reg [31:0] cnt_dmem_req, cnt_dmem_rvalid, cnt_dmem_write;
+reg [31:0] cnt_aligner_emit;
+reg [31:0] cnt_bpu_if_fire;
+reg [31:0] cnt_squash_cyc;
+reg [31:0] cnt_ie_stall_dmem, cnt_ie_stall_alu, cnt_ie_stall_mmu;
+reg [31:0] cnt_if_id_stall;
+reg [31:0] cnt_fb_full, cnt_fb_empty;
+
+reg [31:0] lst_imem_req, lst_imem_rvalid;
+reg [31:0] lst_dmem_req, lst_dmem_rvalid, lst_dmem_write;
+reg [31:0] lst_aligner_emit;
+reg [31:0] lst_bpu_if_fire;
+reg [31:0] lst_squash_cyc;
+reg [31:0] lst_ie_stall_dmem, lst_ie_stall_alu, lst_ie_stall_mmu;
+reg [31:0] lst_if_id_stall;
+reg [31:0] lst_fb_full, lst_fb_empty;
+
+always @(posedge clk) begin
+	if (reset) begin
+		cnt_imem_req <= 0; cnt_imem_rvalid <= 0;
+		cnt_dmem_req <= 0; cnt_dmem_rvalid <= 0; cnt_dmem_write <= 0;
+		cnt_aligner_emit <= 0;
+		cnt_bpu_if_fire <= 0;
+		cnt_squash_cyc <= 0;
+		cnt_ie_stall_dmem <= 0; cnt_ie_stall_alu <= 0; cnt_ie_stall_mmu <= 0;
+		cnt_if_id_stall <= 0;
+		cnt_fb_full <= 0; cnt_fb_empty <= 0;
+		lst_imem_req <= 0; lst_imem_rvalid <= 0;
+		lst_dmem_req <= 0; lst_dmem_rvalid <= 0; lst_dmem_write <= 0;
+		lst_aligner_emit <= 0;
+		lst_bpu_if_fire <= 0;
+		lst_squash_cyc <= 0;
+		lst_ie_stall_dmem <= 0; lst_ie_stall_alu <= 0; lst_ie_stall_mmu <= 0;
+		lst_if_id_stall <= 0;
+		lst_fb_full <= 0; lst_fb_empty <= 0;
+	end else begin
+		if (soc_top_inst.core_top_inst.imem_port.req)
+			cnt_imem_req <= cnt_imem_req + 1;
+		if (soc_top_inst.core_top_inst.imem_port.rvalid)
+			cnt_imem_rvalid <= cnt_imem_rvalid + 1;
+		if (soc_top_inst.core_top_inst.fb_full)
+			cnt_fb_full <= cnt_fb_full + 1;
+		if (soc_top_inst.core_top_inst.fb_count == '0)
+			cnt_fb_empty <= cnt_fb_empty + 1;
+
+		if (soc_top_inst.core_top_inst.dmem_port.req) begin
+			cnt_dmem_req <= cnt_dmem_req + 1;
+			if (soc_top_inst.core_top_inst.dmem_port.we)
+				cnt_dmem_write <= cnt_dmem_write + 1;
+		end
+		if (soc_top_inst.core_top_inst.dmem_port.rvalid)
+			cnt_dmem_rvalid <= cnt_dmem_rvalid + 1;
+
+		if (soc_top_inst.core_top_inst.compressed_aligner_inst.instruction_valid_o
+		    && !soc_top_inst.core_top_inst.if_id_stall)
+			cnt_aligner_emit <= cnt_aligner_emit + 1;
+		if (soc_top_inst.core_top_inst.compressed_aligner_inst.squash_q)
+			cnt_squash_cyc <= cnt_squash_cyc + 1;
+		if (soc_top_inst.core_top_inst.bpu_if_redirect_fire)
+			cnt_bpu_if_fire <= cnt_bpu_if_fire + 1;
+
+		if (soc_top_inst.core_top_inst.dmem_port.req
+		    && !soc_top_inst.core_top_inst.dmem_port.ready)
+			cnt_ie_stall_dmem <= cnt_ie_stall_dmem + 1;
+		if (soc_top_inst.core_top_inst.alu_stall)
+			cnt_ie_stall_alu <= cnt_ie_stall_alu + 1;
+		if (soc_top_inst.core_top_inst.mmu_d_stall)
+			cnt_ie_stall_mmu <= cnt_ie_stall_mmu + 1;
+		if (soc_top_inst.core_top_inst.if_id_stall)
+			cnt_if_id_stall <= cnt_if_id_stall + 1;
+
+		// Window dump every 100K cycles
+		if (pc_sample_cnt[16:0] == 17'h0 && pc_sample_cnt > 0) begin
+			$fwrite(sim_perf_fd,
+				"WIN @%0d imem_req=%0d(+%0d) rv=%0d(+%0d) dmem_req=%0d(+%0d) dmem_wr=%0d(+%0d) emit=%0d(+%0d) bpuif=%0d(+%0d) squash=%0d(+%0d) dmem_stall=%0d(+%0d) alu_stall=%0d(+%0d) mmu_stall=%0d(+%0d) ifid_stall=%0d(+%0d) fb_full=%0d(+%0d) fb_empty=%0d(+%0d)\n",
+				pc_sample_cnt,
+				cnt_imem_req,          cnt_imem_req - lst_imem_req,
+				cnt_imem_rvalid,       cnt_imem_rvalid - lst_imem_rvalid,
+				cnt_dmem_req,          cnt_dmem_req - lst_dmem_req,
+				cnt_dmem_write,        cnt_dmem_write - lst_dmem_write,
+				cnt_aligner_emit,      cnt_aligner_emit - lst_aligner_emit,
+				cnt_bpu_if_fire,       cnt_bpu_if_fire - lst_bpu_if_fire,
+				cnt_squash_cyc,        cnt_squash_cyc - lst_squash_cyc,
+				cnt_ie_stall_dmem,     cnt_ie_stall_dmem - lst_ie_stall_dmem,
+				cnt_ie_stall_alu,      cnt_ie_stall_alu - lst_ie_stall_alu,
+				cnt_ie_stall_mmu,      cnt_ie_stall_mmu - lst_ie_stall_mmu,
+				cnt_if_id_stall,       cnt_if_id_stall - lst_if_id_stall,
+				cnt_fb_full,           cnt_fb_full - lst_fb_full,
+				cnt_fb_empty,          cnt_fb_empty - lst_fb_empty);
+			$fflush(sim_perf_fd);
+			lst_imem_req     <= cnt_imem_req;
+			lst_imem_rvalid  <= cnt_imem_rvalid;
+			lst_dmem_req     <= cnt_dmem_req;
+			lst_dmem_rvalid  <= cnt_dmem_rvalid;
+			lst_dmem_write   <= cnt_dmem_write;
+			lst_aligner_emit <= cnt_aligner_emit;
+			lst_bpu_if_fire  <= cnt_bpu_if_fire;
+			lst_squash_cyc   <= cnt_squash_cyc;
+			lst_ie_stall_dmem<= cnt_ie_stall_dmem;
+			lst_ie_stall_alu <= cnt_ie_stall_alu;
+			lst_ie_stall_mmu <= cnt_ie_stall_mmu;
+			lst_if_id_stall  <= cnt_if_id_stall;
+			lst_fb_full      <= cnt_fb_full;
+			lst_fb_empty     <= cnt_fb_empty;
+		end
+	end
+end
+
 `ifndef VERILATOR_SIM
 	always begin
 		 #10 clk = !clk;
