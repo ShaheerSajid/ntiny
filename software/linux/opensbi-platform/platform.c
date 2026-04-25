@@ -10,6 +10,7 @@
 #include <sbi/riscv_asm.h>
 #include <sbi/riscv_io.h>
 #include <sbi/riscv_encoding.h>
+#include <sbi/sbi_bitops.h>
 #include <sbi/sbi_const.h>
 #include <sbi/sbi_console.h>
 #include <sbi/sbi_platform.h>
@@ -111,6 +112,12 @@ static int ntiny_early_init(bool cold_boot)
 
 static int ntiny_final_init(bool cold_boot)
 {
+    /* Enable Svadu (HW A/D PTE updates). menvcfg.ADUE = bit 61 ->
+     * menvcfgh[29] on rv32. Linux's trap entry stores to thread_info
+     * pages with D=0; without ADUE=1 the PTW page-faults and the
+     * trap handler itself page-faults saving context -> boot hang.
+     */
+    csr_set(CSR_MENVCFGH, BIT(29));
     return 0;
 }
 

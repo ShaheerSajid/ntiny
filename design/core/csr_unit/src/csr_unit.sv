@@ -45,6 +45,7 @@ module csr_unit (
   output [31:0]medeleg_o,
   output [31:0]mideleg_o,
   output [31:0]satp_o,
+  output logic        menvcfg_adue_o,   // menvcfgh[29] — Svadu HW A/D update enable
   output logic [31:0] pmpcfg_o  [4],
   output logic [31:0] pmpaddr_o [16],
 
@@ -522,6 +523,7 @@ module csr_unit (
 	assign medeleg_o = _MEDELEG;
 	assign mideleg_o = _MIDELEG;
 	assign satp_o    = _SATP;
+	assign menvcfg_adue_o = _MENVCFGH[29];  // Svadu enable (spec: menvcfg bit 61)
 
 endmodule
 

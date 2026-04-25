@@ -13,6 +13,7 @@ module mmu_sv32 (
     input  logic [1:0]  priv_i,       // current privilege level (for data translation)
     input  logic [1:0]  i_priv_i,     // instruction-side privilege (may differ on MRET/SRET)
     input  logic [31:0] mstatus_i,    // MPRV[17], MPP[12:11], SUM[18], MXR[19]
+    input  logic        menvcfg_adue_i, // Svadu enable: 1=HW A/D updates, 0=page-fault on A/D miss
 
     // SFENCE.VMA flush
     input  logic        sfence_i,
@@ -383,19 +384,19 @@ module mmu_sv32 (
 
                 PTW_FILL: begin
                     // Permission/privilege check, then fill TLB or fault.
-                    // Svadu: if only A/D bits are missing (no RWX fault),
-                    // write the updated PTE back to memory before filling TLB.
+                    // Svadu path (HW A/D update) is gated on menvcfg.ADUE:
+                    //   ADUE=1: A/D miss -> write PTE back, then fill TLB.
+                    //   ADUE=0: A/D miss -> page fault (software fill).
                     if (ptw_perm_fault || ptw_priv_fault) begin
                         ptw_state <= PTW_FAULT;
+                    end else if (ptw_ad_needed && !menvcfg_adue_i) begin
+                        ptw_state <= PTW_FAULT;
                     end else if (ptw_ad_needed) begin
-                        // Set A (always) and D (if store) in the PTE,
-                        // then write back to page table memory.
                         ptw_pte[6] <= 1'b1;                   // A = 1
                         if (ptw_for_store) ptw_pte[7] <= 1'b1; // D = 1
                         ptw_state <= PTW_UPDATE_AD;
                     end else begin
                         ptw_state <= PTW_IDLE;
-                        // TLB fill happens via separate logic below
                     end
                 end
 
