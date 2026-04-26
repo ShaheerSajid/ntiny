@@ -905,8 +905,51 @@ end
 wire pending_release_for_straddle = pending_target_v_q
                                  && pending_target_q[1]
                                  && pending_first_push_done_q;
-wire pending_holds_pc        = pending_target_v_q && !pending_release_for_straddle;
-wire pending_overrides_vaddr = pending_target_v_q && !pending_release_for_straddle;
+
+// Stale-pending-override race fix (handle_mm_fault crash root cause).
+//
+// Scenario:
+//   1. A deferred redirect (e.g. beqz mispredict at IE while ITLB miss on
+//      its target c0075e34) latches pending_target_q := c0075e34 and
+//      pending_target_v_q := 1.
+//   2. PTW completes, producer fetches c0075e34, fb_push lands, the c.j
+//      at c0075e34 enters the pipeline.
+//   3. The c.j is unconditional + unpredicted → mispredict at IE → a NEW
+//      non-deferred RDR_BRANCH redirect fires to c007582a. pc_in becomes
+//      the new target this cycle.
+//   4. pending_target_v_q clears at the NEXT clock edge (existing logic
+//      under `else if (arb_redirect_valid)`), but during THIS cycle it's
+//      still 1 — so pending_overrides_vaddr would route i_vaddr to the
+//      STALE c0075e34 instead of the new c007582a, and the redirect-cycle
+//      imem.req (fired by the new redirect's gate) fetches the old word.
+//   5. Next cycle, pc_out advances to target+4 = c007582e and the new
+//      target's word (c0075828) is never fetched. The buffer ends up with
+//      a stale c0075e34 head + post-redirect c007582c next; the aligner
+//      stitches the two halves into a bogus instruction at half_index=1
+//      (0xc1461537 = lui a0, 0xc1461 instead of the real lui a3, 0xc146f
+//      at c007582a) and silently skips the real lui. a3 stays at 0,
+//      addi a3,a3,-608 produces 0xfffffda0, lw a2,56(a3) faults at
+//      0xfffffdd8 — the handle_mm_fault crash.
+//
+// Fix: any arb_redirect_valid in the same cycle as an active
+// pending_target_v_q must yield the i_vaddr override to the new redirect.
+// The new redirect's pc_in becomes i_vaddr; the new target's word gets
+// fetched (or, for deferred new redirects with mmu_i_stall=1, the
+// imem.req gate suppresses the fetch and pending_target_q gets re-latched
+// to the new target via redirect_deferred — same behaviour as before).
+//
+// Importantly we yield on arb_redirect_valid alone (NOT gated by
+// mmu_i_stall): gating by mmu_i_stall would create a combinational loop
+// (pending_overrides_vaddr → i_vaddr → mmu_i_stall → yield →
+// pending_overrides_vaddr). arb_redirect_valid is independent of the
+// current cycle's i_vaddr (its sources — branch_taken_valid at IE,
+// bpu_redirect_fire at ID, wb_xret_fire at IWB, registered interrupt —
+// all read pre-IE state), so this gate is safe.
+wire pending_yield_to_redirect = arb_redirect_valid;
+wire pending_holds_pc        = pending_target_v_q && !pending_release_for_straddle
+                            && !pending_yield_to_redirect;
+wire pending_overrides_vaddr = pending_target_v_q && !pending_release_for_straddle
+                            && !pending_yield_to_redirect;
 
 `ifdef BOOT
 program_counter #(.DEFAULT(32'h00001000)) program_counter_inst
@@ -2053,13 +2096,23 @@ end
 wire        bpu_if_redirect_fire   = 1'b0;
 wire [31:0] bpu_if_redirect_target = bpu_if_target_q;
 
-// ID-stage prediction: gated on decoded inst_type (BRANCH or JAL).
+// ID-stage prediction: gated on decoded inst_type (BRANCH only).
 // Suppress when the aligner is already firing this instruction's IF-stage
 // prediction — avoids double redirect on the same branch.
+//
+// JAL prediction disabled: when BPU fires on a JAL at ID, RDR_BPU is a
+// flushing redirect AND the aligner's pop_o is gated by ~if_id_stall.
+// If if_id_stall=1 for any reason that cycle (icache_stall, mmu_i_stall,
+// etc.), the JAL is NEVER consumed into IE — its ra writeback never
+// commits, the callee saves stale ra, and on return jumps to the wrong
+// address. Reproduced as Linux init SIGSEGV at 0x95757e50: a glibc
+// __libc_malloc → _int_malloc tail-call chain where the inner JAL's ra
+// was lost, causing the called function to ret directly to xmalloc's
+// bnez with sp 32 bytes off, reading a stale stack slot.
+// JAL targets resolve at EX with a 2-cycle penalty — acceptable cost.
 wire        bpu_is_branch_id = (ctrl_bus_if_id_raw.inst_type == BRANCH);
-wire        bpu_is_jal_id    = (ctrl_bus_if_id_raw.inst_type == JUMP);
 wire        bpu_bht_btb_fire = bpu_if_pred_valid
-                              && ((bpu_is_branch_id && bpu_if_pred_taken) || bpu_is_jal_id)
+                              && bpu_is_branch_id && bpu_if_pred_taken
                               && insn_valid_id
                               && aligner_valid
                               && !aligner_pred_is_branch;
