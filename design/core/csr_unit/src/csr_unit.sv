@@ -428,6 +428,25 @@ module csr_unit (
 	                   csr_cmd_i == SET_CSR ||
 	                   csr_cmd_i == CLEAR_CSR);
 
+	// ── Zihpm: HPM counter address detection ─────────────────────
+	// mhpmcounter3..31    = 0xB03..0xB1F
+	// mhpmcounterh3..31   = 0xB83..0xB9F
+	// hpmcounter3..31     = 0xC03..0xC1F  (U/S read view, mcounteren-gated)
+	// hpmcounterh3..31    = 0xC83..0xC9F
+	// mhpmevent3..31      = 0x323..0x33F
+	// All read-only-zero (no event-driven counting yet) — spec-compliant
+	// per WARL: a hart may hardwire any HPM counter to zero. Falling into
+	// the default case (returns 0) without raising illegal-instruction
+	// allows software to probe / clear them silently.
+	wire is_hpm_counter   = (csr_addr_i >= 12'hB03 && csr_addr_i <= 12'hB1F);
+	wire is_hpm_counterh  = (csr_addr_i >= 12'hB83 && csr_addr_i <= 12'hB9F);
+	wire is_hpm_ucounter  = (csr_addr_i >= 12'hC03 && csr_addr_i <= 12'hC1F);
+	wire is_hpm_ucounterh = (csr_addr_i >= 12'hC83 && csr_addr_i <= 12'hC9F);
+	wire is_hpm_event     = (csr_addr_i >= 12'h323 && csr_addr_i <= 12'h33F);
+	wire is_hpm_addr      = is_hpm_counter | is_hpm_counterh
+	                      | is_hpm_ucounter | is_hpm_ucounterh
+	                      | is_hpm_event;
+
 	always_comb begin
 		csr_invalid_o = 1'b0;
 		case (csr_addr_i)
@@ -443,9 +462,9 @@ module csr_unit (
 			INSTRETH:       csr_value_o = _MINSTRETH;
 			MSTATUS:        csr_value_o = {mstatus_sd, _MSTATUS[30:0]};
 `ifdef FPU
-			MISA:           csr_value_o = 32'h40141125; // RV32IMAFCSU (no B — only Zba+Zbb, not full B)
+			MISA:           csr_value_o = 32'h40141127; // RV32IMAFBCSU (B = Zba+Zbb+Zbs per priv-1.13)
 `else
-			MISA:           csr_value_o = 32'h40141105; // RV32IMACSU (no B — only Zba+Zbb, not full B)
+			MISA:           csr_value_o = 32'h40141107; // RV32IMABCSU (B = Zba+Zbb+Zbs per priv-1.13)
 `endif
 			MIE:            csr_value_o = _MIE;
 			MTVEC:          csr_value_o = _MTVEC;
@@ -505,7 +524,8 @@ module csr_unit (
 			PMPADDR15:      csr_value_o = _PMPADDR[15];
 			default: begin
 				csr_value_o = 0;
-				csr_invalid_o = csr_active;  // only flag invalid if a CSR op is active
+				// HPM range reads-as-zero, writes silently ignored — no trap.
+				csr_invalid_o = csr_active && !is_hpm_addr;
 			end
 		endcase
 	end

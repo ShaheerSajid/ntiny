@@ -191,6 +191,9 @@ module alu
 			CLMUL:  bit_result = clmul_result[31:0];
 			CLMULH: bit_result = clmul_result[63:32];
 			CLMULR: bit_result = clmul_result[62:31];
+			// Zicond — branchless conditional zero
+			CZERO_EQZ: bit_result = (b_i == 32'd0) ? 32'd0 : a_i;
+			CZERO_NEZ: bit_result = (b_i != 32'd0) ? 32'd0 : a_i;
 			default	:	bit_result = 0;
 		endcase
 	end

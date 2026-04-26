@@ -228,6 +228,11 @@ begin
                             7'b0010100: case(instruction_i[14:12])
                                             3'b001: bit_op = BSET;
                                         endcase
+                            // Zicond — czero.eqz (funct3=101) / czero.nez (funct3=111)
+                            7'b0000111: case(instruction_i[14:12])
+                                            3'b101: bit_op = CZERO_EQZ;
+                                            3'b111: bit_op = CZERO_NEZ;
+                                        endcase
                         endcase
                         exec_result = ALU_RES;
                         rs1_int = reg_add_e'(instruction_i[19:15]);

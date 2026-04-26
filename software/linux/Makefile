@@ -24,7 +24,7 @@ OPENSBI_TAG?= v1.8
 
 CROSS_COMPILE := riscv32-unknown-linux-gnu-
 ARCH          := riscv
-ISA           := rv32imac_zicsr_zifencei
+ISA           := rv32imac_zicsr_zifencei_zba_zbb_zbc_zbs
 ABI           := ilp32
 
 SHELL := /bin/bash

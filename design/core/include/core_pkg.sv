@@ -99,6 +99,9 @@ typedef enum logic[5:0] {
 	BINVI,
 	BSET,
 	BSETI,
+	// Zicond — conditional zero (branchless conditional move helper)
+	CZERO_EQZ,   // rd = (rs2 == 0) ? 0 : rs1
+	CZERO_NEZ,   // rd = (rs2 != 0) ? 0 : rs1
 	NO_BIT_OP
 } bit_op_e;
 
