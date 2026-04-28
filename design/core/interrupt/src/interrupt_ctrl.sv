@@ -145,9 +145,27 @@ wire [31:0] pc_for_id = insn_page_fault_i  ? insn_fault_addr_i :
 // async interrupt firing one cycle after sret/mret saved mepc=0
 // and the M-mode handler returned to PC=0 — causing a NULL fetch
 // page fault later in S-mode.
-wire [31:0] pc_for_async = (pc_id_i != 32'h0) ? pc_id_i :
-                           (pc_ie_i != 32'h0) ? pc_ie_i :
-                                                pc_out_i;
+//
+// Phase 4.15: wrong-path async epc fix. When a mispredicted
+// branch/jump is in IE this cycle (branch_taken_i asserted),
+// pc_id_i holds the WRONG-PATH sequential next-fetch — IF hasn't
+// seen the redirect yet. Using pc_id as epc would resume the
+// kernel on the wrong path after sret. Smoking gun (Linux boot,
+// 2026-04-28): c.j @ c0151e3c in crng_make_state was in EX with
+// branch_v=1 btgt=c0151dae, but trap captured epc=c0151e3e
+// (sequential past c.j) → kernel re-ran wrong path → corrupted
+// callee-saved regs → BUG_ON in random.c, ra=0xffff0a00 etc.
+//
+// Fix: when branch_taken_i, use pc_ie_i (the branch instruction
+// itself). Re-executing a branch is idempotent — beq/bne/c.j have
+// no rd write; jal/jalr write rd=PC+4 which is the same value on
+// re-execution. After sret kernel re-executes the branch and
+// redirects correctly.
+wire async_use_branch = branch_taken_i && (pc_ie_i != 32'h0);
+wire [31:0] pc_for_async = async_use_branch    ? pc_ie_i :
+                           (pc_id_i != 32'h0)  ? pc_id_i :
+                           (pc_ie_i != 32'h0)  ? pc_ie_i :
+                                                 pc_out_i;
 
 // Phase 4.14b (Bug 29): PC for IE-stage synchronous data faults.
 // When a DTLB miss triggers a PTW walk, ie_stall holds pc_ie at the

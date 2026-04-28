@@ -158,7 +158,21 @@ logic            wb_xret_fire;
 logic            wb_dret_fire;
 // OR of all WB-commit events. Used by hazard_unit to flush IF/ID/IE/IMEM
 // (the carrier in IWB commits its CSR side effects on the same cycle).
-wire             wb_event_fire = wb_xret_fire | wb_trap_fire | wb_dret_fire;
+//
+// Phase 4.15: drop wb_trap_fire from this OR. wb_trap_unit is still
+// observe-only for traps (kill_iwb_o is NOT wired); the trap actually
+// commits via the legacy interrupt_ctrl path which expects IWB to retire
+// normally. Including wb_trap_fire here forced iwb_flush=TRUE on async
+// traps → the IMEM→IWB register-wall transition NOP'd → the IMEM-stage
+// instruction's writeback was lost. Smoking gun (Linux boot, 2026-04-28):
+// timer trap fired with c.addi16sp sp,64 at IMEM in vsnprintf string()
+// epilogue; iwb_flush killed sp+=64; on sret kernel resumed with sp
+// pointing 64 bytes below vsnprintf's frame; c.lwsp ra,92(sp) loaded
+// garbage (ffff0a00); c.jr ra jumped to ffff0a00 → Oops.
+//
+// xret/dret stay in this OR — they DO commit at IWB and need the flush
+// to kill the wrong-path-1 that would otherwise propagate from IMEM.
+wire             wb_event_fire = wb_xret_fire | wb_dret_fire;
 logic [4:0]      wb_cause;
 logic [31:0]     wb_tval;
 logic [31:0]     wb_epc;
