@@ -47,17 +47,6 @@ module hazard_unit (
     // ── IE-stage exception flag ─────────────────────────────────────────
     input  logic        exception_from_ie_i,
 
-    // ── IE-stage branch mispredict ──────────────────────────────────────
-    // Used together with interrupt_valid_i to force imem_flush on async
-    // traps that capture pc_for_async = pc_ie (when a JAL/JALR/branch is
-    // mispredicting in IE). Without imem_flush, the IE-stage instruction
-    // propagates IE→IMEM→IWB and its rd writeback fires — but
-    // interrupt_ctrl captured pc_ie as epc, so the kernel re-executes
-    // the same instruction on sret. For JALR with rs1==rd, the first
-    // (squashed) writeback corrupts rs1, so the re-execution computes
-    // the wrong target.
-    input  logic        branch_taken_i,
-
     // ── Processor state ─────────────────────────────────────────────────
     input  logic        halted_i,           // debug halted (pstate == HALTED)
 
@@ -140,20 +129,7 @@ always_comb begin
            ie_stall_o, imem_stall_o, iwb_stall_o})
         4'b1000: begin
             ie_flush_o   = TRUE;
-            // imem_flush=TRUE when IE-stage instruction will be RE-EXECUTED
-            // after the trap. Two cases need this:
-            //   (a) sync IE-stage exception (misalign/csr_illegal) — epc
-            //       points to pc_ie, kernel re-runs the faulting instr.
-            //   (b) async trap with branch_taken_i — interrupt_ctrl's
-            //       pc_for_async picks pc_ie (the mispredicting JAL/JALR/
-            //       branch). Without imem_flush the IE-stage instr leaks
-            //       to IWB and its rd writeback fires, so re-execution
-            //       reads a corrupted rs1 (specifically broken for
-            //       jalr ra,off(ra) where rs1==rd). See core_top.sv
-            //       wb_event_fire comment for the c.addi16sp half of
-            //       this story (where iwb_flush=TRUE was the bug).
-            imem_flush_o = onebit_sig_e'(exception_from_ie_i ||
-                                          (interrupt_valid_i && branch_taken_i));
+            imem_flush_o = onebit_sig_e'(exception_from_ie_i);
             iwb_flush_o  = FALSE;
         end
         4'b1100: {ie_flush_o, imem_flush_o, iwb_flush_o} = 3'b010;

@@ -40,6 +40,7 @@ module interrupt_ctrl (
     input        insn_valid_id_i,      // from hazard_unit
     input        debug_ebreak_i,       // dcsr[15] — ebreak enters debug, not trap
     input        branch_taken_i,       // IE-stage branch mispredict (flush incoming)
+    input [31:0] branch_target_address_i, // resolved target of the IE-stage branch/jump
 
     // ── IE-stage CSR invalid (unimplemented CSR accessed) ────────────────
     input                ie_csr_invalid_i,
@@ -51,6 +52,12 @@ module interrupt_ctrl (
     input [1:0]          ie_addr_lsb_i,    // alu_result[1:0]
     input [31:0]         ie_fault_addr_i,  // alu_result (full address for mtval)
     input                amo_in_progress_i,
+
+    // ── IE-stage uncommitted indicator ──────────────────────────────────
+    // High when the IE-stage instruction has not yet committed (multi-
+    // cycle op like AMO/MUL/DIV/PTW still working). Used to choose
+    // pc_ie vs pc_id for async-trap epc.
+    input                ie_stall_i,
 
     // ── MMU page faults ─────────────────────────────────────────────────
     input        insn_page_fault_i,    // registered mmu_i_fault_r
@@ -156,13 +163,57 @@ wire [31:0] pc_for_id = insn_page_fault_i  ? insn_fault_addr_i :
 // (sequential past c.j) → kernel re-ran wrong path → corrupted
 // callee-saved regs → BUG_ON in random.c, ra=0xffff0a00 etc.
 //
-// Fix: when branch_taken_i, use pc_ie_i (the branch instruction
-// itself). Re-executing a branch is idempotent — beq/bne/c.j have
-// no rd write; jal/jalr write rd=PC+4 which is the same value on
-// re-execution. After sret kernel re-executes the branch and
-// redirects correctly.
-wire async_use_branch = branch_taken_i && (pc_ie_i != 32'h0);
-wire [31:0] pc_for_async = async_use_branch    ? pc_ie_i :
+// Fix v2 (2026-04-28): for IE-stage mispredicting branch/jump
+// (branch_taken_i), use branch_target_address_i — the resolved
+// destination of the branch/jump. Rationale:
+//
+//   - The IE-stage branch's writeback (rd ← PC+4 for jal/jalr)
+//     propagates through IMEM→IWB and fires normally a couple
+//     cycles after the trap captures epc. So rd is already
+//     written by the time the kernel reads pt_regs.
+//   - If we set epc = pc_ie and re-execute the branch after
+//     sret, jalr-with-rs1==rd reads a corrupted rs1 (the
+//     just-written link value) and computes the wrong target.
+//   - Setting epc = branch_target_address makes the kernel resume
+//     AT the branch destination, exactly as if the branch had
+//     executed completely. PC = target, rd = link. Effectively
+//     "the branch executed once, then trapped".
+//
+// For non-branch IE-stage instructions, use pc_id (legacy):
+// their writeback fires through IWB normally, so the kernel
+// resumes past them. CSR-write commits across trap entry are
+// handled by combining csr_cmd with trap entry effects in
+// csr_unit (see _MSTATUS update logic).
+//
+// Phase 4.16 (2026-04-28): in-flight AMO must re-execute after sret.
+// AMO instructions are multi-cycle in IE (FSM: IDLE→READ→WRITE→DONE).
+// During those cycles, ie_stall is asserted and the AMO ctrl_bus
+// holds at the IE register. If an async interrupt fires before the
+// AMO reaches DONE, amo_unit gets flush_i=interrupt_valid and aborts
+// (state→IDLE), so the memory write never happens. With the legacy
+// epc=pc_id, sret resumes at the instruction AFTER the AMO and the
+// atomic op is silently skipped. Smoking gun (Linux boot, chr_dev_init
+// hang): up_write's amoadd.w at c002d600 was aborted by an M-timer
+// interrupt; rwsem.count was never decremented; init then blocked
+// in __down_write forever waiting for a release that already
+// "happened" but had no effect.
+//
+// Fix: when ie_stall is asserted, the IE-stage instruction has
+// NOT yet committed (AMO mid-FSM, MUL/DIV in flight, PTW pending,
+// etc). On async trap, capture epc=pc_ie so it re-executes after
+// sret. When ie_stall is low, the IE-stage op IS completing this
+// cycle (its writeback already in flight to IMEM/IWB) — use pc_id
+// so we don't double-execute. Originally tried gating on
+// ie_amo_op != NO_AMO_OP, but that stayed asserted in the AMO's
+// DONE cycle (memory write already committed) and caused
+// double-decrement of rwsem.count, leading to a second hang
+// downstream. ie_stall is exactly true while the IE op is
+// uncommitted, false once it's retiring. amo_unit's reservation
+// register is invalidated on flush so LR/SC pairs restart cleanly.
+wire async_use_branch = branch_taken_i;
+wire async_use_ie     = ie_stall_i;
+wire [31:0] pc_for_async = async_use_branch    ? branch_target_address_i :
+                           async_use_ie        ? pc_ie_i :
                            (pc_id_i != 32'h0)  ? pc_id_i :
                            (pc_ie_i != 32'h0)  ? pc_ie_i :
                                                  pc_out_i;
@@ -213,7 +264,28 @@ wire s_ie_global = (priv_i < 2'b01) || (priv_i == 2'b01 && status_i[1]);
 
 wire m_async_valid = (external_valid | software_valid | timer_valid) & m_ie_global;
 wire s_async_valid = (s_external_valid | s_software_valid | s_timer_valid) & s_ie_global;
-wire async_valid   = m_async_valid | s_async_valid;
+
+// Phase 4.16: defer the async trap when the pipeline is in a "drain"
+// gap with no instruction at IE or ID but the fetch path has unretired
+// instructions in flight. Smoking gun: post-WFI return path c.jr ra
+// retires, then PC redirects back to default_idle_call's csrrsi at
+// c01c31da, but the timer fires before csrrsi reaches IE/ID. With
+// pc_id=pc_ie=0, the legacy fallback used pc_out_i = c01c31de (the
+// fetch-stage PC, AHEAD of the in-flight csrrsi) as epc, which made
+// the kernel resume PAST csrrsi. SIE never got set → do_idle's
+// SIE-check WARN_ON fired.
+//
+// Holding async_valid until pc_id or pc_ie populates lets the
+// pipeline finish draining; the trap then captures pc_id (= csrrsi's
+// PC) and the kernel correctly re-executes csrrsi after sret.
+//
+// Holding the async pending is harmless: the level-signal interrupt
+// stays asserted until the kernel handles it, so we just delay
+// commitment by 1-2 cycles. xret/sret post-commit fetch (the original
+// reason for pc_out_i fallback in Phase 4.13c) still works because
+// pc_id eventually populates from the post-xret fetch.
+wire pipeline_has_target = (pc_id_i != 32'h0) || (pc_ie_i != 32'h0);
+wire async_valid   = (m_async_valid | s_async_valid) & pipeline_has_target;
 
 // IE-stage CSR invalid: unimplemented CSR accessed → illegal instruction from IE
 // Safe without stale_ie guard: stale instructions have csr_cmd=NOP, so CSR unit

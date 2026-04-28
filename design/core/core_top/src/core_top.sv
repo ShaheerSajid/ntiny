@@ -443,7 +443,6 @@ hazard_unit hazard_unit_inst (
     .redirect_valid_i   (arb_redirect_valid),
     .redirect_kind_i    (arb_redirect_kind),
     .exception_from_ie_i(exception_from_ie),
-    .branch_taken_i     (branch_taken_valid),
     // Processor state
     .halted_i           (halted_o),
     // Stall outputs
@@ -1709,6 +1708,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .insn_valid_id_i    (insn_valid_id),
   .debug_ebreak_i     (dcsr_ebreak),
   .branch_taken_i     (branch_taken_valid),
+  .branch_target_address_i (branch_target_address),
   // IE-stage signals for misalign detection (done inside)
   .ie_mem_op_i        (ctrl_bus_ie.mem_op),
   .ie_ls_width_i      (ctrl_bus_ie.load_store_width),
@@ -1716,6 +1716,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .ie_addr_lsb_i      (alu_result[1:0]),
   .ie_fault_addr_i    (alu_result),
   .amo_in_progress_i  (amo_in_progress),
+  .ie_stall_i         (ie_stall),
   // MMU page faults
   .insn_page_fault_i  (mmu_i_fault_r),
   .insn_fault_addr_i  (mmu_i_fault_addr_r),
@@ -2656,6 +2657,16 @@ tracer tracer_ip (
 	.rvfi_pc_rdata_t(a2? pc_iwb - 2 :pc_iwb - 4 ),
 	.rvfi_pc_wdata_t(pc3),
 	.rvfi_mem_addr(ctrl_bus_iwb.mem_op != NO_MEM_OP ? exec_result_iwb : 32'h0),
+	// ── Trace extension: privilege + trap events ──────────
+	.priv_i        (priv_level),
+	.trap_valid_i  (interrupt_valid),
+	.trap_cause_i  (ecause_csr),
+	.trap_epc_i    (epc_csr),
+	.trap_tval_i   (mtval_csr),
+	.trap_to_s_i   (trap_to_s),
+	.xret_fire_i   (wb_xret_fire),
+	.xret_is_sret_i(ctrl_bus_iwb.sret == TRUE),
+	.xret_target_i ((ctrl_bus_iwb.sret == TRUE) ? sepc : epc),
 	.rvfi_mem_rmask(ctrl_bus_iwb.mem_op == READ ? 4'hF : 4'h0),
 	.rvfi_mem_wmask(ctrl_bus_iwb.mem_op == WRITE ? 4'hF : 4'h0),
 	.rvfi_mem_rdata(readdata_iwb),
