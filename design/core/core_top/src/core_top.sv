@@ -443,6 +443,7 @@ hazard_unit hazard_unit_inst (
     .redirect_valid_i   (arb_redirect_valid),
     .redirect_kind_i    (arb_redirect_kind),
     .exception_from_ie_i(exception_from_ie),
+    .branch_taken_i     (branch_taken_valid),
     // Processor state
     .halted_i           (halted_o),
     // Stall outputs
