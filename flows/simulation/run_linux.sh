@@ -5,6 +5,7 @@ set -e
 cd "$(dirname "$0")"
 
 TIMEOUT=${1:-2000000000}
+shift 2>/dev/null || true   # remaining $@ are extra +plusargs forwarded to Vtb_soc_top
 OPENSBI_BIN=$(find /home/shaheer/Downloads/opensbi/build -name "fw_payload.bin" -path "*/opensbi-platform/*" 2>/dev/null | head -1)
 
 if [ -z "$OPENSBI_BIN" ]; then
@@ -20,7 +21,7 @@ if [ ! -f Vtb_soc_top ] || [ ! -d obj_dir ]; then
         -Wno-CASEINCOMPLETE -Wno-PINMISSING -Wno-MULTIDRIVEN -Wno-STMTDLY \
         -Wno-UNPACKED -Wno-UNSIGNED -Wno-LITENDIAN -Wno-MODDUP -Wno-MISINDENT \
         --no-timing --timescale-override 1ns/10ps -O3 --threads 4 \
-        -DVERILATOR_SIM -sv --top-module tb_soc_top --cc \
+        -DVERILATOR_SIM -DDV_TRACER -sv --top-module tb_soc_top --cc \
         +define+RAM_SIZE_BYTES=134217728 \
         +incdir+../../design/common/ \
         +incdir+../../design/uncore/i2c/src/ +incdir+../../design/uncore/timer/src/ \
@@ -40,5 +41,6 @@ echo "Timeout: $TIMEOUT cycles"
 
 python3 ../../software/tools/hex_text.py "$OPENSBI_BIN" ram.hex
 rm -f uart.log
-./Vtb_soc_top --timeout "$TIMEOUT" > /dev/null 2>&1 &
+./Vtb_soc_top --timeout "$TIMEOUT" "$@" > /dev/null 2>&1 &
 echo "PID: $! — monitor: tail -f uart.log"
+[ $# -gt 0 ] && echo "Tracer args: $*"
