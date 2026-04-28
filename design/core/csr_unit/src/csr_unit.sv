@@ -177,46 +177,76 @@ module csr_unit (
 	end
 
 	// ── MSTATUS (manual — handles sstatus view + trap/ret) ──────
-	always_ff @(posedge clk_i or posedge reset_i) begin
-		if (reset_i) begin
-			_MSTATUS <= 32'h0;
-		end else if (trap_valid_i) begin
+	// MSTATUS update — combines IE-stage csr_cmd writes with trap/ret
+	// entry updates in the same cycle. This is required because the
+	// pipeline captures the async-trap epc as pc_id (the instruction
+	// AFTER the IE-stage one), implying the IE-stage CSR write has
+	// effectively committed. If we suppressed the CSR write whenever
+	// trap_valid_i fired, the kernel would skip past the squashed
+	// instruction and lose its effect.
+	//
+	// Smoking gun (Linux boot, 2026-04-28): default_idle_call's
+	// csrrsi sstatus,2 (set SIE) was being suppressed when a timer
+	// trap fired on the same cycle. Kernel resumed past csrrsi with
+	// SIE still 0. do_idle's SIE-set check then triggered WARN_ON
+	// in kernel/sched/idle.c:228.
+	//
+	// Two-step compute (combinational):
+	//   1. csrrw_next: apply the IE-stage CSR write to _MSTATUS
+	//   2. mstatus_next: apply trap/ret bit overrides ON TOP of
+	//      csrrw_next (so the trap entry sees the post-csr SIE
+	//      when it computes SPIE).
+	logic [31:0] csrrw_next;
+	always_comb begin
+		csrrw_next = _MSTATUS;
+		if (csr_cmd_i == WRITE_CSR && MSTATUS_sel)
+			csrrw_next = (_MSTATUS & ~MSTATUS_WMASK) | (csr_data & MSTATUS_WMASK);
+		else if (csr_cmd_i == SET_CSR && MSTATUS_sel)
+			csrrw_next = _MSTATUS | (csr_data & MSTATUS_WMASK);
+		else if (csr_cmd_i == CLEAR_CSR && MSTATUS_sel)
+			csrrw_next = _MSTATUS & ~(csr_data & MSTATUS_WMASK);
+		else if (csr_cmd_i == WRITE_CSR && SSTATUS_sel)
+			csrrw_next = (_MSTATUS & ~SSTATUS_WMASK) | (csr_data & SSTATUS_WMASK);
+		else if (csr_cmd_i == SET_CSR && SSTATUS_sel)
+			csrrw_next = _MSTATUS | (csr_data & SSTATUS_WMASK);
+		else if (csr_cmd_i == CLEAR_CSR && SSTATUS_sel)
+			csrrw_next = _MSTATUS & ~(csr_data & SSTATUS_WMASK);
+	end
+
+	logic [31:0] mstatus_next;
+	always_comb begin
+		mstatus_next = csrrw_next;
+		if (trap_valid_i) begin
 			if (trap_to_s_i) begin
-				// S-mode trap entry: SPP=priv[0], SPIE=SIE, SIE=0
-				_MSTATUS[8]  <= priv_level[0];
-				_MSTATUS[5]  <= _MSTATUS[1];
-				_MSTATUS[1]  <= 1'b0;
+				// S-mode trap entry: SPP=priv[0], SPIE=post-csr SIE, SIE=0
+				mstatus_next[8] = priv_level[0];
+				mstatus_next[5] = csrrw_next[1];
+				mstatus_next[1] = 1'b0;
 			end else begin
-				// M-mode trap entry: MPP=priv, MPIE=MIE, MIE=0
-				_MSTATUS[12:11] <= priv_level;
-				_MSTATUS[7]     <= _MSTATUS[3];
-				_MSTATUS[3]     <= 1'b0;
+				// M-mode trap entry: MPP=priv, MPIE=post-csr MIE, MIE=0
+				mstatus_next[12:11] = priv_level;
+				mstatus_next[7]     = csrrw_next[3];
+				mstatus_next[3]     = 1'b0;
 			end
 		end else if (ret_i) begin
-			// MRET: MIE=MPIE, MPIE=1, MPP=U(00)
-			// If MPP != M, also clear MPRV (spec §3.1.6.1)
-			_MSTATUS[3]     <= _MSTATUS[7];
-			_MSTATUS[7]     <= 1'b1;
-			_MSTATUS[12:11] <= 2'b00;
-			_MSTATUS[17]    <= (_MSTATUS[12:11] == 2'b11) ? _MSTATUS[17] : 1'b0;
+			// MRET: MIE=MPIE, MPIE=1, MPP=U(00); clear MPRV if MPP!=M
+			mstatus_next[3]     = csrrw_next[7];
+			mstatus_next[7]     = 1'b1;
+			mstatus_next[12:11] = 2'b00;
+			mstatus_next[17]    = (csrrw_next[12:11] == 2'b11) ? csrrw_next[17] : 1'b0;
 		end else if (sret_i) begin
 			// SRET: SIE=SPIE, SPIE=1, SPP=0
-			_MSTATUS[1]  <= _MSTATUS[5];
-			_MSTATUS[5]  <= 1'b1;
-			_MSTATUS[8]  <= 1'b0;
-		end else if (csr_cmd_i == WRITE_CSR && MSTATUS_sel) begin
-			_MSTATUS <= (_MSTATUS & ~MSTATUS_WMASK) | (csr_data & MSTATUS_WMASK);
-		end else if (csr_cmd_i == SET_CSR && MSTATUS_sel) begin
-			_MSTATUS <= _MSTATUS | (csr_data & MSTATUS_WMASK);
-		end else if (csr_cmd_i == CLEAR_CSR && MSTATUS_sel) begin
-			_MSTATUS <= _MSTATUS & ~(csr_data & MSTATUS_WMASK);
-		end else if (csr_cmd_i == WRITE_CSR && SSTATUS_sel) begin
-			_MSTATUS <= (_MSTATUS & ~SSTATUS_WMASK) | (csr_data & SSTATUS_WMASK);
-		end else if (csr_cmd_i == SET_CSR && SSTATUS_sel) begin
-			_MSTATUS <= _MSTATUS | (csr_data & SSTATUS_WMASK);
-		end else if (csr_cmd_i == CLEAR_CSR && SSTATUS_sel) begin
-			_MSTATUS <= _MSTATUS & ~(csr_data & SSTATUS_WMASK);
+			mstatus_next[1] = csrrw_next[5];
+			mstatus_next[5] = 1'b1;
+			mstatus_next[8] = 1'b0;
 		end
+	end
+
+	always_ff @(posedge clk_i or posedge reset_i) begin
+		if (reset_i)
+			_MSTATUS <= 32'h0;
+		else
+			_MSTATUS <= mstatus_next;
 	end
 
 	// ── MIE (manual — handles sie view) ──────────────────────────
