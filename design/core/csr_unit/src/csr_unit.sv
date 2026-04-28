@@ -256,8 +256,20 @@ module csr_unit (
 		end else if (csr_cmd_i == CLEAR_CSR && SIP_sel) begin
 			_MIP <= _MIP & ~(csr_data & 32'h2);
 		end else begin
-			// Hardware update from external sources
-			_MIP <= interrupt_src_i;
+			// Hardware update from external sources.
+			// MTIP[7] / MEIP[11] / MSIP[3] are HW-driven level signals from
+			// CLINT/PLIC — they must reflect interrupt_src_i live.
+			// STIP[5] / SEIP[9] / SSIP[1] are SOFTWARE-controlled (M-mode
+			// writes them via mip to inject S-mode interrupts; S-mode can
+			// clear via sip). They MUST NOT be clobbered by HW sources —
+			// interrupt_src_i has zero in those positions, so a blind
+			// assign would lose every csrsi mip,STIP that OpenSBI does in
+			// its legacy timer flow → Linux never sees timer ticks → the
+			// scheduler never preempts → kernel livelocks in shmem cmpxchg
+			// loops after spawning /init. (Reproduced as Linux page-fault
+			// livelock past 91M cycles with zero timer traps.)
+			// Hold SW bits (mask 0x222), refresh HW bits (mask 0x888).
+			_MIP <= (_MIP & 32'h0000_0222) | (interrupt_src_i & 32'h0000_0888);
 		end
 	end
 
