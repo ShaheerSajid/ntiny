@@ -186,6 +186,11 @@ always_ff @(posedge clk_i or posedge reset_i) begin
 end
 
 // ── Bus drive ─────────────────────────────────────────────────
+// Defensive: suppress bus on flush_i so an interrupt can't cause
+// partial AMO commit (memory updated AND AMO aborted internally
+// AND re-executed → double-apply). Empirically this race did not
+// fire during Linux boot (counter showed 0 events), but the gate
+// is correct per AMO atomicity semantics and costs nothing.
 always_comb begin
     dbus_addr_o       = addr_q;
     dbus_byteenable_o = 4'b1111;  // always word-width
@@ -193,16 +198,18 @@ always_comb begin
     dbus_write_o      = 1'b0;
     dbus_writedata_o  = '0;
 
-    case (state)
-        AMO_READ: begin
-            dbus_read_o = 1'b1;
-        end
-        AMO_WRITE: begin
-            dbus_write_o     = 1'b1;
-            dbus_writedata_o = (op_q == SC_W) ? rs2_q : amo_writeback;
-        end
-        default: ;
-    endcase
+    if (!flush_i) begin
+        case (state)
+            AMO_READ: begin
+                dbus_read_o = 1'b1;
+            end
+            AMO_WRITE: begin
+                dbus_write_o     = 1'b1;
+                dbus_writedata_o = (op_q == SC_W) ? rs2_q : amo_writeback;
+            end
+            default: ;
+        endcase
+    end
 end
 
 // ── Output: result ────────────────────────────────────────────
