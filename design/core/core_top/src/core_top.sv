@@ -2476,6 +2476,18 @@ core2avl core2avl_inst
 	.misalign_stall_o (misalign_stall)
 );
 
+// ── PTW-bus-ownership latch for AMO arbitration ────────────────
+// ptw_active drops the cycle PTW finishes, but the bus's residual
+// rvalid/ready/rdata from PTW's last transaction can persist for one
+// more cycle. amo_unit must stay stalled across that boundary or it
+// will consume PTW's response as its own (corrupting read_data_q).
+logic ptw_active_q;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) ptw_active_q <= 1'b0;
+    else         ptw_active_q <= ptw_active;
+end
+wire ptw_owns_bus = ptw_active | ptw_active_q;
+
 // ── AMO unit ──────────────────────────────────────────────────
 amo_unit amo_unit_inst
 (
@@ -2495,7 +2507,23 @@ amo_unit amo_unit_inst
 	.dbus_write_o     (amo_dbus_write),
 	.dbus_writedata_o (amo_dbus_writedata),
 	.dbus_readdata_i  (dmem_port.rdata),
-	.dbus_stall_i     (amo_dbus_read ? ~dmem_port.rvalid : ~dmem_port.ready),
+	// AMO/PTW bus arbitration race fix (2026-04-30):
+	// dmem_port is shared between PTW (highest priority), AMO and the
+	// core's load/store unit. When ptw_active=1, dmem_port.req/we/wdata
+	// are driven by PTW, NOT by amo_unit — but amo_unit's stall input
+	// previously sampled dmem_port.ready/rvalid raw, so it interpreted
+	// PTW completions as its own. On AMO_READ this captured the wrong
+	// rdata (a PTE word) into read_data_q → CAS loops corrupted memory
+	// → folio refcount underflow → 6.6 xas_load livelock at ~88M cycles.
+	//
+	// Use both live ptw_active AND a 1-cycle-delayed ptw_active_q.
+	// The combined "ptw_owns_bus" stays high for one cycle past PTW
+	// completion, so any residual rvalid/ready/rdata from the PTW's
+	// last transaction is discarded by amo_unit. After ptw_active_q
+	// drops, amo_unit's own request goes on the bus and the bus's
+	// subsequent response is genuinely AMO's.
+	.dbus_stall_i     (ptw_owns_bus |
+	                   (amo_dbus_read ? ~dmem_port.rvalid : ~dmem_port.ready)),
 	// Control
 	.result_o         (amo_result),
 	.stall_o          (amo_stall),
