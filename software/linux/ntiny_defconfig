@@ -6,6 +6,9 @@ CONFIG_SOC_VIRT=y
 CONFIG_NONPORTABLE=y
 CONFIG_ARCH_RV32I=y
 CONFIG_RISCV_ISA_ZBB=y
+# 6.12: disable boot-time unaligned-access probing (busy-loops on jiffies
+# before timers settle). Tell kernel HW handles unaligned slow-but-OK.
+CONFIG_RISCV_SLOW_UNALIGNED_ACCESS=y
 # CONFIG_IRQ_STACKS is not set
 CONFIG_RISCV_SBI_V01=y
 CONFIG_CMDLINE="earlycon=sbi console=hvc0"

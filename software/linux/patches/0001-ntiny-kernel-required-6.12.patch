@@ -1,0 +1,36 @@
+diff --git a/arch/riscv/boot/dts/Makefile b/arch/riscv/boot/dts/Makefile
+--- a/arch/riscv/boot/dts/Makefile
++++ b/arch/riscv/boot/dts/Makefile
+@@ -2,6 +2,7 @@
+ subdir-y += allwinner
+ subdir-y += canaan
+ subdir-y += microchip
++subdir-y += ntiny
+ subdir-y += renesas
+ subdir-y += sifive
+ subdir-y += sophgo
+diff --git a/arch/riscv/kernel/head.S b/arch/riscv/kernel/head.S
+--- a/arch/riscv/kernel/head.S
++++ b/arch/riscv/kernel/head.S
+@@ -298,6 +298,12 @@
+ 	la sp, init_thread_union + THREAD_SIZE
+ 	XIP_FIXUP_OFFSET sp
+ 	addi sp, sp, -PT_SIZE_ON_STACK
++	/* ntiny: initialize kernel_sp in thread_info so S-mode traps
++	 * during early boot (before any context switch) use the correct
++	 * kernel stack pointer. Without this, the trap handler's
++	 * _save_context loads a stale kernel_sp, and the trap frame
++	 * overlaps with the active call stack, corrupting saved registers. */
++	REG_S sp, TASK_TI_KERNEL_SP(tp)
+ 	scs_load_init_stack
+ #ifdef CONFIG_BUILTIN_DTB
+ 	la a0, __dtb_start
+@@ -325,6 +331,8 @@
+ 	la tp, init_task
+ 	la sp, init_thread_union + THREAD_SIZE
+ 	addi sp, sp, -PT_SIZE_ON_STACK
++	/* ntiny: re-stash kernel_sp now that addresses are virtual. */
++	REG_S sp, TASK_TI_KERNEL_SP(tp)
+ 	scs_load_current
+
+ 	call .Lsetup_trap_vector
