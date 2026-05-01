@@ -645,6 +645,66 @@ always @(posedge clk) begin
     end
 end
 
+// ── ash globals write log (probe v4) ──
+// Stream-snoops every U-mode write to the 5 ash parser globals at
+// PA 0x80cf0470..0x80cf0487. PAs derived from gp=0xe59b0 — verified
+// stable across runs with the same busybox binary:
+//   wordtext     = gp-1344 = 0xe5470 → PA 0x80cf0470
+//   lasttoken    = gp-1336 = 0xe5478 → PA 0x80cf0478
+//   quoteflag    = gp-1332 = 0xe547c → PA 0x80cf047c
+//   tokpushback  = gp-1328 = 0xe5480 → PA 0x80cf0480
+//   checkkwd     = gp-1324 = 0xe5484 → PA 0x80cf0484
+// Each write streams into logs/ash_globals.log so the run survives
+// any subsequent crash/timeout. Goal: catch writes from a PC OUTSIDE
+// the known legit writer set — those would be signal-handler or
+// stack-overflow corruption. Also tags M/S-mode writes which
+// shouldn't happen at all to U-mode addresses.
+integer ash_globals_fd;
+initial ash_globals_fd = $fopen("logs/ash_globals.log", "w");
+
+wire ash_glob_addr_hit =
+    wp_dport_req && wp_dport_we &&
+    (wp_dport_addr >= 32'h80cf0470 && wp_dport_addr <= 32'h80cf0487);
+
+function automatic string ash_glob_name(input [31:0] addr);
+    case (addr)
+        32'h80cf0470: ash_glob_name = "wordtext   ";
+        32'h80cf0478: ash_glob_name = "lasttoken  ";
+        32'h80cf047c: ash_glob_name = "quoteflag  ";
+        32'h80cf0480: ash_glob_name = "tokpushback";
+        32'h80cf0484: ash_glob_name = "checkkwd   ";
+        default:      ash_glob_name = "??         ";
+    endcase
+endfunction
+
+// Known legit writer PCs for each global (from disasm of busybox-1.37.0):
+//   lasttoken:    0x43734, 0x43ebc, 0x43fd6, 0x44162
+//   tokpushback:  0x42e04, 0x43d1e, 0x43e08, 0x43f36, 0x4415e, 0x4416e,
+//                 0x4419a, 0x441cc, 0x44232, 0x4430a
+// (Other globals: too many writers to enumerate cheaply — log-and-eyeball.)
+// "Unauthorized" flag is conservative: PC outside the parser-code range
+// 0x42000..0x44400 OR priv != 0 → almost certainly signal-handler or
+// trap path stomping on parser state.
+function automatic logic ash_glob_unauth(
+        input [31:0] addr, input [31:0] pc_imem, input [1:0] priv);
+    if (priv != 2'd0) ash_glob_unauth = 1'b1;
+    else if (pc_imem < 32'h00042000 || pc_imem >= 32'h00044400)
+        ash_glob_unauth = 1'b1;
+    else ash_glob_unauth = 1'b0;
+endfunction
+
+always @(posedge clk) begin : ash_globals_log_blk
+    if (!reset && ash_glob_addr_hit) begin
+        $fwrite(ash_globals_fd,
+            "@%0d %s pc=%08h wdata=%08h priv=%0d%s\n",
+            wp_cycle,
+            ash_glob_name(wp_dport_addr),
+            wp_pc_imem, wp_dport_wdata, wp_priv,
+            ash_glob_unauth(wp_dport_addr, wp_pc_imem, wp_priv) ? "  <UNAUTH>" : "");
+        $fflush(ash_globals_fd);
+    end
+end
+
 // Dump on parser-error PC fire (one-shot)
 reg ash_dumped = 0;
 always @(posedge clk) begin : ash_deep_dump_blk
