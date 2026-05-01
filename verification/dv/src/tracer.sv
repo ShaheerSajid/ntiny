@@ -166,7 +166,7 @@ logic [31:0] rvfi_pc_wdata;
     string rvfi_insn_str;
 
     if (file_handle == 32'h0) begin
-      string file_name_base = "trace_core";
+      string file_name_base = "logs/trace_core";
       void'($value$plusargs("tracer_file_base=%s", file_name_base));
       $sformat(file_name, "%s_%h.log", file_name_base, hart_id_i);
       $display("%m: Writing execution trace to %s", file_name);
@@ -716,7 +716,7 @@ int i=0;
     static string trap_base;
     if (rst_ni && trace_log_now) begin
       if (file_handle_traps == 32'h0) begin
-        trap_base = "trace_core";
+        trap_base = "logs/trace_core";
         $value$plusargs("tracer_file_base=%s", trap_base);
         $sformat(file_name_traps, "%s_%h_traps.log", trap_base, hart_id_i);
         file_handle_traps = $fopen(file_name_traps, "w");

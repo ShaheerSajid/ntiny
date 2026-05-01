@@ -18,6 +18,10 @@ assign priv_level_o = soc_top_inst.core_top_inst.priv_level;
 `endif
 
 	  initial begin
+		 // All sim log files are written into ./logs/ — created here so the
+		 // various $fopen("logs/foo.log", ...) calls below don't silently
+		 // fail. Safe to call multiple times.
+		 void'($system("mkdir -p logs"));
 		 $display("==============");
 		 $display("SoC Terminal");
 		 $display("==============");
@@ -101,6 +105,15 @@ soc_top soc_top_inst
     .tx(rx)
   );
 
+`ifdef DV_TRACER
+// All tracing/logging lives in the testbench. tb_tracer reaches into
+// core_top via hierarchical refs and instantiates the rvfi tracer.
+tb_tracer u_tracer (
+    .clk_i  (clk),
+    .reset_i(reset)
+);
+`endif
+
 // ============================================================
 // Tohost monitor — detects test completion via write to TOHOST_ADDR
 // Software writes 1 for PASS, any other non-zero value for FAIL.
@@ -173,7 +186,7 @@ end
 // $write() calls with verilator-internal output and produces
 // garbled per-character output, so we don't mirror to stdout.
 integer sim_con_fd;
-initial sim_con_fd = $fopen("uart.log", "w");
+initial sim_con_fd = $fopen("logs/uart.log", "w");
 
 always @(posedge clk) begin
 	if (!reset &&
@@ -199,7 +212,7 @@ end
 // All addresses match linux-6.12/System.map. If the kernel build changes,
 // re-run: `awk '$3=="T" && /__schedule_bug/' .../System.map`.
 integer s6_log_fd;
-initial s6_log_fd = $fopen("s6_watch.log", "w");
+initial s6_log_fd = $fopen("logs/s6_watch.log", "w");
 
 integer wp_cycle = 0;
 always @(posedge clk) if (!reset) wp_cycle <= wp_cycle + 1;
@@ -313,7 +326,7 @@ end
 //
 // This block counts and logs all AMO/PTW collision events.
 integer amo_ptw_log_fd;
-initial amo_ptw_log_fd = $fopen("amo_ptw_race.log", "w");
+initial amo_ptw_log_fd = $fopen("logs/amo_ptw_race.log", "w");
 
 // State enum: IDLE=0, AMO_READ=1, AMO_WRITE=2, DONE=3
 wire [1:0]  amo_state_now    = soc_top_inst.core_top_inst.amo_unit_inst.state;
@@ -371,7 +384,7 @@ end
 // ptw_active OR ptw_active_q was high during the IMEM cycle. If so,
 // the load's writeback may be PTW's data.
 integer c2a_ptw_log_fd;
-initial c2a_ptw_log_fd = $fopen("c2a_ptw_race.log", "w");
+initial c2a_ptw_log_fd = $fopen("logs/c2a_ptw_race.log", "w");
 
 // pull the pipeline state hooks
 wire        wp_iwb_is_load = soc_top_inst.core_top_inst.ctrl_bus_iwb.mem_op == 2'd0; // READ=0, WRITE=1, NO_MEM_OP=2
@@ -419,7 +432,7 @@ end
 // near neighbor) appears as wdata to a heap-area address tells us
 // where the corruption originated.
 integer ptr_log_fd;
-initial ptr_log_fd = $fopen("ptr_tracker.log", "w");
+initial ptr_log_fd = $fopen("logs/ptr_tracker.log", "w");
 
 wire        wp_dport_req    = soc_top_inst.core_top_inst.dmem_port.req;
 wire        wp_dport_we     = soc_top_inst.core_top_inst.dmem_port.we;
@@ -462,7 +475,7 @@ end
 // the error path at PC 0x4435e. When that PC retires, snapshot full
 // register state + 32 stack words (= ash's call chain + parser ctx).
 integer ash_log_fd;
-initial ash_log_fd = $fopen("ash_parser_err.log", "w");
+initial ash_log_fd = $fopen("logs/ash_parser_err.log", "w");
 
 reg ash_caught = 0;
 always @(posedge clk) begin : ash_caught_blk
@@ -491,9 +504,184 @@ always @(posedge clk) begin : ash_caught_blk
         // Look at busybox bss area near gp for ash globals (these ARE in ram_inst.mem at phys 0x80000000+)
         // gp-1344 = wordtext (busybox global); gp-1332 = quoteflag
         $fwrite(ash_log_fd, "  --- ash globals via gp=%08h ---\n", gp_val);
-        $fwrite(ash_log_fd, "  wordtext (gp-1344)  vaddr=%08h\n", gp_val + 32'sd(-1344));
-        $fwrite(ash_log_fd, "  quoteflag (gp-1332) vaddr=%08h\n", gp_val + 32'sd(-1332));
+        $fwrite(ash_log_fd, "  wordtext (gp-1344)  vaddr=%08h\n", gp_val - 32'd1344);
+        $fwrite(ash_log_fd, "  quoteflag (gp-1332) vaddr=%08h\n", gp_val - 32'd1332);
         $fflush(ash_log_fd);
+    end
+end
+
+// ── ash deep-state probe v2: req/rvalid ring + pending-pair model ──
+// Captures every U-mode dmem bus event with TWO key fixes vs v1:
+//   1) PC tag is pc_imem (the IMEM-stage instr issuing the req), not
+//      pc_iwb (which lags by one slot and mis-attributes ops).
+//   2) Loads use a pending-pair model: snapshot {pc_imem,addr} on req,
+//      fill in rdata when rvalid arrives. Stores commit immediately.
+// This way the (pc, addr, data) triple actually belongs to the SAME
+// instruction and any VA→PA mismatch can be trusted.
+// Dumped to ash_parsefile_state.log when pc_iwb=0x44362 (raise_error
+// site, ash.c:12272 "bad for loop variable") retires.
+integer ash_dump_fd;
+initial ash_dump_fd = $fopen("logs/ash_parsefile_state.log", "w");
+
+wire [31:0] wp_pc_imem = soc_top_inst.core_top_inst.pc_imem;
+
+// Bigger ring (1024) + PC filter to keep ops only from the parser
+// region 0x42000..0x44400 (__pgetc, preadbuffer, readtoken,
+// xxreadtoken, raise_error_syntax). Covers ~thousands of cycles
+// without being overrun by unrelated user-mode activity.
+localparam int ASH_RING_SZ = 1024;
+reg [31:0] ash_ring_cyc   [0:ASH_RING_SZ-1];
+reg [31:0] ash_ring_pc    [0:ASH_RING_SZ-1];
+reg [31:0] ash_ring_addr  [0:ASH_RING_SZ-1];
+reg [31:0] ash_ring_data  [0:ASH_RING_SZ-1];
+reg        ash_ring_we    [0:ASH_RING_SZ-1];
+reg [9:0]  ash_ring_head  = 10'd0;
+reg        ash_ring_full  = 1'b0;
+
+// 1-deep pending load (ntiny is single-issue in-order; only one load
+// in flight at a time). Captured on req=1&we=0; completed on rvalid=1.
+reg        pend_v        = 1'b0;
+reg [31:0] pend_cyc, pend_pc, pend_addr;
+
+// PC filter: only push when the issuing PC is in the parser code range.
+// Keeps the ring focused on __pgetc / readtoken / xxreadtoken activity.
+function automatic logic in_parser_range(input [31:0] pc);
+    in_parser_range = (pc >= 32'h00042000) && (pc < 32'h00044400);
+endfunction
+
+task push_ring;
+    input [31:0] cyc;
+    input [31:0] pc;
+    input [31:0] addr;
+    input [31:0] data;
+    input        we;
+    begin
+        if (in_parser_range(pc)) begin
+            ash_ring_cyc  [ash_ring_head] = cyc;
+            ash_ring_pc   [ash_ring_head] = pc;
+            ash_ring_addr [ash_ring_head] = addr;
+            ash_ring_data [ash_ring_head] = data;
+            ash_ring_we   [ash_ring_head] = we;
+            ash_ring_head = ash_ring_head + 10'd1;
+            if (ash_ring_head == 10'd0) ash_ring_full = 1'b1;
+        end
+    end
+endtask
+
+always @(posedge clk) begin
+    if (!reset && wp_priv == 2'd0) begin
+        // Complete pending load when its rvalid arrives.
+        if (pend_v && wp_dport_rvalid) begin
+            push_ring(pend_cyc, pend_pc, pend_addr, wp_dport_rdata, 1'b0);
+            pend_v <= 1'b0;
+        end
+        // New request this cycle.
+        if (wp_dport_req) begin
+            if (wp_dport_we) begin
+                // Store: commit immediately with wdata.
+                push_ring(wp_cycle, wp_pc_imem, wp_dport_addr, wp_dport_wdata, 1'b1);
+            end else begin
+                // Load: defer until rvalid. If pend was already set
+                // (shouldn't happen on a single-issue core, but guard),
+                // drop the previous one to avoid stuck pending state.
+                pend_v    <= 1'b1;
+                pend_cyc  <= wp_cycle;
+                pend_pc   <= wp_pc_imem;
+                pend_addr <= wp_dport_addr;
+            end
+        end
+    end
+end
+
+// ── lasttoken sniffer (probe v3 add-on) ──
+// Catches every write to ash's `lasttoken` global (gp-1336). The 4 PCs
+// that legally write it (per disasm of busybox-1.37.0 ash):
+//   0x43734  sw a0, gp-1336    (TWORD=3 set in word-parser exit)
+//   0x43ebc  sw a0, gp-1336    (xxreadtoken's special-char token type)
+//   0x43fd6  sw s0, gp-1336    (readtoken's keyword conversion result)
+//   0x44162  sw zero, gp-1336  (cleared in some default-case path)
+// Any write from a *different* PC = unauthorized corruption (signal
+// handler, stack overflow, HW). Latches the FIRST write of value 21
+// (TFOR) for one-shot diagnosis.
+localparam int LT_RING_SZ = 64;
+reg [31:0] lt_ring_cyc  [0:LT_RING_SZ-1];
+reg [31:0] lt_ring_pc   [0:LT_RING_SZ-1];
+reg [31:0] lt_ring_addr [0:LT_RING_SZ-1];
+reg [31:0] lt_ring_data [0:LT_RING_SZ-1];
+reg [5:0]  lt_ring_head = 6'd0;
+reg        lt_ring_full = 1'b0;
+reg [31:0] lt_pa_seen   = 32'h0;          // discovered phys addr of lasttoken
+reg        lt_tfor_caught = 1'b0;
+reg [31:0] lt_tfor_cyc, lt_tfor_pc, lt_tfor_addr;
+
+// Detect a write to lasttoken: either it's one of the 4 known PCs
+// (legit writers) OR it's a write to the discovered PA from any PC.
+wire lt_legit_write = wp_dport_req && wp_dport_we && (wp_priv == 2'd0) &&
+    (wp_pc_imem == 32'h00043734 || wp_pc_imem == 32'h00043ebc ||
+     wp_pc_imem == 32'h00043fd6 || wp_pc_imem == 32'h00044162);
+wire lt_match_pa    = wp_dport_req && wp_dport_we && (wp_priv == 2'd0) &&
+                      (lt_pa_seen != 32'h0) && (wp_dport_addr == lt_pa_seen);
+wire lt_any_write   = lt_legit_write || lt_match_pa;
+
+always @(posedge clk) begin
+    if (!reset && lt_any_write) begin
+        // Snap to ring (push every observation, even repeats)
+        lt_ring_cyc [lt_ring_head] <= wp_cycle;
+        lt_ring_pc  [lt_ring_head] <= wp_pc_imem;
+        lt_ring_addr[lt_ring_head] <= wp_dport_addr;
+        lt_ring_data[lt_ring_head] <= wp_dport_wdata;
+        lt_ring_head <= lt_ring_head + 6'd1;
+        if (lt_ring_head == 6'd63) lt_ring_full <= 1'b1;
+        // Latch the discovered PA from the first legit write.
+        if (lt_legit_write && lt_pa_seen == 32'h0)
+            lt_pa_seen <= wp_dport_addr;
+        // One-shot: capture the first write of TFOR (=21).
+        if (!lt_tfor_caught && wp_dport_wdata[7:0] == 8'd21) begin
+            lt_tfor_caught <= 1'b1;
+            lt_tfor_cyc    <= wp_cycle;
+            lt_tfor_pc     <= wp_pc_imem;
+            lt_tfor_addr   <= wp_dport_addr;
+        end
+    end
+end
+
+// Dump on parser-error PC fire (one-shot)
+reg ash_dumped = 0;
+always @(posedge clk) begin : ash_deep_dump_blk
+    int i, n, count;
+    if (!reset && wp_priv == 2'd0 && wp_pc_iwb == 32'h00044362 && !ash_dumped) begin
+        ash_dumped <= 1'b1;
+        $fwrite(ash_dump_fd, "@%0d ASH parser error fired — deep state dump (probe v3)\n", wp_cycle);
+        $fwrite(ash_dump_fd, "  pc_iwb=%08h pc_imem=%08h gp=%08h sp=%08h pend_v=%0d\n",
+                wp_pc_iwb, wp_pc_imem,
+                soc_top_inst.core_top_inst.regfile_inst.regfile[3],
+                soc_top_inst.core_top_inst.regfile_inst.regfile[2],
+                pend_v);
+        $fwrite(ash_dump_fd, "  lasttoken_pa=%08h  tfor_caught=%0d", lt_pa_seen, lt_tfor_caught);
+        if (lt_tfor_caught)
+            $fwrite(ash_dump_fd, "  (TFOR set @%0d pc=%08h paddr=%08h)\n",
+                    lt_tfor_cyc, lt_tfor_pc, lt_tfor_addr);
+        else
+            $fwrite(ash_dump_fd, "\n");
+
+        $fwrite(ash_dump_fd, "--- lasttoken write history (oldest first; legit + PA-matched) ---\n");
+        count = lt_ring_full ? LT_RING_SZ : lt_ring_head;
+        for (n = 0; n < count; n++) begin
+            i = lt_ring_full ? ((lt_ring_head + n) & 6'h3f) : n;
+            $fwrite(ash_dump_fd, "  @%0d  pc=%08h  paddr=%08h  data=%08h\n",
+                    lt_ring_cyc[i], lt_ring_pc[i], lt_ring_addr[i], lt_ring_data[i]);
+        end
+
+        count = ash_ring_full ? ASH_RING_SZ : ash_ring_head;
+        $fwrite(ash_dump_fd, "--- last %0d parser-range dmem ops (oldest first; PC = pc_imem when req issued) ---\n", count);
+        for (n = 0; n < count; n++) begin
+            i = ash_ring_full ? ((ash_ring_head + n) & 10'h3ff) : n;
+            $fwrite(ash_dump_fd, "  @%0d  pc=%08h  %s paddr=%08h  data=%08h\n",
+                    ash_ring_cyc[i], ash_ring_pc[i],
+                    ash_ring_we[i] ? "ST" : "LD",
+                    ash_ring_addr[i], ash_ring_data[i]);
+        end
+        $fflush(ash_dump_fd);
     end
 end
 

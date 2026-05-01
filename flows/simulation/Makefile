@@ -57,6 +57,7 @@ VERILATOR_SRCS = \
 	../../verification/dv/src/tracer.sv \
 	testbench/uartdpi.c \
 	testbench/uartdpi.sv \
+	testbench/tb_tracer.sv \
 	testbench/tb_soc_top.v \
 	--exe testbench/main.cpp
 
@@ -232,9 +233,18 @@ riscof_fpu_run:
 riscof_summary:
 	$(MAKE) -C ../../verification/riscof summary
 
+# --- Linux boot sim ---
+# Wraps run_linux.sh which builds a 128 MiB DV_TRACER model on first run
+# and then launches Vtb_soc_top in the background. Logs land in ./logs/.
+#   make linux            — boot Linux for 200M cycles (default)
+#   make linux TO=N       — override cycle timeout
+.PHONY: linux
+linux:
+	@./run_linux.sh $(if $(TO),$(TO),200000000)
+
 .PHONY: clean
 clean:
-	rm -f *.key *.log *.history transcript *.wlf *.text *.X *.svcf *.vcd
+	rm -rf logs *.key *.history transcript *.wlf *.text *.X *.svcf *.vcd
 	if [ -d "work" ]; then rm -r work; fi
 	if [ -d "obj_dir" ]; then rm -r obj_dir; fi
 	if [ -f "Vtb_soc_top" ]; then rm Vtb_soc_top; fi

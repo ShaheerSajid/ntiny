@@ -1,21 +1,27 @@
 # ntiny Linux build automation
 #
-#   make prepare   one-time: clone Linux + OpenSBI, apply ntiny patches,
-#                  copy DTS into the kernel tree
-#   make build     rebuild kernel + opensbi + ram.hex
+#   make prepare   one-time: clone Linux + OpenSBI inside ./external/,
+#                  apply ntiny patches, install defconfig
+#   make build     rebuild kernel + opensbi + ram.hex (force-fresh:
+#                  re-embeds initramfs.cpio every time, no stale images)
 #   make run       launch the verilator sim and stream uart.log
-#   make clean     wipe build artifacts in this directory
+#   make clean     wipe local build artifacts (dtb, ram.hex)
 #   make distclean also wipe Linux/OpenSBI build outputs
+#   make wipe      remove the cloned external repos entirely
 #
-# Override paths via environment:
+# External repos clone INTO this directory by default:
+#   software/linux/external/linux         (Linux source tree)
+#   software/linux/external/opensbi       (OpenSBI source tree)
+# Both are git-ignored. Override via env if you want to share clones:
 #   make LINUX_DIR=/path/to/linux OPENSBI_DIR=/path/to/opensbi prepare
 #
 # Toolchain: expects riscv32-unknown-linux-gnu-* in PATH or at
 # /opt/riscv-linux/bin (the default location).
 
 NTINY      := $(abspath $(CURDIR)/../..)
-LINUX_DIR  ?= $(HOME)/Downloads/linux
-OPENSBI_DIR?= $(HOME)/Downloads/opensbi
+EXTERNAL_DIR := $(CURDIR)/external
+LINUX_DIR  ?= $(EXTERNAL_DIR)/linux
+OPENSBI_DIR?= $(EXTERNAL_DIR)/opensbi
 SIM_DIR    := $(NTINY)/flows/simulation
 TOOLCHAIN_BIN ?= /opt/riscv-linux/bin
 
@@ -33,28 +39,32 @@ PATH := $(TOOLCHAIN_BIN):$(PATH)
 
 OPENSBI_BIN := $(OPENSBI_DIR)/build/platform/opensbi-platform/firmware/fw_payload.bin
 KERNEL_IMG  := $(LINUX_DIR)/arch/riscv/boot/Image
+INITRAMFS   := $(CURDIR)/initramfs.cpio
 DTB         := $(CURDIR)/ntiny.dtb
 
 KERNEL_PATCH := $(CURDIR)/patches/0001-ntiny-kernel-required.patch
 DTS_MAKEFILE := $(CURDIR)/patches/ntiny-dts-Makefile
 
 .PHONY: all prepare clone-linux clone-opensbi apply-patches \
-        dtb kernel opensbi ram-hex build run clean distclean help
+        dtb kernel opensbi ram-hex build force-rm rebuild run \
+        clean distclean wipe help
 
 all: build
 
 help:
 	@echo "Targets:"
-	@echo "  make prepare   - clone Linux + OpenSBI, apply ntiny patches"
-	@echo "  make build     - rebuild kernel + opensbi + ram.hex"
+	@echo "  make prepare   - clone Linux + OpenSBI into ./external/, apply ntiny patches"
+	@echo "  make build     - rebuild kernel + opensbi + ram.hex (force-fresh image)"
+	@echo "  make rebuild   - alias for build (always force-rm Image + fw_payload first)"
 	@echo "  make run       - launch the verilator sim and stream uart.log"
-	@echo "  make clean     - wipe local build artifacts"
+	@echo "  make clean     - wipe local build artifacts (dtb, ram.hex)"
 	@echo "  make distclean - also wipe Linux/OpenSBI build outputs"
+	@echo "  make wipe      - delete the entire ./external/ tree"
 	@echo ""
-	@echo "Environment overrides:"
-	@echo "  LINUX_DIR     ($(LINUX_DIR))"
-	@echo "  OPENSBI_DIR   ($(OPENSBI_DIR))"
-	@echo "  TOOLCHAIN_BIN ($(TOOLCHAIN_BIN))"
+	@echo "Paths:"
+	@echo "  LINUX_DIR     = $(LINUX_DIR)"
+	@echo "  OPENSBI_DIR   = $(OPENSBI_DIR)"
+	@echo "  TOOLCHAIN_BIN = $(TOOLCHAIN_BIN)"
 
 # ── prepare: clone external repos and apply ntiny patches ────────────
 prepare: clone-linux clone-opensbi apply-patches
@@ -62,6 +72,7 @@ prepare: clone-linux clone-opensbi apply-patches
 clone-linux:
 	@if [ ! -d $(LINUX_DIR) ]; then \
 		echo "==> Cloning Linux $(LINUX_TAG) into $(LINUX_DIR)"; \
+		mkdir -p $(dir $(LINUX_DIR)); \
 		git clone --depth=1 --branch $(LINUX_TAG) \
 			https://github.com/torvalds/linux $(LINUX_DIR); \
 	else \
@@ -71,12 +82,17 @@ clone-linux:
 clone-opensbi:
 	@if [ ! -d $(OPENSBI_DIR) ]; then \
 		echo "==> Cloning OpenSBI $(OPENSBI_TAG) into $(OPENSBI_DIR)"; \
+		mkdir -p $(dir $(OPENSBI_DIR)); \
 		git clone --depth=1 --branch $(OPENSBI_TAG) \
 			https://github.com/riscv-software-src/opensbi $(OPENSBI_DIR); \
 	else \
 		echo "==> $(OPENSBI_DIR) already exists, skipping clone"; \
 	fi
 
+# Always re-applies: copies DTS, applies kernel patch (idempotent),
+# regenerates ntiny_defconfig (with @NTINY_LINUX@ substituted), and
+# runs `make ntiny_defconfig` so .config matches our intent. Run this
+# any time you suspect .config got reset (e.g. wrong ARCH/XLEN).
 apply-patches:
 	@echo "==> Copying ntiny DTS into the kernel tree"
 	@mkdir -p $(LINUX_DIR)/arch/riscv/boot/dts/ntiny
@@ -87,6 +103,12 @@ apply-patches:
 		git apply --check $(KERNEL_PATCH) 2>/dev/null && \
 		git apply $(KERNEL_PATCH) || \
 		echo "    (already applied or no-op)"
+	@# Some kbuild rules clean usr/initramfs_data.S, but the .o build
+	@# rule still expects it. If missing, restore from git.
+	@if [ ! -f $(LINUX_DIR)/usr/initramfs_data.S ]; then \
+		echo "==> Restoring usr/initramfs_data.S from git"; \
+		cd $(LINUX_DIR) && git checkout HEAD -- usr/initramfs_data.S; \
+	fi
 	@echo "==> Installing ntiny_defconfig as .config"
 	@sed 's|@NTINY_LINUX@|$(CURDIR)|g' $(CURDIR)/ntiny_defconfig \
 		> $(LINUX_DIR)/arch/riscv/configs/ntiny_defconfig
@@ -94,11 +116,21 @@ apply-patches:
 	@echo "==> Done. Run 'make build' next."
 
 # ── build: rebuild kernel + opensbi + ram.hex ───────────────────────
-build: dtb kernel opensbi ram-hex
+# `build` always force-removes Image and fw_payload first so the kernel
+# re-link picks up the current initramfs.cpio bytes (kbuild's own
+# dependency tracking does NOT depend on the cpio file). This is the
+# fix for "I changed initramfs.cpio but the kernel didn't pick it up".
+build: force-rm dtb kernel opensbi ram-hex
 	@echo "==> Build complete."
 	@echo "    kernel:  $(KERNEL_IMG)"
 	@echo "    opensbi: $(OPENSBI_BIN)"
 	@echo "    ram.hex: $(SIM_DIR)/ram.hex"
+
+rebuild: build
+
+force-rm:
+	@rm -f $(KERNEL_IMG) $(OPENSBI_BIN) $(LINUX_DIR)/usr/initramfs_inc_data \
+	       $(LINUX_DIR)/usr/initramfs_data.o $(LINUX_DIR)/usr/built-in.a
 
 dtb: ntiny.dtb
 
@@ -108,7 +140,15 @@ ntiny.dtb: ntiny.dts
 
 kernel: $(KERNEL_IMG)
 
-$(KERNEL_IMG): ntiny_defconfig
+$(KERNEL_IMG): $(CURDIR)/ntiny_defconfig $(INITRAMFS) $(KERNEL_PATCH)
+	@if [ ! -d $(LINUX_DIR) ]; then \
+		echo "ERROR: $(LINUX_DIR) not found. Run 'make prepare' first."; \
+		exit 1; \
+	fi
+	@if [ ! -f $(LINUX_DIR)/usr/initramfs_data.S ]; then \
+		echo "==> Restoring missing usr/initramfs_data.S"; \
+		cd $(LINUX_DIR) && git checkout HEAD -- usr/initramfs_data.S; \
+	fi
 	@echo "==> Building Linux kernel ($(LINUX_TAG))"
 	@cd $(LINUX_DIR) && $(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) olddefconfig
 	@cd $(LINUX_DIR) && $(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -j$$(nproc)
@@ -116,6 +156,10 @@ $(KERNEL_IMG): ntiny_defconfig
 opensbi: $(OPENSBI_BIN)
 
 $(OPENSBI_BIN): $(KERNEL_IMG) $(DTB)
+	@if [ ! -d $(OPENSBI_DIR) ]; then \
+		echo "ERROR: $(OPENSBI_DIR) not found. Run 'make prepare' first."; \
+		exit 1; \
+	fi
 	@echo "==> Building OpenSBI ($(OPENSBI_TAG))"
 	@cd $(OPENSBI_DIR) && $(MAKE) \
 		CROSS_COMPILE=$(CROSS_COMPILE) \
@@ -157,3 +201,7 @@ distclean: clean
 	@if [ -d $(OPENSBI_DIR) ]; then \
 		cd $(OPENSBI_DIR) && $(MAKE) clean; \
 	fi
+
+wipe: distclean
+	@echo "==> Removing $(EXTERNAL_DIR)"
+	@rm -rf $(EXTERNAL_DIR)

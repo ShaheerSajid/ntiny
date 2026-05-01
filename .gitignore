@@ -34,6 +34,12 @@ flows/simulation/*.hex
 # Software build outputs
 software/build/
 
+# Linux/OpenSBI clones (managed by software/linux/Makefile)
+software/linux/external/
+
+# Generated DTB (built from .dts on demand)
+software/linux/ntiny.dtb
+
 # RISCOF third-party and generated
 verification/riscof/riscv-arch-test/
 verification/riscof/riscof_work/

@@ -11,7 +11,7 @@ CONFIG_RISCV_ISA_ZBB=y
 CONFIG_RISCV_SLOW_UNALIGNED_ACCESS=y
 # CONFIG_IRQ_STACKS is not set
 CONFIG_RISCV_SBI_V01=y
-CONFIG_CMDLINE="earlycon=sbi console=hvc0"
+CONFIG_CMDLINE="earlycon=sbi console=hvc0 loglevel=8 ignore_loglevel debug initcall_debug"
 CONFIG_CMDLINE_FORCE=y
 # CONFIG_STACKPROTECTOR is not set
 # CONFIG_BLOCK is not set

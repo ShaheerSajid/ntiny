@@ -6,7 +6,10 @@ cd "$(dirname "$0")"
 
 TIMEOUT=${1:-2000000000}
 shift 2>/dev/null || true   # remaining $@ are extra +plusargs forwarded to Vtb_soc_top
-OPENSBI_BIN=$(find /home/shaheer/Downloads/opensbi/build -name "fw_payload.bin" -path "*/opensbi-platform/*" 2>/dev/null | head -1)
+# Search the in-repo external/ tree first, then fall back to the legacy
+# ~/Downloads location for users who haven't migrated yet.
+OPENSBI_BIN=$(find ../../software/linux/external/opensbi/build /home/shaheer/Downloads/opensbi/build \
+    -name "fw_payload.bin" -path "*/opensbi-platform/*" 2>/dev/null | head -1)
 
 if [ -z "$OPENSBI_BIN" ]; then
     echo "ERROR: OpenSBI fw_payload.bin not found. Build it first (see software/linux/README.md)"
@@ -30,7 +33,7 @@ if [ ! -f Vtb_soc_top ] || [ ! -d obj_dir ]; then
         -f src.args \
         ../../verification/dv/src/pkg.sv ../../verification/dv/src/tracer_pkg.sv \
         ../../verification/dv/src/tracer.sv testbench/uartdpi.c testbench/uartdpi.sv \
-        testbench/tb_soc_top.v --exe testbench/main.cpp
+        testbench/tb_tracer.sv testbench/tb_soc_top.v --exe testbench/main.cpp
     make -j$(nproc) -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
     cp obj_dir/Vtb_soc_top ./
 fi
@@ -40,7 +43,7 @@ echo "OpenSBI: $OPENSBI_BIN"
 echo "Timeout: $TIMEOUT cycles"
 
 python3 ../../software/tools/hex_text.py "$OPENSBI_BIN" ram.hex
-rm -f uart.log
+mkdir -p logs && rm -f logs/uart.log
 ./Vtb_soc_top --timeout "$TIMEOUT" "$@" > /dev/null 2>&1 &
-echo "PID: $! — monitor: tail -f uart.log"
+echo "PID: $! — monitor: tail -f logs/uart.log"
 [ $# -gt 0 ] && echo "Tracer args: $*"
