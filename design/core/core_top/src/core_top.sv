@@ -125,6 +125,7 @@ logic [31:0] readdata_imem;
 logic [31:0] readdata_iwb;
 
 onebit_sig_e if_id_stall;
+onebit_sig_e consumer_can_take;
 onebit_sig_e ie_stall;
 onebit_sig_e imem_stall;
 onebit_sig_e iwb_stall;
@@ -459,6 +460,8 @@ hazard_unit hazard_unit_inst (
     .stale_id_o         (stale_id),
     // Instruction validity
     .insn_valid_id_o    (insn_valid_id),
+    // Consumer back-pressure (BPU-at-ID gate)
+    .consumer_can_take_o(consumer_can_take),
     // Fetch control
     .refetch_after_trap_o(refetch_after_trap)
 );
@@ -2127,31 +2130,31 @@ wire [31:0] bpu_if_redirect_target = bpu_if_target_q;
 // bnez with sp 32 bytes off, reading a stale stack slot.
 // JAL targets resolve at EX with a 2-cycle penalty — acceptable cost.
 wire        bpu_is_branch_id = (ctrl_bus_if_id_raw.inst_type == BRANCH);
-// Hold the redirect during IE-stage stalls. The JAL comment above
-// documents the broader hazard: when bpu_redirect_fire asserts while
-// if_id_stall=1, the aligner reseats (fetch_flush + redirect_valid_i
-// to compressed_aligner) but the branch at the aligner output never
-// gets consumed (consumer_take_i = ~if_id_stall = 0). The branch is
-// dropped, never reaches IE, never resolves; the predicted-taken
-// target then commits unguarded. Reproduced by busybox strcmp's bne
-// following a DTLB-miss-stalled lbu — sub at the predicted target
-// retired with stale-equal operands and bsearch returned the wrong
-// keyword (TIN instead of TIF), misparsing /init.
+// Hold the redirect until the branch is being consumed by ID. The
+// JAL comment above documents the broader hazard: when bpu_redirect_fire
+// asserts while if_id_stall=1, the aligner reseats (fetch_flush +
+// redirect_valid_i to compressed_aligner) but the branch at the aligner
+// output never gets consumed (consumer_take_i = ~if_id_stall = 0). The
+// branch is dropped, never reaches IE, never resolves; the
+// predicted-taken target then commits unguarded. Reproduced by busybox
+// strcmp's bne following a DTLB-miss-stalled lbu — sub at the predicted
+// target retired with stale-equal operands and bsearch returned the
+// wrong keyword (TIN instead of TIF), misparsing /init.
 //
-// Gating on `!ie_stall` (not `!if_id_stall`) avoids a combinational
-// loop: if_id_stall includes id_no_insn_stall=~aligner_valid, and
-// aligner_valid feeds back through ctrl_bus_if_id.predicted_taken
-// → ctrl_bus_if_id_raw → bpu_is_branch_id → bpu_bht_btb_fire. ie_stall
-// only depends on registered IE-stage state, so no loop. This covers
-// the observed reproducer (load PTW miss); front-end stall variants
-// (icache_stall, mmu_i_stall) of the same hazard are still latent
-// but not yet reproduced.
+// Architectural invariant enforced: BPU at ID may fire only when the
+// branch instruction is being consumed by ID this cycle. The condition
+// is "aligner_valid (branch is at the aligner output) AND consumer_can_take
+// (no front-end or IE-stage backpressure on ID)". consumer_can_take is
+// hazard_unit's if_id_stall minus the id_no_insn_stall (=~aligner_valid)
+// term — splitting it that way avoids a combinational loop through
+// bpu_redirect_fire → ctrl_bus_if_id.predicted_taken → ctrl_bus_if_id_raw
+// → bpu_is_branch_id that closes via id_no_insn_stall.
 wire        bpu_bht_btb_fire = bpu_if_pred_valid
                               && bpu_is_branch_id && bpu_if_pred_taken
                               && insn_valid_id
                               && aligner_valid
                               && !aligner_pred_is_branch
-                              && !ie_stall;
+                              && consumer_can_take;
 
 // Return detection at ID
 wire [4:0]  id_rs1 = ctrl_bus_if_id_raw.rs1_int[4:0];

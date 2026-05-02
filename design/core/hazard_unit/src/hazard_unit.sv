@@ -61,6 +61,21 @@ module hazard_unit (
     output onebit_sig_e imem_flush_o,
     output onebit_sig_e iwb_flush_o,
 
+    // ── Consumer back-pressure ──────────────────────────────────────────
+    // Asserted when ID can accept a new instruction this cycle, modulo
+    // whether the aligner has one to give. Equals if_id_stall_o without
+    // its id_no_insn_stall (=~aligner_valid_i) term.
+    //
+    // Used by the BPU at ID to gate its redirect: the BPU must only fire
+    // when the branch is actually being consumed, otherwise the aligner
+    // reseats away from the branch (which sits at the aligner output but
+    // is never popped) and the branch is dropped from the pipeline. This
+    // signal expresses that invariant without including the
+    // ~aligner_valid term, which would form a combinational loop with
+    // bpu_redirect_fire → ctrl_bus_if_id.predicted_taken → ... back to
+    // aligner_valid (Verilator catches that as DIDNOTCONVERGE).
+    output onebit_sig_e consumer_can_take_o,
+
     // ── Post-trap / stale ───────────────────────────────────────────────
     output logic        post_trap_o,
     output logic        stale_id_o,
@@ -100,6 +115,27 @@ assign if_id_stall_o = onebit_sig_e'(ie_stall_o | insert_bubble_i |
                                       refetch_after_trap_o | halted_i |
                                       icache_stall_i | mmu_i_stall_i |
                                       id_no_insn_stall);
+
+// Same OR-list as if_id_stall_o minus id_no_insn_stall, but with
+// mmu_i_stall registered. See port comment for the loop-avoidance
+// rationale. Why the mmu_i_stall flop:
+//   imem_port.req depends combinationally on arb_redirect_valid
+//   mmu's i_stall_o depends combinationally on imem_port.req
+//   consumer_can_take feeding bpu_bht_btb_fire would close another
+//   loop through these. Using mmu_i_stall_q (1-cycle delayed) breaks
+//   that combinational cycle. Functionally fine because the BPU gate
+//   only matters for branches already in the buffer — the I-side
+//   stall blocks new fetches, not consumption of an existing branch
+//   at the aligner output.
+logic mmu_i_stall_q;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i) mmu_i_stall_q <= 1'b0;
+    else         mmu_i_stall_q <= mmu_i_stall_i;
+end
+
+assign consumer_can_take_o = onebit_sig_e'(~(ie_stall_o | insert_bubble_i |
+                                              refetch_after_trap_o | halted_i |
+                                              icache_stall_i | mmu_i_stall_q));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Flush logic (combinational)
