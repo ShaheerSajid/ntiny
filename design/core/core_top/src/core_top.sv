@@ -2127,11 +2127,31 @@ wire [31:0] bpu_if_redirect_target = bpu_if_target_q;
 // bnez with sp 32 bytes off, reading a stale stack slot.
 // JAL targets resolve at EX with a 2-cycle penalty — acceptable cost.
 wire        bpu_is_branch_id = (ctrl_bus_if_id_raw.inst_type == BRANCH);
+// Hold the redirect during IE-stage stalls. The JAL comment above
+// documents the broader hazard: when bpu_redirect_fire asserts while
+// if_id_stall=1, the aligner reseats (fetch_flush + redirect_valid_i
+// to compressed_aligner) but the branch at the aligner output never
+// gets consumed (consumer_take_i = ~if_id_stall = 0). The branch is
+// dropped, never reaches IE, never resolves; the predicted-taken
+// target then commits unguarded. Reproduced by busybox strcmp's bne
+// following a DTLB-miss-stalled lbu — sub at the predicted target
+// retired with stale-equal operands and bsearch returned the wrong
+// keyword (TIN instead of TIF), misparsing /init.
+//
+// Gating on `!ie_stall` (not `!if_id_stall`) avoids a combinational
+// loop: if_id_stall includes id_no_insn_stall=~aligner_valid, and
+// aligner_valid feeds back through ctrl_bus_if_id.predicted_taken
+// → ctrl_bus_if_id_raw → bpu_is_branch_id → bpu_bht_btb_fire. ie_stall
+// only depends on registered IE-stage state, so no loop. This covers
+// the observed reproducer (load PTW miss); front-end stall variants
+// (icache_stall, mmu_i_stall) of the same hazard are still latent
+// but not yet reproduced.
 wire        bpu_bht_btb_fire = bpu_if_pred_valid
                               && bpu_is_branch_id && bpu_if_pred_taken
                               && insn_valid_id
                               && aligner_valid
-                              && !aligner_pred_is_branch;
+                              && !aligner_pred_is_branch
+                              && !ie_stall;
 
 // Return detection at ID
 wire [4:0]  id_rs1 = ctrl_bus_if_id_raw.rs1_int[4:0];
