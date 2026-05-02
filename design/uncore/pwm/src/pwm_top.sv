@@ -114,6 +114,7 @@ always_ff @( posedge clk_i or posedge rst_i ) begin : Writing_memory_mapped_regi
 				deadtime1	<=	writedata_i[15:0];
 			`PWM_DEADTIME2_REG:
 				deadtime2	<=	writedata_i[15:0];
+			default: ;  // unmapped register: ignore write
 		endcase
 	end
 end
@@ -146,6 +147,7 @@ always_ff @( posedge clk_i or posedge rst_i ) begin : readblock
 				readdata_o	<=	{16'b0,deadtime1};
 			`PWM_DEADTIME2_REG:
 				readdata_o	<=	{16'b0,deadtime2};
+			default: readdata_o <= 32'b0;  // unmapped register: read 0
 		endcase
 	end
 end

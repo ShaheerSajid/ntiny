@@ -241,7 +241,7 @@ function [LFSR_WIDTH+DATA_WIDTH-1:0] lfsr_mask(input [31:0] index);
 
                 // add XOR inputs from correct indicies
                 for (j = 1; j < LFSR_WIDTH; j = j + 1) begin
-                    if ((LFSR_POLY >> j) & 1) begin
+                    if (((LFSR_POLY >> j) & 1) != 0) begin
                         state_val = lfsr_mask_state[j-1] ^ state_val;
                         data_val = lfsr_mask_data[j-1] ^ data_val;
                     end
@@ -296,7 +296,7 @@ function [LFSR_WIDTH+DATA_WIDTH-1:0] lfsr_mask(input [31:0] index);
 
                 // add XOR inputs at correct indicies
                 for (j = 1; j < LFSR_WIDTH; j = j + 1) begin
-                    if ((LFSR_POLY >> j) & 1) begin
+                    if (((LFSR_POLY >> j) & 1) != 0) begin
                         lfsr_mask_state[j] = lfsr_mask_state[j] ^ state_val;
                         lfsr_mask_data[j] = lfsr_mask_data[j] ^ data_val;
                     end

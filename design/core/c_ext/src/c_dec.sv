@@ -4,6 +4,11 @@ module c_dec
 			    output reg [31:0] ins_32
 			);
 
+// RVC decoder uses top-of-block default (ins_32 = 0) and case branches
+// override for known patterns. Unknown 16-bit encodings produce ins_32=0
+// (treated as illegal by the main decoder downstream). Pragma scopes
+// the CASEINCOMPLETE suppression to this block only.
+/* verilator lint_off CASEINCOMPLETE */
 always_comb
 begin
 	ins_32 = 0;
@@ -253,5 +258,6 @@ begin
 				end
 	endcase
 end
+/* verilator lint_on CASEINCOMPLETE */
 endmodule 
 

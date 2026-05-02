@@ -107,7 +107,8 @@ begin
 		case (address_i)
 		3'd0:	DDR		<=	writedata_i;		// set DDR var logicister
 		3'd1:	Dout	<=	writedata_i;		// set Data out value (from  processor)
-		3'd3:	cmd		<=	writedata_i[7:0];	// set command var logicister value	
+		3'd3:	cmd		<=	writedata_i[7:0];	// set command var logicister value
+		default: ;  // unmapped register: ignore write
 		endcase
 		end
 	else if (read_i & chipselect_i)
@@ -116,7 +117,8 @@ begin
 		3'd0:	readdata_o		<=	DDR;		// Read DDR var logicister
 		3'd1:	readdata_o		<=	Dout;		// Read Data_out var logic
 		3'd2:	readdata_o		<=	in;		// Read Data_in value to processor
-		3'd3:	readdata_o		<=	cmd;	// set command var logicister value	
+		3'd3:	readdata_o		<=	cmd;	// set command var logicister value
+		default: readdata_o <= 32'b0;  // unmapped register: read 0
 		endcase
 		end
 	 

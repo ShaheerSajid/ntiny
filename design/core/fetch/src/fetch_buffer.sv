@@ -113,7 +113,11 @@ module fetch_buffer
                 2'b10: begin
                     // push only: append at the tail (count_q index)
                     if (!full_o) begin
-                        entries[count_q] <= push_entry_i;
+                        // !full_o guarantees count_q < DEPTH so the
+                        // explicit truncation to log2(DEPTH) bits is
+                        // safe — it just silences Verilator's
+                        // WIDTHTRUNC warning on the array index.
+                        entries[count_q[$clog2(DEPTH)-1:0]] <= push_entry_i;
                         count_q <= count_q + 1'b1;
                     end
                     // overflow case: drop the push (overflow_o asserted

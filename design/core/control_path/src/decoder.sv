@@ -45,6 +45,14 @@ assign opcode = rv32_opcodes_e'(instruction_i[6:0]);
 assign funct5 = instruction_i[24:20];
 assign funct7 = instruction_i[31:25];
 
+// Decoder uses top-of-block defaults: every output is initialised at
+// the start of the always_comb, then specific case branches override
+// where applicable. Any unmatched opcode/funct slot falls through and
+// keeps the default. This is intentional for an RV32IMAC+Zb*+Zicond
+// decoder that doesn't enumerate every possible 25-bit operand combo.
+// The CASEINCOMPLETE warnings from Verilator are therefore noise; the
+// pragma scopes the suppression to this block only.
+/* verilator lint_off CASEINCOMPLETE */
 always_comb
 begin
 
@@ -429,6 +437,7 @@ begin
     `endif
     endcase
 end
+/* verilator lint_on CASEINCOMPLETE */
 
 assign ctrl_bus_o.inst_type = opcode;
 assign ctrl_bus_o.br_cond = br_cond;

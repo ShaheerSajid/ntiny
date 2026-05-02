@@ -47,12 +47,13 @@ begin
   else if (write_i & chipselect_i)
   begin 
     case (address_i)
-      `CONTROL:	    control     <= writedata_i;		
-      `CRC_INIT:	  crc_init    <= writedata_i;	
-      `CRC_16_IBM:  crc_16_ibm  <= writedata_i;		
+      `CONTROL:	    control     <= writedata_i;
+      `CRC_INIT:	  crc_init    <= writedata_i;
+      `CRC_16_IBM:  crc_16_ibm  <= writedata_i;
       `CRC_16_CCIT:	crc_16_ccit <= writedata_i;
       `CRC_32:      crc_32      <= writedata_i;
       `XOR_OUT:     xor_out     <= writedata_i;
+      default: ;  // unmapped register: ignore write
     endcase
   end
 end

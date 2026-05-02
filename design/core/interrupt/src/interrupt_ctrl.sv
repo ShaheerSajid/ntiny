@@ -385,7 +385,10 @@ assign trap_to_s_o = delegate_to_s;
 
 // ── Handler address ─────────────────────────────────────────────────────
 wire [31:0] base_addr = {vec_i[31:2], 2'b00};
-assign handler_addr_o = (vec_i[0] && is_interrupt) ? (base_addr + {24'b0, cause_code, 2'b00}) : base_addr;
+// cause_code is 8 bits (always < 64 in practice), shift up by 2 →
+// max 10 bits used. Pad to 32 explicitly (was 24'b0 + 8 + 2 = 34 bits,
+// truncation warned by Verilator).
+assign handler_addr_o = (vec_i[0] && is_interrupt) ? (base_addr + {22'b0, cause_code, 2'b00}) : base_addr;
 
 assign interrupt_src_o = {20'd0, ext_itr_i, 3'b000, timer_itr_i, 3'b000, soft_itr_i, 3'b000};
 

@@ -56,11 +56,16 @@ logic        loaded;     // operands have been loaded
 wire ready = (n == 0);
 
 // ── Restoring division iteration (combinational) ────────────────────────
-wire        N_bit   = N[n - 1'b1];                    // current dividend bit
+// n is 6-bit to count 0..32, but indexes a 32-bit vector. The path is
+// only consumed when n>0 (gated by !ready downstream), so the n-1
+// underflow when n==0 produces a stale read that's never used. Explicit
+// 5-bit truncation silences WIDTHTRUNC.
+wire [4:0]  n_idx   = (n - 1'b1);
+wire        N_bit   = N[n_idx];                        // current dividend bit
 wire [31:0] r_shift = {R[30:0], N_bit};                // shift remainder, bring in bit
 wire        r_geq_d = (r_shift >= D);                  // trial subtraction
 wire [31:0] r_next  = r_geq_d ? (r_shift - D) : r_shift;
-wire [31:0] q_bit   = r_geq_d ? (32'd1 << (n - 1'b1)) : 32'd0;
+wire [31:0] q_bit   = r_geq_d ? (32'd1 << n_idx) : 32'd0;
 
 // ── Sequential logic ────────────────────────────────────────────────────
 always_ff @(posedge clk_i or posedge reset_i) begin

@@ -97,6 +97,7 @@ module i2c_top
                         if(s_core_en)
                             r_cmd <= avl_wdata[7:0];
                     end
+                    default: ;  // unmapped register: ignore write
                 endcase
             end
             else
