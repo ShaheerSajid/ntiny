@@ -1,4 +1,9 @@
 CONFIG_BLK_DEV_INITRD=y
+# Pin the version string deterministically (avoids "-dirty" from
+# scripts/setlocalversion when the kernel tree has uncommitted ntiny
+# patches): 6.6.0-ntiny instead of 6.6.0-dirty.
+CONFIG_LOCALVERSION="-ntiny"
+# CONFIG_LOCALVERSION_AUTO is not set
 CONFIG_INITRAMFS_SOURCE="@NTINY_LINUX@/initramfs.cpio"
 CONFIG_INITRAMFS_COMPRESSION_NONE=y
 CONFIG_EXPERT=y
@@ -11,7 +16,7 @@ CONFIG_RISCV_ISA_ZBB=y
 CONFIG_RISCV_SLOW_UNALIGNED_ACCESS=y
 # CONFIG_IRQ_STACKS is not set
 CONFIG_RISCV_SBI_V01=y
-CONFIG_CMDLINE="earlycon=sbi console=hvc0 loglevel=8 ignore_loglevel debug initcall_debug"
+CONFIG_CMDLINE="earlycon=sbi console=hvc0"
 CONFIG_CMDLINE_FORCE=y
 # CONFIG_STACKPROTECTOR is not set
 # CONFIG_BLOCK is not set

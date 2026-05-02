@@ -38,9 +38,12 @@ static volatile void *uart_base;
 
 static void ntiny_uart_putc(char c)
 {
-    /* Don't poll TXFULL — the simulated UART DPI receives bit-by-bit at
-       baud rate, and polling would stall for ~4340 cycles per character.
-       Just write directly; the DPI captures every write. */
+    /* At 250000 baud one byte takes ~2000 cycles to shift out — small
+       enough that polling TXFULL is affordable, and necessary so the
+       SoC paces TX bytewise. Without pacing, back-to-back writes can
+       race the uartdpi RX state machine and corrupt PTS output. */
+    while (readl(uart_base + UART_STATUS) & UART_STATUS_TXFULL)
+        ;
     writel(c, uart_base + UART_TX);
 }
 
@@ -62,8 +65,11 @@ static void ntiny_uart_init(void)
 
     /* Reset TX/RX + enable interrupts (same as bare-metal uart_init) */
     writel((1 << 2) | (1 << 1) | (1 << 0), uart_base + UART_CONTROL);
-    /* Baud rate = clk / (baud + 1): 50MHz / 115200 - 1 = 433 */
-    writel(433, uart_base + UART_BAUDRATE);
+    /* Baud rate = clk / (baud + 1). 250000 baud: 50MHz/250000 - 1 = 199.
+       Compromise between 115200 (slow sim wallclock from polling-free
+       per-symbol TX delay) and 1M+ (uartdpi RX state machine races
+       SoC TX at high rates). testbench/tb_soc_top.v BAUD must match. */
+    writel(199, uart_base + UART_BAUDRATE);
 
     sbi_console_set_device(&ntiny_uart);
 }
