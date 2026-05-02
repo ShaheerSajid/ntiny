@@ -73,7 +73,7 @@ module hazard_unit (
     // signal expresses that invariant without including the
     // ~aligner_valid term, which would form a combinational loop with
     // bpu_redirect_fire → ctrl_bus_if_id.predicted_taken → ... back to
-    // aligner_valid (Verilator catches that as DIDNOTCONVERGE).
+    // aligner_valid (caught at runtime as DIDNOTCONVERGE).
     output onebit_sig_e consumer_can_take_o,
 
     // ── Post-trap / stale ───────────────────────────────────────────────

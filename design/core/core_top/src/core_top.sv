@@ -383,7 +383,7 @@ debug_ctrl debug_ctrl_inst (
     .am_en_i          (am_en_i),
     .dmem_ready_i     (dmem_port.ready),
     // Pipeline state
-    .id_ebreak_i      (ctrl_bus_if_id.ebreak),
+    .id_ebreak_i      (ctrl_bus_if_id_raw.ebreak),  // _raw: comb-loop break (see interrupt_ctrl input note)
     .c_busy_i         (c_busy),
     .pc_id_i          (pc_id),
     .next_insn_addr_i (next_instruction_addr),
@@ -478,16 +478,27 @@ wire csr_invalid;  // unimplemented CSR accessed in IE stage
 // xRET commit moved to wb_trap_unit (Phase 4.3); mmu_priv override removed
 // (priv_level updates at the cycle the xRET commits in IWB, so the
 // next-fetch path uses the right priv naturally — no override needed).
+//
+// The id_* inputs read from ctrl_bus_if_id_raw, not ctrl_bus_if_id. The
+// only difference between the two is predicted_taken, which the
+// privilege_unit doesn't care about. Reading from _raw breaks an
+// otherwise-real combinational cycle:
+//   bpu_redirect_fire -> ctrl_bus_if_id.predicted_taken -> privilege_unit
+//   -> illegal_insn_id -> interrupt_ctrl (ebreak/ecall/illegal_valid)
+//   -> interrupt_valid -> amo_unit -> mmu_d_access_fault -> ie_stall
+//   -> consumer_can_take -> bpu_bht_btb_fire = bpu_redirect_fire
+// The UNOPTFLAT warnings on the three *_valid signals in interrupt_ctrl
+// disappear once this read is moved to _raw.
 privilege_unit privilege_unit_inst (
     // Current privilege state
     .priv_level_i       (priv_level),
     .status_csr_i       (status_csr),
-    // Decoded instruction (ID stage)
-    .id_mret_i          (ctrl_bus_if_id.mret),
-    .id_sret_i          (ctrl_bus_if_id.sret),
-    .id_sfence_vma_i    (ctrl_bus_if_id.sfence_vma),
-    .id_csr_op_i        (ctrl_bus_if_id.csr_op),
-    .id_csr_addr_i      (ctrl_bus_if_id.csr_addr),
+    // Decoded instruction (ID stage) — _raw is intentional, see above
+    .id_mret_i          (ctrl_bus_if_id_raw.mret),
+    .id_sret_i          (ctrl_bus_if_id_raw.sret),
+    .id_sfence_vma_i    (ctrl_bus_if_id_raw.sfence_vma),
+    .id_csr_op_i        (ctrl_bus_if_id_raw.csr_op),
+    .id_csr_addr_i      (ctrl_bus_if_id_raw.csr_addr),
     // Illegal instruction outputs
     .illegal_mret_o     (illegal_mret),
     .illegal_sret_o     (illegal_sret),
@@ -1704,8 +1715,11 @@ interrupt_ctrl interrupt_ctrl_inst
   .medeleg_i          (medeleg),
   .mideleg_i          (mideleg),
   // ID-stage exception sources (raw — gating done inside)
-  .ecall_raw_i        (ctrl_bus_if_id.ecall),
-  .ebreak_raw_i       (ctrl_bus_if_id.ebreak),
+  // Read decoder-direct fields from ctrl_bus_if_id_raw to avoid
+  // closing a comb cycle via predicted_taken (which only the IE
+  // register wall consumes).
+  .ecall_raw_i        (ctrl_bus_if_id_raw.ecall),
+  .ebreak_raw_i       (ctrl_bus_if_id_raw.ebreak),
   .illegal_insn_i     (illegal_insn_id),
   .ie_csr_invalid_i   (csr_invalid),
   .insn_valid_id_i    (insn_valid_id),

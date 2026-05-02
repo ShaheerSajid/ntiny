@@ -51,10 +51,10 @@ module alu
 			.valid_o(div_valid)
 		);
 
-	// Explicit [31:0] truncation: the >> 32 already shifts the high
-	// 32 bits down to the low 32 (logical shift), so the upper bits
-	// of the 64-bit shift result are zero. The bit-select silences
-	// Verilator WIDTHTRUNC; the LHS value is unchanged.
+	// Explicit upper-half bit-select: a 32-bit*32-bit multiply gives
+	// 64 bits; mulh* takes the high half. Hoisting into 64-bit wires
+	// + [63:32] makes the upper-half pick explicit (was implicitly
+	// produced by `>> 32` followed by a 32-bit assignment).
 	wire [63:0] mulh_full   = $signed({{32{a_i[31]}},a_i}) * $signed({{32{b_i[31]}},b_i});
 	wire [63:0] mulhu_full  = {32'd0,a_i} * {32'd0,b_i};
 	wire [63:0] mulhsu_full = $signed({{32{a_i[31]}},a_i}) * $signed({32'd0,b_i});
