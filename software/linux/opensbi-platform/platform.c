@@ -27,8 +27,10 @@
 #define NTINY_TIMER_FREQ        50000000UL  /* 50 MHz */
 
 /* ── ntiny UART registers ────────────────────────────────────── */
+#define UART_RX         0x00
 #define UART_TX         0x04
 #define UART_STATUS     0x08
+#define UART_STATUS_RXVALID (1 << 0)
 #define UART_STATUS_TXFULL  (1 << 3)
 #define UART_BAUDRATE   0x10
 #define UART_CONTROL    0x0C
@@ -49,8 +51,9 @@ static void ntiny_uart_putc(char c)
 
 static int ntiny_uart_getc(void)
 {
-    /* RX not implemented for now — return -1 (no char) */
-    return -1;
+    if (!(readl(uart_base + UART_STATUS) & UART_STATUS_RXVALID))
+        return -1;
+    return readl(uart_base + UART_RX) & 0xff;
 }
 
 static struct sbi_console_device ntiny_uart = {

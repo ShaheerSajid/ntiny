@@ -16,7 +16,7 @@ CONFIG_RISCV_ISA_ZBB=y
 CONFIG_RISCV_SLOW_UNALIGNED_ACCESS=y
 # CONFIG_IRQ_STACKS is not set
 CONFIG_RISCV_SBI_V01=y
-CONFIG_CMDLINE="earlycon=sbi console=hvc0"
+CONFIG_CMDLINE="earlycon=sbi console=hvc0 loglevel=8 ignore_loglevel debug initcall_debug trace_event=syscalls:sys_enter*,syscalls:sys_exit*"
 CONFIG_CMDLINE_FORCE=y
 # CONFIG_STACKPROTECTOR is not set
 # CONFIG_BLOCK is not set
@@ -33,4 +33,5 @@ CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_SERIAL_EARLYCON_RISCV_SBI=y
 CONFIG_HVC_RISCV_SBI=y
 CONFIG_TMPFS=y
-# CONFIG_FTRACE is not set
+CONFIG_FTRACE=y
+CONFIG_FTRACE_SYSCALLS=y
