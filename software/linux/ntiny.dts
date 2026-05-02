@@ -98,7 +98,9 @@
             reg = <0x0c000000 0x02000000>;
             #interrupt-cells = <1>;
             interrupt-controller;
-            interrupts-extended = <&cpu0_intc 11>;
+            /* Two contexts per hart: M-mode (IRQ 11) + S-mode (IRQ 9).
+             * Linux PLIC driver registers a handler per context. */
+            interrupts-extended = <&cpu0_intc 11>, <&cpu0_intc 9>;
             riscv,ndev = <6>;
         };
 

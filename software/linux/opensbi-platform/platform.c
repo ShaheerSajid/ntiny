@@ -105,7 +105,7 @@ static struct plic_data plic = {
     .size        = NTINY_PLIC_SIZE,
     .num_src     = NTINY_PLIC_NUM_SRC,
     .context_map = {
-        [0] = { 0, -1 },   /* hart 0: M-mode context only, no S-mode context */
+        [0] = { 0, 1 },    /* hart 0: M-mode = ctx 0, S-mode = ctx 1 */
     },
 };
 

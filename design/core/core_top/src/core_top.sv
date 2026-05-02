@@ -35,7 +35,8 @@ module core_top
 	output onebit_sig_e am_done_o,
 
 
-  input ext_itr_i,
+  input ext_itr_i,        // MEIP from PLIC ctx 0
+  input s_ext_itr_i,      // SEIP from PLIC ctx 1
   input timer_itr_i,
   input soft_itr_i,
   input [63:0] mtime_i,       // CLINT mtime for TIME/TIMEH CSRs
@@ -2310,6 +2311,7 @@ csr_unit csr_unit_inst
   .epc_i                (epc_csr),
   .mtval_i              (mtval_csr),
   .interrupt_src_i      (interrupt_src),
+  .ext_irq_s_hw_i       (s_ext_itr_i),
   // Phase 4.3: xRET commits at IWB via wb_trap_unit. ret_fire/sret_fire
   // from privilege_unit (ID-stage) are no longer used as commit pulses;
   // they will be deleted in the Phase 4 cleanup pass once nothing else

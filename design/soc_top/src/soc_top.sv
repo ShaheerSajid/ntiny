@@ -275,7 +275,8 @@ module soc_top
 
     // ── Interrupt signals ───────────────────────────────────
     logic timer_interrupt;
-    logic ext_interrupt;
+    logic ext_interrupt;     // MEIP (PLIC ctx 0)
+    logic s_ext_interrupt;   // SEIP (PLIC ctx 1)
     logic soft_intr;
     logic i2c_interrupt;
     logic spi_interrupt;
@@ -313,6 +314,7 @@ module soc_top
         .am_done_o      (am_done),
 
         .ext_itr_i      (ext_interrupt),
+        .s_ext_itr_i    (s_ext_interrupt),
         .timer_itr_i    (timer_interrupt),
         .soft_itr_i     (soft_intr),
         .mtime_i        (clint_mtime),
@@ -511,7 +513,8 @@ module soc_top
         // Sources: 1=uart_rx, 2=uart_tx, 3=spi, 4=i2c, 5=gpio[0], 6=gpio[1]
         .sources_i    ({gpio_interrupt, i2c_interrupt, spi_interrupt,
                         uart_tx_interrupt, uart_rx_interrupt}),
-        .ext_irq_o    (ext_interrupt)
+        .ext_irq_m_o  (ext_interrupt),
+        .ext_irq_s_o  (s_ext_interrupt)
     );
 
 endmodule

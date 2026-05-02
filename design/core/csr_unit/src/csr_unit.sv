@@ -28,6 +28,12 @@ module csr_unit (
   input [31:0]epc_i,
   input [31:0]mtval_i,
   input [31:0]interrupt_src_i,
+  // SEIP HW signal from PLIC ctx-1 output. Per RISC-V spec mip.SEIP is
+  // a UNION of HW (this input) and SW-set bit (CSR write to mip[9]).
+  // We keep _MIP[9] for the SW component and OR this signal into mip
+  // reads / ip_o so interrupt_ctrl + Linux see HW SEIP without losing
+  // any SW-injected SEIP that OpenSBI's legacy timer flow may set.
+  input ext_irq_s_hw_i,
   input ret_i,                    // MRET
   input sret_i,                   // SRET
 
@@ -514,7 +520,7 @@ module csr_unit (
 			MEPC:           csr_value_o = _MEPC;
 			MCAUSE:         csr_value_o = _MCAUSE;
 			MTVAL:          csr_value_o = _MTVAL;
-			MIP:            csr_value_o = _MIP;
+			MIP:            csr_value_o = _MIP | (ext_irq_s_hw_i ? 32'h0000_0200 : 32'h0);
 			MCYCLE:         csr_value_o = _MCYCLE;
 			MINSTRET:       csr_value_o = _MINSTRET;
 			MCYCLEH:        csr_value_o = _MCYCLEH;
@@ -541,7 +547,7 @@ module csr_unit (
 			SEPC:           csr_value_o = _SEPC;
 			SCAUSE:         csr_value_o = _SCAUSE;
 			SBADADDR:       csr_value_o = _STVAL;
-			SIP:            csr_value_o = _MIP & S_INT_MASK;
+			SIP:            csr_value_o = (_MIP | (ext_irq_s_hw_i ? 32'h0000_0200 : 32'h0)) & S_INT_MASK;
 			SATP:           csr_value_o = _SATP;
 			// PMP CSRs
 			PMPCFG0:        csr_value_o = _PMPCFG[0];
@@ -573,7 +579,9 @@ module csr_unit (
 	end
 
 	// ── Outputs ──────────────────────────────────────────────────
-	assign ip_o      = _MIP;
+	// ip_o feeds interrupt_ctrl. SEIP HW signal ORed in so PLIC ctx-1
+	// assertions trigger s_external_valid without needing CSR write.
+	assign ip_o      = _MIP | (ext_irq_s_hw_i ? 32'h0000_0200 : 32'h0);
 	assign ie_o      = _MIE;
 	assign vec_o     = trap_to_s_i ? _STVEC : _MTVEC;
 	assign mtvec_o   = _MTVEC;

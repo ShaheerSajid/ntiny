@@ -13,6 +13,10 @@ module interrupt_ctrl (
     input rst_i,
 
     // ── Async interrupt sources ─────────────────────────────────────────
+    // ext_itr_i (MEIP) drives interrupt_src_o[11]. SEIP HW driving lives
+    // in csr_unit (where it's ORed into mip[9] for reads + ip_o), so the
+    // ip_i input here already reflects PLIC ctx-1 assertions and the
+    // existing s_external_valid logic works unchanged.
     input ext_itr_i,
     input timer_itr_i,
     input soft_itr_i,
