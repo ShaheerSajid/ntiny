@@ -53,6 +53,34 @@ layouts and semantics are public.
 
 ## Phases
 
+### Phase 1.5 — PLIC S-mode context (HARD PREREQUISITE, discovered 2026-05-02)
+
+Discovered while booting Phase 1 DT: the PLIC HW + opensbi-platform.c
+declare M-mode context only (`context_map [0] = {0,-1}`). Linux runs in
+S-mode and crashes inside `plic_irq_enable+0x30` (NULL deref) the moment
+any peripheral driver requests an IRQ — backtrace through
+`request_threaded_irq -> __setup_irq -> irq_startup -> irq_enable ->
+plic_irq_enable`.
+
+This blocks the entire Phase 2 sequence — every Phase 2 step turns on a
+peripheral driver that requests IRQs from the PLIC, and every one will
+hit the same NULL deref until S-mode context is wired.
+
+Required:
+1. PLIC RTL: add S-mode context (its own enable/threshold/claim
+   registers + S-mode external IRQ output line).
+2. Core: route the PLIC's S-mode external IRQ to the SEIP bit
+   (privilege_unit / interrupt_ctrl).
+3. opensbi-platform.c: set `context_map [0] = { 0, 1 }` (M-mode ctx 0,
+   S-mode ctx 1).
+4. ntiny.dtsi: `plic { interrupts-extended = <&cpu0_intc 11>,
+   <&cpu0_intc 9>; }` so the Linux PLIC driver registers both contexts.
+5. Smoke test: an S-mode peripheral driver requests an IRQ without
+   crashing.
+
+Until this is done, Phase 1 ships peripheral DT nodes with
+`status = "disabled"` so drivers don't probe and the kernel boots.
+
 ### Phase 1 — Devicetree scaffolding (low risk, ~1 session)
 
 - Write `software/linux/ntiny.dtsi` describing every peripheral against

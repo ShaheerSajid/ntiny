@@ -1,5 +1,40 @@
 /dts-v1/;
 
+/*
+ * ntiny RISC-V SoC devicetree.
+ *
+ * Phase 1 of the peripheral-standardisation plan
+ * (docs/peripheral_standardization_plan.md): peripheral nodes use the
+ * upstream Linux IP "compatible" strings (sifive,uart0/gpio0/spi0/pwm,
+ * opencores,i2c-ocores) so the in-tree kernel drivers will probe.
+ *
+ * Until the matching Phase 2 RTL refactors land, peripheral nodes
+ * are marked status="disabled" so the matching drivers don't probe.
+ * Each Phase 2 step flips its peripheral's status to "okay" once
+ * RTL + bare-metal driver are refactored in lockstep.
+ *
+ * (PLIC S-mode context is also a prerequisite — current PLIC HW has
+ * M-mode context only [opensbi platform.c context_map [0] = {0,-1}],
+ * which means Linux running in S-mode crashes inside plic_irq_enable
+ * the moment any driver requests an IRQ. Adding the S-mode context
+ * to the PLIC RTL is its own pre-Phase-2 task.)
+ *
+ * HVC-over-SBI remains the active console throughout.
+ *
+ * Memory map (matches design/interconnect/src/addr_decoder.sv):
+ *   0x10000000  UART
+ *   0x10010000  SPI
+ *   0x10020000  I2C
+ *   0x10030000  GPIO
+ *   0x10040000  PWM
+ *   0x10050000  TIMER  (will be dropped Phase 3 — CLINT covers OS tick)
+ *   0x10060000  CRC
+ *   0x02000000  CLINT
+ *   0x0C000000  PLIC   (6 sources: 1=uart_rx, 2=uart_tx, 3=spi,
+ *                       4=i2c, 5=gpio[0], 6=gpio[1])
+ *   0x80000000  RAM
+ */
+
 / {
     #address-cells = <1>;
     #size-cells = <1>;
@@ -8,7 +43,6 @@
 
     chosen {
         bootargs = "earlycon=sbi console=hvc0";
-        stdout-path = "/soc/serial@10000000";
     };
 
     cpus {
@@ -25,11 +59,10 @@
             riscv,isa-extensions = "i", "m", "a", "c", "b", "zicsr", "zifencei", "zihintpause", "zihintntl", "zicbop", "zicntr", "zihpm", "zicond", "zba", "zbb", "zbc", "zbs", "zkr";
             mmu-type = "riscv,sv32";
 
-            interrupt-controller {
+            cpu0_intc: interrupt-controller {
                 #interrupt-cells = <1>;
                 interrupt-controller;
                 compatible = "riscv,cpu-intc";
-                phandle = <1>;
             };
         };
     };
@@ -37,6 +70,15 @@
     memory@80000000 {
         device_type = "memory";
         reg = <0x80000000 0x08000000>;  /* 128 MB */
+    };
+
+    /* Single fixed clock — the SoC runs everything off one 50 MHz
+     * domain. SiFive + OpenCores drivers all need a clock handle. */
+    soc_clk: clock-50m {
+        compatible = "fixed-clock";
+        #clock-cells = <0>;
+        clock-frequency = <50000000>;
+        clock-output-names = "soc_clk";
     };
 
     soc {
@@ -48,24 +90,91 @@
         clint@2000000 {
             compatible = "riscv,clint0";
             reg = <0x02000000 0x10000>;
-            interrupts-extended = <&{/cpus/cpu@0/interrupt-controller} 3>,  /* MSIP */
-                                  <&{/cpus/cpu@0/interrupt-controller} 7>;  /* MTIP */
+            interrupts-extended = <&cpu0_intc 3>, <&cpu0_intc 7>;
         };
 
-        plic@c000000 {
+        plic: plic@c000000 {
             compatible = "riscv,plic0";
             reg = <0x0c000000 0x02000000>;
             #interrupt-cells = <1>;
             interrupt-controller;
-            interrupts-extended = <&{/cpus/cpu@0/interrupt-controller} 11>; /* MEIP */
+            interrupts-extended = <&cpu0_intc 11>;
             riscv,ndev = <6>;
-            phandle = <2>;
         };
 
+        /* UART0 — target sifive,uart0 (Phase 2b will refactor RTL). */
         serial@10000000 {
-            compatible = "ntiny,uart";
+            compatible = "sifive,uart0";
             reg = <0x10000000 0x1000>;
-            /* UART registers: RX=0x0, TX=0x4, STATUS=0x8, CONTROL=0xC, BAUDRATE=0x10 */
+            interrupt-parent = <&plic>;
+            interrupts = <1>;          /* uart_rx (single muxed IRQ) */
+            clocks = <&soc_clk>;
+            status = "disabled";
+        };
+
+        /* SPI0 — target sifive,spi0 (Phase 2d). */
+        spi@10010000 {
+            compatible = "sifive,spi0";
+            reg = <0x10010000 0x1000>;
+            interrupt-parent = <&plic>;
+            interrupts = <3>;
+            clocks = <&soc_clk>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+            status = "disabled";
+        };
+
+        /* I2C0 — target opencores,i2c-ocores (Phase 2c). */
+        i2c@10020000 {
+            compatible = "opencores,i2c-ocores";
+            reg = <0x10020000 0x1000>;
+            interrupt-parent = <&plic>;
+            interrupts = <4>;
+            clocks = <&soc_clk>;
+            clock-frequency = <100000>;
+            reg-shift = <0>;
+            reg-io-width = <1>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+            status = "disabled";
+        };
+
+        /* GPIO — target sifive,gpio0 (Phase 2a). */
+        gpio: gpio@10030000 {
+            compatible = "sifive,gpio0";
+            reg = <0x10030000 0x1000>;
+            interrupt-parent = <&plic>;
+            interrupts = <5>, <6>;
+            clocks = <&soc_clk>;
+            #gpio-cells = <2>;
+            gpio-controller;
+            #interrupt-cells = <2>;
+            interrupt-controller;
+            status = "disabled";
+        };
+
+        /* PWM — target sifive,pwm0 (Phase 2e). No PWM IRQs wired in
+         * RTL today; driver will fall back to non-IRQ mode. */
+        pwm@10040000 {
+            compatible = "sifive,pwm0";
+            reg = <0x10040000 0x1000>;
+            clocks = <&soc_clk>;
+            #pwm-cells = <3>;
+            status = "disabled";
+        };
+
+        /* TIMER — to be dropped Phase 3 (CLINT mtime covers OS tick). */
+        timer@10050000 {
+            compatible = "generic-uio";
+            reg = <0x10050000 0x1000>;
+            status = "disabled";
+        };
+
+        /* CRC — exposed via UIO for userspace mmap (Phase 3). */
+        crc@10060000 {
+            compatible = "generic-uio";
+            reg = <0x10060000 0x1000>;
+            status = "disabled";
         };
     };
 };
