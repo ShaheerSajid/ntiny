@@ -45,25 +45,30 @@ DTB         := $(CURDIR)/ntiny.dtb
 KERNEL_PATCH := $(CURDIR)/patches/0001-ntiny-kernel-required.patch
 DTS_MAKEFILE := $(CURDIR)/patches/ntiny-dts-Makefile
 
+BUILDROOT_DIR ?= /home/shaheer/Downloads/buildroot
+
 .PHONY: all prepare clone-linux clone-opensbi apply-patches \
         dtb kernel opensbi ram-hex build force-rm rebuild run \
+        initramfs-rebuild \
         clean distclean wipe help
 
 all: build
 
 help:
 	@echo "Targets:"
-	@echo "  make prepare   - clone Linux + OpenSBI into ./external/, apply ntiny patches"
-	@echo "  make build     - rebuild kernel + opensbi + ram.hex (force-fresh image)"
-	@echo "  make rebuild   - alias for build (always force-rm Image + fw_payload first)"
-	@echo "  make run       - launch the verilator sim and stream uart.log"
-	@echo "  make clean     - wipe local build artifacts (dtb, ram.hex)"
-	@echo "  make distclean - also wipe Linux/OpenSBI build outputs"
-	@echo "  make wipe      - delete the entire ./external/ tree"
+	@echo "  make prepare           - clone Linux + OpenSBI into ./external/, apply ntiny patches"
+	@echo "  make build             - rebuild kernel + opensbi + ram.hex (force-fresh image)"
+	@echo "  make rebuild           - alias for build (always force-rm Image + fw_payload first)"
+	@echo "  make run               - launch the verilator sim and stream uart.log"
+	@echo "  make initramfs-rebuild - rebuild busybox + repack cpio (requires \$$BUILDROOT_DIR)"
+	@echo "  make clean             - wipe local build artifacts (dtb, ram.hex)"
+	@echo "  make distclean         - also wipe Linux/OpenSBI build outputs"
+	@echo "  make wipe              - delete the entire ./external/ tree"
 	@echo ""
 	@echo "Paths:"
 	@echo "  LINUX_DIR     = $(LINUX_DIR)"
 	@echo "  OPENSBI_DIR   = $(OPENSBI_DIR)"
+	@echo "  BUILDROOT_DIR = $(BUILDROOT_DIR)"
 	@echo "  TOOLCHAIN_BIN = $(TOOLCHAIN_BIN)"
 
 # ── prepare: clone external repos and apply ntiny patches ────────────
@@ -140,7 +145,13 @@ ntiny.dtb: ntiny.dts
 
 kernel: $(KERNEL_IMG)
 
-$(KERNEL_IMG): $(CURDIR)/ntiny_defconfig $(INITRAMFS) $(KERNEL_PATCH)
+# Order-only dep on apply-patches: ntiny_defconfig is always re-installed
+# into arch/riscv/configs/ before the kernel build, so working-tree edits
+# to the defconfig actually reach .config. Without this, kbuild's
+# olddefconfig only fills in newly-introduced symbols and silently keeps
+# stale values from a prior .config — the trap that hid the psmouse
+# initcall Oops while pty_init looked like the failure point.
+$(KERNEL_IMG): $(CURDIR)/ntiny_defconfig $(INITRAMFS) $(KERNEL_PATCH) | apply-patches
 	@if [ ! -d $(LINUX_DIR) ]; then \
 		echo "ERROR: $(LINUX_DIR) not found. Run 'make prepare' first."; \
 		exit 1; \
@@ -189,6 +200,36 @@ run:
 		./Vtb_soc_top --timeout 1000000000 &
 	@sleep 1
 	@tail -f $(SIM_DIR)/uart.log
+
+# ── initramfs-rebuild: rebuild busybox in buildroot, repack the cpio ──
+# initramfs.cpio is a SHIPPED BINARY in this repo. Editing busybox
+# source (e.g. shell/ash.c) under $(BUILDROOT_DIR)/output/build/ does
+# nothing on its own — buildroot must rebuild busybox AND repack the
+# rootfs cpio, then you copy that cpio over $(INITRAMFS).
+#
+# This target stops short of the copy on purpose, so cpio rotation is
+# always a deliberate step you can git-diff and revert.
+initramfs-rebuild:
+	@if [ ! -d $(BUILDROOT_DIR) ]; then \
+		echo "ERROR: BUILDROOT_DIR=$(BUILDROOT_DIR) not found."; \
+		echo "Set BUILDROOT_DIR=/path/to/buildroot or clone buildroot there."; \
+		exit 1; \
+	fi
+	@echo "==> Rebuilding busybox in $(BUILDROOT_DIR)"
+	@cd $(BUILDROOT_DIR) && $(MAKE) busybox-rebuild
+	@echo "==> Repacking rootfs cpio"
+	@cd $(BUILDROOT_DIR) && $(MAKE)
+	@NEW_CPIO=$(BUILDROOT_DIR)/output/images/rootfs.cpio; \
+	 if [ -f $$NEW_CPIO ]; then \
+		echo ""; \
+		echo "==> New cpio ready: $$NEW_CPIO"; \
+		echo "    To activate it, run:"; \
+		echo "      cp $$NEW_CPIO $(INITRAMFS)"; \
+		echo "      $(MAKE) build"; \
+	 else \
+		echo "ERROR: expected $$NEW_CPIO, not produced. Inspect buildroot output."; \
+		exit 1; \
+	 fi
 
 # ── cleanup ─────────────────────────────────────────────────────────
 clean:

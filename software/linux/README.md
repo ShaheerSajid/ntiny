@@ -74,12 +74,36 @@ idempotently and is also re-runnable any time you suspect `.config` got reset.
 | Target | Action |
 |--------|--------|
 | `prepare` | clone Linux + OpenSBI under `external/`, apply patches, install defconfig |
-| `build` (= `rebuild`) | force-rebuild kernel + opensbi + `ram.hex` |
+| `build` (= `rebuild`) | force-rebuild kernel + opensbi + `ram.hex`. `apply-patches` runs as an order-only dep, so working-tree edits to `ntiny_defconfig` are picked up automatically |
 | `run` | launch verilator sim and tail `uart.log` |
-| `apply-patches` | re-run patch + defconfig install (use if `.config` looks wrong) |
+| `apply-patches` | re-run patch + defconfig install. No longer required before `build` (it's chained in) — keep it for manual re-resolve / debugging |
+| `initramfs-rebuild` | rebuild busybox in `$BUILDROOT_DIR` and repack `rootfs.cpio`. Stops before overwriting `software/linux/initramfs.cpio` so cpio rotation is always deliberate. See *Initramfs (busybox)* below |
 | `clean` | remove `ntiny.dtb` and `flows/simulation/ram.hex` |
 | `distclean` | also `mrproper` Linux and `make clean` OpenSBI |
 | `wipe` | nuke the entire `external/` tree |
+
+## Initramfs (busybox)
+
+`initramfs.cpio` is **a shipped binary** in this repo (~930 KiB, gitignored
+nothing, just committed). Most contributors never need the full buildroot
+toolchain — they pull this repo, build the kernel, get a working boot.
+
+If you do need to modify userspace (busybox config, `/etc/init.d/` scripts,
+ash sources), you regenerate the cpio out-of-tree from
+[buildroot](https://buildroot.org/) and copy the result in:
+
+```bash
+# point the Makefile at your buildroot tree (default: ~/Downloads/buildroot)
+make BUILDROOT_DIR=/path/to/buildroot initramfs-rebuild
+
+# the target stops here — copy the new cpio in deliberately
+cp $BUILDROOT_DIR/output/images/rootfs.cpio software/linux/initramfs.cpio
+make build
+```
+
+Editing busybox sources unpacked under `$BUILDROOT_DIR/output/build/busybox-*/`
+**does not** propagate by itself — buildroot has to rebuild busybox AND
+repack `rootfs.cpio`. The `initramfs-rebuild` target wraps both steps.
 
 ## Troubleshooting
 
