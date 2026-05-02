@@ -15,6 +15,14 @@ CONFIG_CMDLINE="earlycon=sbi console=hvc0 loglevel=8 ignore_loglevel debug initc
 CONFIG_CMDLINE_FORCE=y
 # CONFIG_STACKPROTECTOR is not set
 # CONFIG_BLOCK is not set
+# Headless RV32 SoC: console is HVC over SBI, no VT/keyboard/mouse.
+# CONFIG_VT must go first — it `select INPUT`s, which otherwise pulls
+# in CONFIG_MOUSE_PS2 + the full PS/2 driver family. Their __param
+# entries trip a kernfs refcount underflow in param_sysfs_builtin_init
+# on fresh (non-incremental) builds and panic init before /init runs.
+# CONFIG_VT is not set
+# CONFIG_INPUT is not set
+# CONFIG_HID_SUPPORT is not set
 CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_SERIAL_EARLYCON_RISCV_SBI=y
