@@ -140,8 +140,16 @@
             clocks = <&uart_clk>;      /* lying clock — see clock-23m comment */
         };
 
-        /* SPI0 — target sifive,spi0 (Phase 2d). */
-        spi@10010000 {
+        /* SPI0 — sifive,spi0 (Phase 2d, RTL refactored to match). The
+         * upstream driver (drivers/spi/spi-sifive.c) probes by writing
+         * 0xffffffff to CSDEF and reading back to count CS lines —
+         * ntiny exposes one CS, so num_cs=1 (CSDEF sticks at 0x1).
+         * Single-protocol, 8-bit MSB-first, full-duplex; FCTRL/FFMT
+         * (memory-mapped flash) RAZ/WI for now.
+         *
+         * The spidev child node provides userspace SPI access via
+         * /dev/spidev0.0 — the boot-time self-test greps for it. */
+        spi0: spi@10010000 {
             compatible = "sifive,spi0";
             reg = <0x10010000 0x1000>;
             interrupt-parent = <&plic>;
@@ -149,7 +157,16 @@
             clocks = <&soc_clk>;
             #address-cells = <1>;
             #size-cells = <0>;
-            status = "disabled";
+
+            /* Modern Linux refuses "linux,spidev" as a DT compatible
+             * (it's a class, not a device). Use "rohm,dh2228fv" — the
+             * canonical throwaway compatible accepted by spidev.c — so
+             * /dev/spidev0.0 appears for userspace test access. */
+            spidev@0 {
+                compatible = "rohm,dh2228fv";
+                reg = <0>;
+                spi-max-frequency = <1000000>;
+            };
         };
 
         /* I2C0 — opencores,i2c-ocores (Phase 2c). RTL refactored to
