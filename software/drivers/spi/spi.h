@@ -3,26 +3,20 @@
 
 #include <stdint.h>
 
+/* sifive,spi0 bare-metal driver. Phase 2d standardisation.
+ *
+ * spi_init() programs sckdiv directly (input clock divisor); the legacy
+ * spi_set_sck_ratio() shim is kept for tests that still call it.
+ *
+ * spi_cs(value): non-zero = assert (CSMODE=HOLD), zero = release
+ * (CSMODE=OFF). The SiFive controller drives CS automatically when
+ * CSMODE=AUTO; HOLD/OFF gives software explicit control. */
 
-//-----------------------------------------------------------------
-// Variables:
-//-----------------------------------------------------------------
-/*
-const uint8_t SPI_MODE0 = 0x00; ///<  CPOL: 0  CPHA: 0
-const uint8_t SPI_MODE1 = 0x01; ///<  CPOL: 0  CPHA: 1
-const uint8_t SPI_MODE2 = 0x10; ///<  CPOL: 1  CPHA: 0
-const uint8_t SPI_MODE3 = 0x11; ///<  CPOL: 1  CPHA: 1
-*/
-
-//-----------------------------------------------------------------
-// Prototypes:
-//-----------------------------------------------------------------
-void 	  spi_set_sck_ratio(uint8_t ratio);
-void      spi_init( int cpol, int cpha, int lsb_first );
-void      spi_cs(uint32_t value);
-uint8_t   spi_sendrecv(uint8_t ch);
-void      spi_readblock(uint8_t *ptr, int length);
-void      spi_writeblock(char *ptr );
-
+void     spi_init(int cpol, int cpha, int sckdiv);
+void     spi_set_sck_ratio(uint8_t ratio);   /* writes SCKDIV */
+void     spi_cs(uint32_t value);
+uint8_t  spi_sendrecv(uint8_t ch);
+void     spi_readblock(uint8_t *ptr, int length);
+void     spi_writeblock(const char *ptr);
 
 #endif

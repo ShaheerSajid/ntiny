@@ -1,840 +1,375 @@
-////////////////////////////////////////////////////////
-////////////////	 SPI Module		////////////////////
-////////////////////////////////////////////////////////
-
+// ── ntiny SPI (sifive,spi0 register layout) ────────────────────────
+//
+// Phase 2d peripheral standardisation: register layout matches the
+// upstream Linux SiFive SPI0 driver (drivers/spi/spi-sifive.c). See
+// spi_defs.sv for the full register map.
+//
+// Single CS line. Single-protocol shift only (proto=00). 8-bit frames
+// only (FMT.len writable but ignored). FCTRL/FFMT (memory-mapped flash
+// mode) RAZ/WI. Inter-frame delays (DELAY0/DELAY1) writable but not
+// enforced — bare-metal tests + Linux spidev workloads tolerate this.
+//
+// The bit-level shift FSM is preserved from the prior implementation
+// (proven across loopback + register R/W coverage). What changed is
+// the software-facing register interface.
 
 `include "spi_defs.sv"
 
-module spi_top 
-
-//-----------------------------------------------------------------
-// Ports
-//-----------------------------------------------------------------
-
-     (
-                    input logic              clk_i,
-                    input logic              rst_i,
-                    // avalon interface
-                    input logic              write_i,        // input logic write signal
-                    input logic              read_i,         // input logic read signal
-                    input logic              chipselect_i,   // input logic chipselect signal
-                    input logic      [31:0]  writedata_i,    // input logic write data
-                    input logic      [31:0]   address_i,       // input logic address signal
-                    output logic     [31:0]  readdata_o,      // output logic read data
-                    output logic     [7:0]   spi_cs_o,
-                    input logic              spi_miso_i,
-                    output logic             spi_mosi_o,      
-                    output logic             intr_o,
-					output logic			   spi_clk_o
-                   
-   
-                );
-
-
-//-----------------------------------------------------------------
-// Request Logic
-//-----------------------------------------------------------------
-wire logic  read_en_w  = read_i;
-wire logic  write_en_w = write_i;
-
-var logic     [7:0]      SPI_SCK_RATIO_reg;
-
-// spi_dgier_gie [internal]
-var logic        spi_dgier_gie_q;
-
-always_ff @ (posedge clk_i or posedge rst_i)
-if (rst_i)
-    spi_dgier_gie_q <= 1'd`SPI_DGIER_GIE_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_DGIER))
-    spi_dgier_gie_q <= writedata_i[`SPI_DGIER_GIE_R];
-
-wire  logic      spi_dgier_gie_out_w = spi_dgier_gie_q;
-
-
-//-----------------------------------------------------------------
-// Register spi_ipisr
-//-----------------------------------------------------------------
-var logic spi_ipisr_wr_q;
-
-always_ff @ (posedge clk_i or posedge rst_i)
-if (rst_i)
-    spi_ipisr_wr_q <= 1'b0;
-else if (write_en_w && (address_i[7:0] == `SPI_IPISR))
-    spi_ipisr_wr_q <= 1'b1;
-else
-    spi_ipisr_wr_q <= 1'b0;
-
-// spi_ipisr_tx_empty [external]
-wire logic        spi_ipisr_tx_empty_out_w = writedata_i[`SPI_IPISR_TX_EMPTY_R];
-
-
-//-----------------------------------------------------------------
-// Register spi_ipier
-//-----------------------------------------------------------------
-var logic spi_ipier_wr_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_ipier_wr_q <= 1'b0;
-else if (write_en_w && (address_i[7:0] == `SPI_IPIER))
-    spi_ipier_wr_q <= 1'b1;
-else
-    spi_ipier_wr_q <= 1'b0;
-
-// spi_ipier_tx_empty [internal]
-var logic        spi_ipier_tx_empty_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_ipier_tx_empty_q <= 1'd`SPI_IPIER_TX_EMPTY_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_IPIER))
-    spi_ipier_tx_empty_q <= writedata_i[`SPI_IPIER_TX_EMPTY_R];
-
-wire  logic       spi_ipier_tx_empty_out_w = spi_ipier_tx_empty_q;
-
-
-//-----------------------------------------------------------------
-// Register spi_srr
-//-----------------------------------------------------------------
-var logic spi_srr_wr_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_srr_wr_q <= 1'b0;
-else if (write_en_w && (address_i[7:0] == `SPI_SRR))
-    spi_srr_wr_q <= 1'b1;
-else
-    spi_srr_wr_q <= 1'b0;
-
-// spi_srr_reset [auto_clr]
-var logic [31:0]  spi_srr_reset_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_srr_reset_q <= 32'd`SPI_SRR_RESET_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_SRR))
-    spi_srr_reset_q <= writedata_i[`SPI_SRR_RESET_R];
-else
-    spi_srr_reset_q <= 32'd`SPI_SRR_RESET_DEFAULT;
-
-wire  logic [31:0]  spi_srr_reset_out_w = spi_srr_reset_q;
-
-
-//-----------------------------------------------------------------
-// Register spi_cr
-//-----------------------------------------------------------------
-var logic spi_cr_wr_q;
-
-always_ff @ (posedge clk_i or posedge rst_i  )
-if (rst_i)
-    spi_cr_wr_q <= 1'b0;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_wr_q <= 1'b1;
-else
-    spi_cr_wr_q <= 1'b0;
-
-// spi_cr_loop [internal]
-var logic        spi_cr_loop_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_cr_loop_q <= 1'd`SPI_CR_LOOP_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_loop_q <= writedata_i[`SPI_CR_LOOP_R];
-
-wire logic      spi_cr_loop_out_w = spi_cr_loop_q;
-
-
-// spi_cr_spe [internal]
-var logic        spi_cr_spe_q;
-
-always_ff @ (posedge clk_i  or posedge rst_i)
-if (rst_i)
-    spi_cr_spe_q <= 1'd`SPI_CR_SPE_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_spe_q <= writedata_i[`SPI_CR_SPE_R];
-
-wire   logic      spi_cr_spe_out_w = spi_cr_spe_q;
-
-
-// spi_cr_master [internal]
-var logic        spi_cr_master_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_cr_master_q <= 1'd`SPI_CR_MASTER_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_master_q <= writedata_i[`SPI_CR_MASTER_R];
-
-wire   logic      spi_cr_master_out_w = spi_cr_master_q;
-
-
-// spi_cr_cpol [internal]
-var logic        spi_cr_cpol_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_cr_cpol_q <= 1'd`SPI_CR_CPOL_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_cpol_q <= writedata_i[`SPI_CR_CPOL_R];
-
-wire  logic       spi_cr_cpol_out_w = spi_cr_cpol_q;
-
-
-// spi_cr_cpha [internal]
-var logic        spi_cr_cpha_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_cr_cpha_q <= 1'd`SPI_CR_CPHA_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_cpha_q <= writedata_i[`SPI_CR_CPHA_R];
-
-wire   logic      spi_cr_cpha_out_w = spi_cr_cpha_q;
-
-
-// spi_cr_txfifo_rst [auto_clr]
-var logic        spi_cr_txfifo_rst_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_cr_txfifo_rst_q <= 1'd`SPI_CR_TXFIFO_RST_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_txfifo_rst_q <= writedata_i[`SPI_CR_TXFIFO_RST_R];
-else
-    spi_cr_txfifo_rst_q <= 1'd`SPI_CR_TXFIFO_RST_DEFAULT;
-
-wire  logic       spi_cr_txfifo_rst_out_w = spi_cr_txfifo_rst_q;
-
-
-// spi_cr_rxfifo_rst [auto_clr]
-var logic        spi_cr_rxfifo_rst_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_cr_rxfifo_rst_q <= 1'd`SPI_CR_RXFIFO_RST_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_rxfifo_rst_q <= writedata_i[`SPI_CR_RXFIFO_RST_R];
-else
-    spi_cr_rxfifo_rst_q <= 1'd`SPI_CR_RXFIFO_RST_DEFAULT;
-
-wire  logic       spi_cr_rxfifo_rst_out_w = spi_cr_rxfifo_rst_q;
-
-
-// spi_cr_manual_ss [internal]
-var logic        spi_cr_manual_ss_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_cr_manual_ss_q <= 1'd`SPI_CR_MANUAL_SS_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_manual_ss_q <= writedata_i[`SPI_CR_MANUAL_SS_R];
-
-wire  logic       spi_cr_manual_ss_out_w = spi_cr_manual_ss_q;
-
-
-// spi_cr_trans_inhibit [internal]
-var logic        spi_cr_trans_inhibit_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_cr_trans_inhibit_q <= 1'd`SPI_CR_TRANS_INHIBIT_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_trans_inhibit_q <= writedata_i[`SPI_CR_TRANS_INHIBIT_R];
-
-wire  logic       spi_cr_trans_inhibit_out_w = spi_cr_trans_inhibit_q;
-
-
-// spi_cr_lsb_first [internal]
-var logic        spi_cr_lsb_first_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_cr_lsb_first_q <= 1'd`SPI_CR_LSB_FIRST_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_CR))
-    spi_cr_lsb_first_q <= writedata_i[`SPI_CR_LSB_FIRST_R];
-
-wire   logic      spi_cr_lsb_first_out_w = spi_cr_lsb_first_q;
-
-
-//-----------------------------------------------------------------
-// Register spi_sr
-//-----------------------------------------------------------------
-var logic spi_sr_wr_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_sr_wr_q <= 1'b0;
-else if (write_en_w && (address_i[7:0] == `SPI_SR))
-    spi_sr_wr_q <= 1'b1;
-else
-    spi_sr_wr_q <= 1'b0;
-
-
-
-
-
-//-----------------------------------------------------------------
-// Register spi_dtr
-//-----------------------------------------------------------------
-var logic spi_dtr_wr_q;
-var logic [7:0]spi_dtr;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_dtr_wr_q <= 1'b0;
-else if (write_en_w && (address_i[7:0] == `SPI_DTR))
-    spi_dtr_wr_q <= 1'b1;
-else
-    spi_dtr_wr_q <= 1'b0;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_dtr <= 8'b0;
-else if (write_en_w && (address_i[7:0] == `SPI_DTR))
-    spi_dtr <= writedata_i[`SPI_DTR_DATA_R];
-
-
-// spi_dtr_data [external]
-wire [7:0]  spi_dtr_data_out_w = spi_dtr;
-
-
-//-----------------------------------------------------------------
-// Register spi_drr
-//-----------------------------------------------------------------
-var logic spi_drr_wr_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_drr_wr_q <= 1'b0;
-else if (write_en_w && (address_i[7:0] == `SPI_DRR))
-    spi_drr_wr_q <= 1'b1;
-else
-    spi_drr_wr_q <= 1'b0;
-
-
-//-----------------------------------------------------------------
-// Register spi_ssr
-//-----------------------------------------------------------------
-var logic spi_ssr_wr_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_ssr_wr_q <= 1'b0;
-else if (write_en_w && (address_i[7:0] == `SPI_SSR))
-    spi_ssr_wr_q <= 1'b1;
-else
-    spi_ssr_wr_q <= 1'b0;
-
-// spi_ssr_value [internal]
-var logic [7:0]  spi_ssr_value_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    spi_ssr_value_q <= 8'd`SPI_SSR_VALUE_DEFAULT;
-else if (write_en_w && (address_i[7:0] == `SPI_SSR))
-    spi_ssr_value_q <= writedata_i[`SPI_SSR_VALUE_R];
-
-wire [7:0]  spi_ssr_value_out_w = spi_ssr_value_q;
-
-
-wire        spi_ipisr_tx_empty_in_w;
-wire        spi_sr_rx_empty_in_w;
-wire        spi_sr_rx_full_in_w;
-wire        spi_sr_tx_empty_in_w;
-wire        spi_sr_tx_full_in_w;
-wire [7:0]  spi_drr_data_in_w;
-
-
-//-----------------------------------------------------------------
-// Read mux
-//-----------------------------------------------------------------
-var logic [31:0] data_r;
-
-always_comb
-begin
-    data_r = 32'b0;
-
-    case (address_i[7:0])
-
-    `SPI_DGIER:
-    begin
-        data_r[`SPI_DGIER_GIE_R] = spi_dgier_gie_q;
-    end
-    `SPI_IPISR:
-    begin
-        data_r[`SPI_IPISR_TX_EMPTY_R] = spi_ipisr_tx_empty_in_w;
-    end
-    `SPI_IPIER:
-    begin
-        data_r[`SPI_IPIER_TX_EMPTY_R] = spi_ipier_tx_empty_q;
-    end
-    `SPI_SRR:
-    begin
-    end
-    `SPI_CR:
-    begin
-        data_r[`SPI_CR_LOOP_R] = spi_cr_loop_q;
-        data_r[`SPI_CR_SPE_R] = spi_cr_spe_q;
-        data_r[`SPI_CR_MASTER_R] = spi_cr_master_q;
-        data_r[`SPI_CR_CPOL_R] = spi_cr_cpol_q;
-        data_r[`SPI_CR_CPHA_R] = spi_cr_cpha_q;
-        data_r[`SPI_CR_MANUAL_SS_R] = spi_cr_manual_ss_q;
-        data_r[`SPI_CR_TRANS_INHIBIT_R] = spi_cr_trans_inhibit_q;
-        data_r[`SPI_CR_LSB_FIRST_R] = spi_cr_lsb_first_q;
-    end
-    `SPI_SR:
-    begin
-        data_r[`SPI_SR_RX_EMPTY_R] = spi_sr_rx_empty_in_w;
-        data_r[`SPI_SR_RX_FULL_R] = spi_sr_rx_full_in_w;
-        data_r[`SPI_SR_TX_EMPTY_R] = spi_sr_tx_empty_in_w;
-        data_r[`SPI_SR_TX_FULL_R] = spi_sr_tx_full_in_w;
-    end
-    `SPI_DRR:
-    begin
-        data_r[`SPI_DRR_DATA_R] = spi_drr_data_in_w;
-    end
-    `SPI_SSR:
-    begin
-        data_r[`SPI_SSR_VALUE_R] = spi_ssr_value_q;
-    end
-    `SPI_CLK_RATIO:
-    begin
-        data_r  = SPI_SCK_RATIO_reg;
-    end
-    default :
-        data_r = 32'b0;
-    endcase
-end
-
-
-//-----------------------------------------------------------------
-// Retime read response
-//-----------------------------------------------------------------
-var logic [31:0] rd_data_q;
-
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    rd_data_q <= 32'b0;
-else if (read_en_w)
-    rd_data_q <= data_r;
-
-assign readdata_o = rd_data_q;
-
-
-
-wire logic  spi_cr_rd_req_w = read_en_w & (address_i[7:0] == `SPI_CR);
-wire logic  spi_drr_rd_req_w = read_en_w & (address_i[7:0] == `SPI_DRR);
-
-wire logic  spi_ipisr_wr_req_w = spi_ipisr_wr_q;
-wire logic  spi_cr_wr_req_w = spi_cr_wr_q;
-wire logic  spi_dtr_wr_req_w = spi_dtr_wr_q;
-wire logic  spi_drr_wr_req_w = spi_drr_wr_q;
-
-
-//-----------------------------------------------------------------
-// TX FIFO
-//-----------------------------------------------------------------
-wire   logic     sw_reset_w      = spi_srr_reset_out_w == 32'h0000000A;
-wire   logic     tx_fifo_flush_w = sw_reset_w | spi_cr_txfifo_rst_out_w;
-wire   logic    rx_fifo_flush_w = sw_reset_w | spi_cr_rxfifo_rst_out_w;
-
-wire    logic    tx_accept_w;
-wire     logic   tx_ready_w;
-wire   logic [7:0] tx_data_raw_w;
-wire   logic     tx_pop_w;
-
-spi_fifo
-#(
-    .WIDTH(8),
-    .DEPTH(4),
-    .ADDR_W(2)
-)
-u_tx_fifo
-(
-    .clk_i(clk_i),
-    .rst_i(rst_i),
-
-    .flush_i(tx_fifo_flush_w),
-
-    .data_in_i(spi_dtr_data_out_w),
-    .push_i(spi_dtr_wr_req_w),
-    .accept_o(tx_accept_w),
-
-    .pop_i(tx_pop_w),
-    .data_out_o(tx_data_raw_w),
-    .valid_o(tx_ready_w)
+module spi_top (
+    input  logic        clk_i,
+    input  logic        rst_i,
+    input  logic        write_i,
+    input  logic        read_i,
+    input  logic        chipselect_i,
+    input  logic [31:0] writedata_i,
+    input  logic [31:0] address_i,
+    output logic [31:0] readdata_o,
+    output logic [7:0]  spi_cs_o,
+    input  logic        spi_miso_i,
+    output logic        spi_mosi_o,
+    output logic        intr_o,
+    output logic        spi_clk_o
 );
 
-assign spi_sr_tx_empty_in_w = ~tx_ready_w;
-assign spi_sr_tx_full_in_w  = ~tx_accept_w;
+    wire [7:0] addr_w     = address_i[7:0];
+    wire       write_en_w = write_i & chipselect_i;
+    wire       read_en_w  = read_i  & chipselect_i;
 
-// Reverse order if LSB first
-wire  logic [7:0] tx_data_w = spi_cr_lsb_first_out_w ? 
-    {
-      tx_data_raw_w[0]
-    , tx_data_raw_w[1]
-    , tx_data_raw_w[2]
-    , tx_data_raw_w[3]
-    , tx_data_raw_w[4]
-    , tx_data_raw_w[5]
-    , tx_data_raw_w[6]
-    , tx_data_raw_w[7]
-    } : tx_data_raw_w;
+    // ── Configuration registers ────────────────────────────
+    logic [11:0] sckdiv_q;
+    logic        sckmode_cpha_q;
+    logic        sckmode_cpol_q;
+    logic        csid_q;             // 1-bit (single CS implemented)
+    logic        csdef_q;            // 1-bit, default level for CS0
+    logic [1:0]  csmode_q;
+    logic [31:0] delay0_q;
+    logic [31:0] delay1_q;
+    logic [1:0]  fmt_proto_q;
+    logic        fmt_endian_q;
+    logic        fmt_dir_q;
+    logic [3:0]  fmt_len_q;
+    logic [2:0]  txmark_q;
+    logic [2:0]  rxmark_q;
+    logic        ie_txwm_q;
+    logic        ie_rxwm_q;
 
-//-----------------------------------------------------------------
-// RX FIFO
-//-----------------------------------------------------------------
-wire   logic     rx_accept_w;
-wire   logic     rx_ready_w;
-wire  logic [7:0] rx_data_w;
-wire   logic     rx_push_w;
-
-spi_fifo
-#(
-    .WIDTH(8),
-    .DEPTH(4),
-    .ADDR_W(2)
-)
-u_rx_fifo
-(
-    .clk_i(clk_i),
-    .rst_i(rst_i),
-
-    .flush_i(rx_fifo_flush_w),
-
-    .data_in_i(rx_data_w),
-    .push_i(rx_push_w),
-    .accept_o(rx_accept_w),
-
-    .pop_i(spi_drr_rd_req_w),
-    .data_out_o(spi_drr_data_in_w),
-    .valid_o(rx_ready_w)
-);
-
-
-assign spi_sr_rx_empty_in_w = ~rx_ready_w;
-assign spi_sr_rx_full_in_w  = ~rx_accept_w;
-
-//-----------------------------------------------------------------
-// Configuration
-//-----------------------------------------------------------------
-
-
-always_ff @(posedge clk_i or posedge rst_i )
-begin
-     if (rst_i)
-        SPI_SCK_RATIO_reg <= `SPI_CLK_RATIO_VALUE_DEFAULT;
-     else if (write_en_w && address_i==`SPI_CLK_RATIO)
-        SPI_SCK_RATIO_reg <= writedata_i [7:0];
-end
-
-wire   logic  [7:0]      clk_div_w;
-assign clk_div_w = SPI_SCK_RATIO_reg;
-
-//-----------------------------------------------------------------
-// Registers
-//-----------------------------------------------------------------
-var logic   active_q;
-var logic [5:0] bit_count_q;
-var logic [7:0]   shift_reg_q;
-var logic [31:0]    clk_div_q;
-var logic   done_q;
-
-
-var logic   spi_clk_q;
-var logic   spi_mosi_q;
-
-//-----------------------------------------------------------------
-// Implementation
-//-----------------------------------------------------------------
-wire logic  enable_w = spi_cr_spe_out_w & spi_cr_master_out_w & ~spi_cr_trans_inhibit_out_w;
-
-// Something to do, SPI enabled...
-wire logic  start_w = enable_w & ~active_q & ~done_q & tx_ready_w;
-
-// Loopback more or normal
-wire logic  miso_w = spi_cr_loop_out_w ? spi_mosi_o : spi_miso_i;
-
-// SPI Clock Generator
-always_ff @ (posedge clk_i or posedge rst_i  )
-if (rst_i)
-    clk_div_q <= 32'd0;
-else if (start_w || sw_reset_w || clk_div_q == 32'd0)
-    clk_div_q <= clk_div_w;
-else
-    clk_div_q <= clk_div_q - 32'd1;
-
-wire logic  clk_en_w = (clk_div_q == 32'd0);
-
-//-----------------------------------------------------------------
-// Sample, Drive pulse generation
-//-----------------------------------------------------------------
-var logic sample_r;
-var logic drive_r;
-
-always_comb
-begin
-    sample_r = 1'b0;
-    drive_r  = 1'b0;
-
-    // SPI = IDLE
-    if (start_w)    
-        drive_r  = ~spi_cr_cpha_out_w; // Drive initial data (CPHA=0)
-    // SPI = ACTIVE
-    else if (active_q && clk_en_w)
-    begin
-        // Sample
-        // CPHA=0, sample on the first edge
-        // CPHA=1, sample on the second edge
-        if (bit_count_q[0] == spi_cr_cpha_out_w)
-            sample_r = 1'b1;
-        // Drive (CPHA = 1)
-        else if (spi_cr_cpha_out_w)
-            drive_r = 1'b1;
-        // Drive (CPHA = 0)
-        else 
-            drive_r = (bit_count_q != 6'b0) && (bit_count_q != 6'd15);
-    end
-end
-
-//-----------------------------------------------------------------
-// Shift register
-//-----------------------------------------------------------------
-always_ff @ (posedge clk_i  or posedge rst_i )
-if (rst_i)
-begin
-    shift_reg_q    <= 8'b0;
-    spi_clk_q      <= 1'b0;
-    spi_mosi_q     <= 1'b0;
-end
-else
-begin
-    // SPI = RESET (or potentially update CPOL)
-    if (sw_reset_w || (spi_cr_wr_req_w & !start_w))
-    begin
-        shift_reg_q    <= 8'b0;
-        spi_clk_q      <= spi_cr_cpol_out_w;
-    end
-    // SPI = IDLE
-    else if (start_w)
-    begin
-        spi_clk_q      <= spi_cr_cpol_out_w;
-
-        // CPHA = 0
-        if (drive_r)
-        begin
-            spi_mosi_q    <= tx_data_w[7];
-            shift_reg_q   <= {tx_data_w[6:0], 1'b0};
+    always_ff @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            sckdiv_q       <= 12'd24;
+            sckmode_cpha_q <= 1'b0;
+            sckmode_cpol_q <= 1'b0;
+            csid_q         <= 1'b0;
+            csdef_q        <= 1'b1;        // default high (active-low CS)
+            csmode_q       <= `SPI_CSMODE_OFF;
+            delay0_q       <= 32'h0001_0001;
+            delay1_q       <= 32'h0000_0000;
+            fmt_proto_q    <= 2'b00;
+            fmt_endian_q   <= 1'b0;
+            fmt_dir_q      <= 1'b0;
+            fmt_len_q      <= 4'd8;
+            txmark_q       <= 3'd0;
+            rxmark_q       <= 3'd0;
+            ie_txwm_q      <= 1'b0;
+            ie_rxwm_q      <= 1'b0;
+        end else if (write_en_w) begin
+            case (addr_w)
+                `SPI_SCKDIV:  sckdiv_q <= writedata_i[`SPI_SCKDIV_DIV_R];
+                `SPI_SCKMODE: begin
+                    sckmode_cpha_q <= writedata_i[`SPI_SCKMODE_CPHA_B];
+                    sckmode_cpol_q <= writedata_i[`SPI_SCKMODE_CPOL_B];
+                end
+                `SPI_CSID:    csid_q   <= writedata_i[0];
+                `SPI_CSDEF:   csdef_q  <= writedata_i[0];
+                `SPI_CSMODE:  csmode_q <= writedata_i[`SPI_CSMODE_MODE_R];
+                `SPI_DELAY0:  delay0_q <= writedata_i;
+                `SPI_DELAY1:  delay1_q <= writedata_i;
+                `SPI_FMT: begin
+                    fmt_proto_q  <= writedata_i[`SPI_FMT_PROTO_R];
+                    fmt_endian_q <= writedata_i[`SPI_FMT_ENDIAN_B];
+                    fmt_dir_q    <= writedata_i[`SPI_FMT_DIR_B];
+                    fmt_len_q    <= writedata_i[`SPI_FMT_LEN_R];
+                end
+                `SPI_TXMARK:  txmark_q <= writedata_i[2:0];
+                `SPI_RXMARK:  rxmark_q <= writedata_i[2:0];
+                `SPI_IE: begin
+                    ie_txwm_q <= writedata_i[`SPI_IE_TXWM_B];
+                    ie_rxwm_q <= writedata_i[`SPI_IE_RXWM_B];
+                end
+                default: ;
+            endcase
         end
-        // CPHA = 1
-        else
-            shift_reg_q   <= tx_data_w;
     end
-    // SPI = ACTIVE
-    else if (active_q && clk_en_w)
-    begin
-        // Toggle SPI clock output
-        if (!spi_cr_loop_out_w)
+
+    // ── TX/RX FIFO push/pop strobes ────────────────────────
+    wire txdata_wr_w = write_en_w & (addr_w == `SPI_TXDATA);
+    wire rxdata_rd_w = read_en_w  & (addr_w == `SPI_RXDATA);
+
+    // ── TX FIFO ────────────────────────────────────────────
+    wire        tx_accept_w;
+    wire        tx_valid_w;
+    wire [7:0]  tx_data_w;
+    wire        tx_pop_w;
+
+    spi_fifo #(.WIDTH(8), .DEPTH(4), .ADDR_W(2)) u_tx_fifo (
+        .clk_i      (clk_i),
+        .rst_i      (rst_i),
+        .flush_i    (1'b0),
+        .data_in_i  (writedata_i[7:0]),
+        .push_i     (txdata_wr_w),
+        .accept_o   (tx_accept_w),
+        .pop_i      (tx_pop_w),
+        .data_out_o (tx_data_w),
+        .valid_o    (tx_valid_w)
+    );
+
+    // ── RX FIFO ────────────────────────────────────────────
+    wire        rx_accept_w;
+    wire        rx_valid_w;
+    wire [7:0]  rx_data_out_w;
+    wire        rx_push_w;
+    logic [7:0] rx_data_in_w;
+
+    spi_fifo #(.WIDTH(8), .DEPTH(4), .ADDR_W(2)) u_rx_fifo (
+        .clk_i      (clk_i),
+        .rst_i      (rst_i),
+        .flush_i    (1'b0),
+        .data_in_i  (rx_data_in_w),
+        .push_i     (rx_push_w),
+        .accept_o   (rx_accept_w),
+        .pop_i      (rxdata_rd_w),
+        .data_out_o (rx_data_out_w),
+        .valid_o    (rx_valid_w)
+    );
+
+    // Interrupt-pending approximation. The SiFive driver only checks
+    // ip.txwm (TX FIFO has space below mark) and ip.rxwm (RX FIFO has
+    // data above mark). FIFO depth=4 makes this near-binary; we treat
+    // any-space-available / any-data-available as the trigger when
+    // the corresponding mark is non-zero.
+    wire ip_txwm_w = (txmark_q != 3'd0) ? tx_accept_w : 1'b0;
+    wire ip_rxwm_w = (rxmark_q == 3'd0) ? rx_valid_w  : 1'b0;
+
+    // ── Read mux ───────────────────────────────────────────
+    logic [31:0] data_r;
+    always_comb begin
+        data_r = 32'h0;
+        case (addr_w)
+            `SPI_SCKDIV:  data_r[`SPI_SCKDIV_DIV_R] = sckdiv_q;
+            `SPI_SCKMODE: begin
+                data_r[`SPI_SCKMODE_CPHA_B] = sckmode_cpha_q;
+                data_r[`SPI_SCKMODE_CPOL_B] = sckmode_cpol_q;
+            end
+            `SPI_CSID:    data_r[0] = csid_q;
+            `SPI_CSDEF:   data_r[0] = csdef_q;
+            `SPI_CSMODE:  data_r[`SPI_CSMODE_MODE_R] = csmode_q;
+            `SPI_DELAY0:  data_r = delay0_q;
+            `SPI_DELAY1:  data_r = delay1_q;
+            `SPI_FMT: begin
+                data_r[`SPI_FMT_PROTO_R]  = fmt_proto_q;
+                data_r[`SPI_FMT_ENDIAN_B] = fmt_endian_q;
+                data_r[`SPI_FMT_DIR_B]    = fmt_dir_q;
+                data_r[`SPI_FMT_LEN_R]    = fmt_len_q;
+            end
+            `SPI_TXDATA:  data_r[`SPI_TXDATA_FULL_B] = ~tx_accept_w;
+            `SPI_RXDATA: begin
+                data_r[`SPI_RXDATA_DATA_R]  = rx_data_out_w;
+                data_r[`SPI_RXDATA_EMPTY_B] = ~rx_valid_w;
+            end
+            `SPI_TXMARK:  data_r[2:0] = txmark_q;
+            `SPI_RXMARK:  data_r[2:0] = rxmark_q;
+            `SPI_FCTRL:   data_r = 32'h0;
+            `SPI_FFMT:    data_r = 32'h0;
+            `SPI_IE: begin
+                data_r[`SPI_IE_TXWM_B] = ie_txwm_q;
+                data_r[`SPI_IE_RXWM_B] = ie_rxwm_q;
+            end
+            `SPI_IP: begin
+                data_r[`SPI_IP_TXWM_B] = ip_txwm_w;
+                data_r[`SPI_IP_RXWM_B] = ip_rxwm_w;
+            end
+            default: ;
+        endcase
+    end
+
+    logic [31:0] readdata_q;
+    always_ff @(posedge clk_i or posedge rst_i)
+        if (rst_i)         readdata_q <= 32'h0;
+        else if (read_en_w) readdata_q <= data_r;
+    assign readdata_o = readdata_q;
+
+    // ── Bit-shift state machine (preserved from legacy) ────
+    logic        active_q;
+    logic [4:0]  bit_count_q;       // 0..15 = 8-bit transfer (16 SCK edges)
+    logic [7:0]  shift_reg_q;
+    logic [11:0] clk_div_q;
+    logic        done_q;
+    logic        spi_clk_q;
+    logic        spi_mosi_q;
+
+    wire enable_w = (csmode_q != `SPI_CSMODE_OFF);
+    wire start_w  = enable_w & ~active_q & ~done_q & tx_valid_w;
+    wire miso_w   = spi_miso_i;
+
+    // SCK divider
+    always_ff @(posedge clk_i or posedge rst_i)
+        if (rst_i)                                 clk_div_q <= 12'd0;
+        else if (start_w || clk_div_q == 12'd0)    clk_div_q <= sckdiv_q;
+        else                                       clk_div_q <= clk_div_q - 12'd1;
+
+    wire clk_en_w = (clk_div_q == 12'd0);
+
+    // Sample/drive pulses
+    logic sample_r, drive_r;
+    always_comb begin
+        sample_r = 1'b0;
+        drive_r  = 1'b0;
+        if (start_w) begin
+            drive_r = ~sckmode_cpha_q;          // CPHA=0: pre-drive MOSI
+        end else if (active_q && clk_en_w) begin
+            if (bit_count_q[0] == sckmode_cpha_q)
+                sample_r = 1'b1;
+            else if (sckmode_cpha_q)
+                drive_r = 1'b1;
+            else
+                drive_r = (bit_count_q != 5'd0) && (bit_count_q != 5'd15);
+        end
+    end
+
+    // Shift register + SCK
+    always_ff @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            shift_reg_q <= 8'h0;
+            spi_clk_q   <= 1'b0;
+            spi_mosi_q  <= 1'b0;
+        end else if (start_w) begin
+            spi_clk_q <= sckmode_cpol_q;
+            if (drive_r) begin
+                spi_mosi_q  <= tx_data_w[7];
+                shift_reg_q <= {tx_data_w[6:0], 1'b0};
+            end else begin
+                shift_reg_q <= tx_data_w;
+            end
+        end else if (active_q && clk_en_w) begin
             spi_clk_q <= ~spi_clk_q;
-
-        // Drive MOSI
-        if (drive_r)
-        begin
-            spi_mosi_q  <= shift_reg_q[7];
-            shift_reg_q <= {shift_reg_q[6:0],1'b0};
+            if (drive_r) begin
+                spi_mosi_q  <= shift_reg_q[7];
+                shift_reg_q <= {shift_reg_q[6:0], 1'b0};
+            end else if (sample_r) begin
+                shift_reg_q[0] <= miso_w;
+            end
         end
-        // Sample MISO
-        else if (sample_r)
-            shift_reg_q[0] <= miso_w;
     end
-end
 
-//-----------------------------------------------------------------
-// Bit counter
-//-----------------------------------------------------------------
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-begin
-    bit_count_q    <= 6'b0;
-    active_q       <= 1'b0;
-    done_q         <= 1'b0;
-end
-else if (sw_reset_w)
-begin
-    bit_count_q    <= 6'b0;
-    active_q       <= 1'b0;
-    done_q         <= 1'b0;
-end
-else if (start_w)
-begin
-    bit_count_q    <= 6'b0;
-    active_q       <= 1'b1;
-    done_q         <= 1'b0;
-end
-else if (active_q && clk_en_w)
-begin
-    // End of SPI transfer reached
-    if (bit_count_q == 6'd15)
-    begin
-        // Go back to IDLE active_q
-        active_q  <= 1'b0;
-
-        // Set transfer complete flags
-        done_q   <= 1'b1;
+    // Bit counter
+    always_ff @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            bit_count_q <= 5'd0;
+            active_q    <= 1'b0;
+            done_q      <= 1'b0;
+        end else if (start_w) begin
+            bit_count_q <= 5'd0;
+            active_q    <= 1'b1;
+            done_q      <= 1'b0;
+        end else if (active_q && clk_en_w) begin
+            if (bit_count_q == 5'd15) begin
+                active_q <= 1'b0;
+                done_q   <= 1'b1;
+            end else begin
+                bit_count_q <= bit_count_q + 5'd1;
+            end
+        end else begin
+            done_q <= 1'b0;
+        end
     end
-    // Increment cycle counter
-    else 
-        bit_count_q <= bit_count_q + 6'd1;
-end
-else
-    done_q         <= 1'b0;
 
-// Delayed done_q for FIFO level check
-var logic check_tx_level_q;
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    check_tx_level_q <= 1'b0;
-else
-    check_tx_level_q <= done_q;
+    assign rx_data_in_w = shift_reg_q;
+    assign rx_push_w    = done_q & rx_accept_w;
+    assign tx_pop_w     = done_q;
 
-// Interrupt
-var logic intr_q;
+    // ── CS line control ────────────────────────────────────
+    // CS0 follows csmode (AUTO/HOLD/OFF). Other 7 CS bits stay at the
+    // csdef level — ntiny exposes a single CS line; the wider bus is a
+    // legacy carry-over.
+    logic cs_active_q;
+    always_ff @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            cs_active_q <= 1'b0;
+        end else if (csmode_q == `SPI_CSMODE_OFF) begin
+            cs_active_q <= 1'b0;
+        end else if (txdata_wr_w & tx_accept_w) begin
+            cs_active_q <= 1'b1;
+        end else if (csmode_q == `SPI_CSMODE_AUTO &&
+                     ~tx_valid_w & ~active_q & ~done_q) begin
+            cs_active_q <= 1'b0;
+        end
+    end
 
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-    intr_q <= 1'b0;
-else if (check_tx_level_q && spi_ipier_tx_empty_out_w && spi_ipisr_tx_empty_in_w)
-    intr_q <= 1'b1;
-else if (spi_ipisr_wr_req_w && spi_ipisr_tx_empty_out_w)
-    intr_q <= 1'b0;
+    wire cs0_w = cs_active_q ? ~csdef_q : csdef_q;
+    assign spi_cs_o   = {{7{csdef_q}}, cs0_w};
+    assign spi_mosi_o = spi_mosi_q;
+    assign spi_clk_o  = spi_clk_q;
 
-assign spi_ipisr_tx_empty_in_w = spi_sr_tx_empty_in_w;
-
-//-----------------------------------------------------------------
-// Assignments
-//-----------------------------------------------------------------
-assign spi_clk_o            = spi_clk_q;
-assign spi_mosi_o           = spi_mosi_q;
-
-// Reverse order if LSB first
-assign rx_data_w = spi_cr_lsb_first_out_w ? 
-    {
-      shift_reg_q[0]
-    , shift_reg_q[1]
-    , shift_reg_q[2]
-    , shift_reg_q[3]
-    , shift_reg_q[4]
-    , shift_reg_q[5]
-    , shift_reg_q[6]
-    , shift_reg_q[7]
-    } : shift_reg_q;
-
-
-assign rx_push_w            = done_q;
-assign tx_pop_w             = done_q;
-
-assign spi_cs_o             = spi_ssr_value_out_w;
-assign intr_o               = spi_dgier_gie_out_w & intr_q;
+    // ── Interrupt ──────────────────────────────────────────
+    assign intr_o = (ie_txwm_q & ip_txwm_w) | (ie_rxwm_q & ip_rxwm_w);
 
 endmodule
 
-//-----------------------------------------------------------------
-// Params
-//-----------------------------------------------------------------
-
+// ────────────────────────────────────────────────────────────
+// Simple synchronous FIFO used for TX and RX. Preserved from the
+// legacy SPI implementation.
+// ────────────────────────────────────────────────────────────
 module spi_fifo
-//-----------------------------------------------------------------
-// Params
-//-----------------------------------------------------------------
 #(
-    parameter WIDTH   = 8,
-    parameter DEPTH   = 4,
-    parameter ADDR_W  = 2
+    parameter WIDTH  = 8,
+    parameter DEPTH  = 4,
+    parameter ADDR_W = 2
 )
-//-----------------------------------------------------------------
-// Ports
-//-----------------------------------------------------------------
 (
-    // Inputs
-     input logic               clk_i
-    ,input logic               rst_i
-    ,input logic  [WIDTH-1:0]  data_in_i
-    ,input logic               push_i
-    ,input logic               pop_i
-    ,input logic               flush_i
+    input  logic               clk_i,
+    input  logic               rst_i,
+    input  logic [WIDTH-1:0]   data_in_i,
+    input  logic               push_i,
+    input  logic               pop_i,
+    input  logic               flush_i,
 
-    // Outputs
-    ,output logic [WIDTH-1:0]  data_out_o
-    ,output logic              accept_o
-    ,output logic              valid_o
+    output logic [WIDTH-1:0]   data_out_o,
+    output logic               accept_o,
+    output logic               valid_o
 );
 
-//-----------------------------------------------------------------
-// Local Params
-//-----------------------------------------------------------------
-localparam COUNT_W = ADDR_W + 1;
+    localparam COUNT_W = ADDR_W + 1;
 
-//-----------------------------------------------------------------
-// Registers
-//-----------------------------------------------------------------
-var logic [WIDTH-1:0]   ram_q[DEPTH-1:0];
-var logic [ADDR_W-1:0]  rd_ptr_q;
-var logic [ADDR_W-1:0]  wr_ptr_q;
-var logic [COUNT_W-1:0] count_q;
+    logic [WIDTH-1:0]   ram_q [DEPTH-1:0];
+    logic [ADDR_W-1:0]  rd_ptr_q;
+    logic [ADDR_W-1:0]  wr_ptr_q;
+    logic [COUNT_W-1:0] count_q;
 
-integer i;
-//-----------------------------------------------------------------
-// Sequential
-//-----------------------------------------------------------------
-always_ff @ (posedge clk_i or posedge rst_i )
-if (rst_i)
-begin
-    for ( i =0; i<DEPTH-1; i = i+1)
-    begin
-        ram_q[i] <= {(WIDTH){1'b0}}; 
-    end
-    count_q   <= {(COUNT_W) {1'b0}};
-    rd_ptr_q  <= {(ADDR_W) {1'b0}};
-    wr_ptr_q  <= {(ADDR_W) {1'b0}};
-end
-else if (flush_i)
-begin
-    count_q   <= {(COUNT_W) {1'b0}};
-    rd_ptr_q  <= {(ADDR_W) {1'b0}};
-    wr_ptr_q  <= {(ADDR_W) {1'b0}};
-end
-else
-begin
-    // Push
-    if (push_i & accept_o)
-    begin
-        ram_q[wr_ptr_q] <= data_in_i;
-        wr_ptr_q        <= wr_ptr_q + 1;
+    integer i;
+    always_ff @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            for (i = 0; i < DEPTH; i = i + 1)
+                ram_q[i] <= {WIDTH{1'b0}};
+            count_q  <= {COUNT_W{1'b0}};
+            rd_ptr_q <= {ADDR_W{1'b0}};
+            wr_ptr_q <= {ADDR_W{1'b0}};
+        end else if (flush_i) begin
+            count_q  <= {COUNT_W{1'b0}};
+            rd_ptr_q <= {ADDR_W{1'b0}};
+            wr_ptr_q <= {ADDR_W{1'b0}};
+        end else begin
+            if (push_i & accept_o) begin
+                ram_q[wr_ptr_q] <= data_in_i;
+                wr_ptr_q        <= wr_ptr_q + 1;
+            end
+            if (pop_i & valid_o)
+                rd_ptr_q <= rd_ptr_q + 1;
+            if      ((push_i & accept_o) & ~(pop_i & valid_o)) count_q <= count_q + 1;
+            else if (~(push_i & accept_o) & (pop_i & valid_o)) count_q <= count_q - 1;
+        end
     end
 
-    // Pop
-    if (pop_i & valid_o)
-        rd_ptr_q      <= rd_ptr_q + 1;
-
-    // Count up
-    if ((push_i & accept_o) & ~(pop_i & valid_o))
-        count_q <= count_q + 1;
-    // Count down
-    else if (~(push_i & accept_o) & (pop_i & valid_o))
-        count_q <= count_q - 1;
-end
-
-//-------------------------------------------------------------------
-// Combinatorial
-//-------------------------------------------------------------------
-assign valid_o       = (count_q != 0);
-assign accept_o      = (count_q != DEPTH);
-
-assign data_out_o    = ram_q[rd_ptr_q];
-
-
+    assign valid_o    = (count_q != 0);
+    assign accept_o   = (count_q != DEPTH);
+    assign data_out_o = ram_q[rd_ptr_q];
 
 endmodule
-
-

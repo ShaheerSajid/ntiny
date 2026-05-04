@@ -1,96 +1,56 @@
 #include "spi.h"
 #include "spi_defs.h"
 
-//-----------------------------------------------------------------
-// Locals
-//-----------------------------------------------------------------
 static volatile uint32_t *m_spi;
 
-
-//-----------------------------------------------------------------
-// spi_set_sck_ratio: setting value of clock ratio
-//-----------------------------------------------------------------
-void spi_set_sck_ratio (uint8_t ratio)
+void spi_init(int cpol, int cpha, int sckdiv)
 {
-    m_spi[SPI_CLK_RATIO/4] = ratio;
-}
-
-//-----------------------------------------------------------------
-// spi_init: Initialise SPI master
-//-----------------------------------------------------------------
-void spi_init(int cpol, int cpha, int lsb_first )           
-{
-    uint32_t cfg = 0;
     m_spi = (volatile uint32_t *)SPI_BASE_ADDR;
 
-    cfg += (1 << SPI_CR_SPE_SHIFT);
-    cfg += (1 << SPI_CR_MASTER_SHIFT);
-    cfg += (cpol << SPI_CR_CPOL_SHIFT);
-    cfg += (cpha << SPI_CR_CPHA_SHIFT);
-    cfg += (1 << SPI_CR_MANUAL_SS_SHIFT);
-    cfg += (lsb_first << SPI_CR_LSB_FIRST_SHIFT);
-
-    m_spi[SPI_CR/4]  = cfg;
-   // m_spi[SPI_CR/4]  = cfg;
-    
-    m_spi[SPI_SSR/4] = ~0;
-    //   m_spi[SPI_SSR/4] = ~0;
-
-    // Soft reset
-    m_spi[SPI_SRR/4] = 0x0000000A;
-
- 
+    m_spi[SPI_SCKDIV  / 4] = (uint32_t)sckdiv & SPI_SCKDIV_DIV_MASK;
+    m_spi[SPI_SCKMODE / 4] = (((uint32_t)cpol & 1u) << SPI_SCKMODE_CPOL_SHIFT)
+                           | (((uint32_t)cpha & 1u) << SPI_SCKMODE_CPHA_SHIFT);
+    m_spi[SPI_CSID    / 4] = 0u;
+    m_spi[SPI_CSDEF   / 4] = 1u;                  /* CS0 default high (active-low) */
+    m_spi[SPI_CSMODE  / 4] = SPI_CSMODE_OFF;      /* start with CS deasserted */
+    m_spi[SPI_FMT     / 4] = (8u << SPI_FMT_LEN_SHIFT);  /* 8-bit MSB-first single-proto */
+    m_spi[SPI_TXMARK  / 4] = 1u;
+    m_spi[SPI_RXMARK  / 4] = 0u;
+    m_spi[SPI_IE      / 4] = 0u;
 }
 
+void spi_set_sck_ratio(uint8_t ratio)
+{
+    m_spi[SPI_SCKDIV / 4] = ratio;
+}
 
-
-//-----------------------------------------------------------------
-// spi_cs: Set chip select
-//-----------------------------------------------------------------
 void spi_cs(uint32_t value)
 {
-   
-    m_spi[SPI_SSR/4] = ~value;
-  
+    m_spi[SPI_CSMODE / 4] = value ? SPI_CSMODE_HOLD : SPI_CSMODE_OFF;
 }
 
-//-----------------------------------------------------------------
-// spi_sendrecv: Send or receive a character
-//-----------------------------------------------------------------
 uint8_t spi_sendrecv(uint8_t data)
 {
-    m_spi[SPI_DTR/4] = data;
-    __asm("nop");
-    __asm("nop");
-    __asm("nop");
-    while (!(m_spi[SPI_SR/4] & (1 << SPI_SR_TX_EMPTY_SHIFT)))
-        {
-                __asm("nop");
-        }
+    while (m_spi[SPI_TXDATA / 4] & (1u << SPI_TXDATA_FULL_SHIFT))
+        ;
+    m_spi[SPI_TXDATA / 4] = data;
 
-    return (uint8_t)m_spi[SPI_DRR/4];
+    uint32_t rx;
+    do {
+        rx = m_spi[SPI_RXDATA / 4];
+    } while (rx & (1u << SPI_RXDATA_EMPTY_SHIFT));
+
+    return (uint8_t)(rx & 0xffu);
 }
 
-//-----------------------------------------------------------------
-// spi_readblock: Read a block of data from a device
-//-----------------------------------------------------------------
 void spi_readblock(uint8_t *ptr, int length)
 {
-    int i;
-
-    for (i=0;i<length;i++)
-        *ptr++ = spi_sendrecv(0xFF);
-
+    for (int i = 0; i < length; i++)
+        *ptr++ = spi_sendrecv(0xff);
 }
 
-//-----------------------------------------------------------------
-// spi_writeblock: Write a block of data to a device
-//-----------------------------------------------------------------
-void spi_writeblock(char *ptr)
+void spi_writeblock(const char *ptr)
 {
-    
-
     while (*ptr != 0)
-        spi_sendrecv(*ptr++);
- 
+        spi_sendrecv((uint8_t)*ptr++);
 }

@@ -56,6 +56,10 @@ SimJTAG SimJTAG_inst
 
 
  wire  tx, rx;
+ // SPI external self-loop: shorts MOSI back to MISO so the bare-metal
+ // SPI loopback test can verify the shift path end-to-end without an
+ // off-chip slave model.
+ wire  spi_mosi_w;
 soc_top soc_top_inst
 	(
 		.clk_i(clk) ,
@@ -64,8 +68,8 @@ soc_top soc_top_inst
 		.tx_o(tx) ,
 		.rx_i(rx) ,
 		// spi
-		.mosi_o        (),
-		.miso_i        (),
+		.mosi_o        (spi_mosi_w),
+		.miso_i        (spi_mosi_w),
 		.SCK_o         (),
 		.slave_select_o(),
 		//i2c

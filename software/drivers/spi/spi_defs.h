@@ -1,98 +1,52 @@
-
-
 #ifndef __SPI_DEFS_H__
 #define __SPI_DEFS_H__
 
 #include "mem_map.h"
 
-#define SPI_DGIER         0x1c
-    #define SPI_DGIER_GIE                        31
-    #define SPI_DGIER_GIE_SHIFT                  31
-    #define SPI_DGIER_GIE_MASK                   0x1
+/* sifive,spi0 register map. Phase 2d standardisation. */
 
-#define SPI_IPISR         0x20
-    #define SPI_IPISR_TX_EMPTY                   2
-    #define SPI_IPISR_TX_EMPTY_SHIFT             2
-    #define SPI_IPISR_TX_EMPTY_MASK              0x1
+#define SPI_SCKDIV         0x00
+    #define SPI_SCKDIV_DIV_MASK             0xfffu
 
-#define SPI_IPIER         0x28
-    #define SPI_IPIER_TX_EMPTY                   2
-    #define SPI_IPIER_TX_EMPTY_SHIFT             2
-    #define SPI_IPIER_TX_EMPTY_MASK              0x1
+#define SPI_SCKMODE        0x04
+    #define SPI_SCKMODE_CPHA_SHIFT          0
+    #define SPI_SCKMODE_CPOL_SHIFT          1
 
-#define SPI_SRR           0x40
-    #define SPI_SRR_RESET_SHIFT                  0
-    #define SPI_SRR_RESET_MASK                   0xffffffff
+#define SPI_CSID           0x10  /* 1-bit on ntiny */
+#define SPI_CSDEF          0x14  /* 1-bit on ntiny */
 
-#define SPI_CR            0x60
-    #define SPI_CR_LOOP                          0
-    #define SPI_CR_LOOP_SHIFT                    0
-    #define SPI_CR_LOOP_MASK                     0x1
+#define SPI_CSMODE         0x18
+    #define SPI_CSMODE_AUTO                 0u
+    #define SPI_CSMODE_HOLD                 2u
+    #define SPI_CSMODE_OFF                  3u
 
-    #define SPI_CR_SPE                           1
-    #define SPI_CR_SPE_SHIFT                     1
-    #define SPI_CR_SPE_MASK                      0x1
+#define SPI_DELAY0         0x28
+#define SPI_DELAY1         0x2c
 
-    #define SPI_CR_MASTER                        2
-    #define SPI_CR_MASTER_SHIFT                  2
-    #define SPI_CR_MASTER_MASK                   0x1
+#define SPI_FMT            0x40
+    #define SPI_FMT_PROTO_SHIFT             0
+    #define SPI_FMT_ENDIAN_SHIFT            2
+    #define SPI_FMT_DIR_SHIFT               3
+    #define SPI_FMT_LEN_SHIFT               16
 
-    #define SPI_CR_CPOL                          3
-    #define SPI_CR_CPOL_SHIFT                    3
-    #define SPI_CR_CPOL_MASK                     0x1
+#define SPI_TXDATA         0x48
+    #define SPI_TXDATA_FULL_SHIFT           31
 
-    #define SPI_CR_CPHA                          4
-    #define SPI_CR_CPHA_SHIFT                    4
-    #define SPI_CR_CPHA_MASK                     0x1
+#define SPI_RXDATA         0x4c
+    #define SPI_RXDATA_EMPTY_SHIFT          31
 
-    #define SPI_CR_TXFIFO_RST                    5
-    #define SPI_CR_TXFIFO_RST_SHIFT              5
-    #define SPI_CR_TXFIFO_RST_MASK               0x1
+#define SPI_TXMARK         0x50
+#define SPI_RXMARK         0x54
 
-    #define SPI_CR_RXFIFO_RST                    6
-    #define SPI_CR_RXFIFO_RST_SHIFT              6
-    #define SPI_CR_RXFIFO_RST_MASK               0x1
+#define SPI_FCTRL          0x60  /* RAZ/WI on ntiny */
+#define SPI_FFMT           0x64  /* RAZ/WI on ntiny */
 
-    #define SPI_CR_MANUAL_SS                     7
-    #define SPI_CR_MANUAL_SS_SHIFT               7
-    #define SPI_CR_MANUAL_SS_MASK                0x1
+#define SPI_IE             0x70
+    #define SPI_IE_TXWM_SHIFT               0
+    #define SPI_IE_RXWM_SHIFT               1
 
-    #define SPI_CR_TRANS_INHIBIT                 8
-    #define SPI_CR_TRANS_INHIBIT_SHIFT           8
-    #define SPI_CR_TRANS_INHIBIT_MASK            0x1
+#define SPI_IP             0x74
+    #define SPI_IP_TXWM_SHIFT               0
+    #define SPI_IP_RXWM_SHIFT               1
 
-    #define SPI_CR_LSB_FIRST                     9
-    #define SPI_CR_LSB_FIRST_SHIFT               9
-    #define SPI_CR_LSB_FIRST_MASK                0x1
-
-#define SPI_SR            0x64
-    #define SPI_SR_RX_EMPTY                      0
-    #define SPI_SR_RX_EMPTY_SHIFT                0
-    #define SPI_SR_RX_EMPTY_MASK                 0x1
-
-    #define SPI_SR_RX_FULL                       1
-    #define SPI_SR_RX_FULL_SHIFT                 1
-    #define SPI_SR_RX_FULL_MASK                  0x1
-
-    #define SPI_SR_TX_EMPTY                      2
-    #define SPI_SR_TX_EMPTY_SHIFT                2
-    #define SPI_SR_TX_EMPTY_MASK                 0x1
-
-    #define SPI_SR_TX_FULL                       3
-    #define SPI_SR_TX_FULL_SHIFT                 3
-    #define SPI_SR_TX_FULL_MASK                  0x1
-
-#define SPI_DTR           0x68
-    #define SPI_DTR_DATA_SHIFT                   0
-    #define SPI_DTR_DATA_MASK                    0xff
-
-#define SPI_DRR           0x6c
-    #define SPI_DRR_DATA_SHIFT                   0
-    #define SPI_DRR_DATA_MASK                    0xff
-
-#define SPI_SSR           0x70
-    #define SPI_SSR_VALUE_SHIFT                  0
-    #define SPI_SSR_VALUE_MASK                   0xff
-#define SPI_CLK_RATIO     0x74
-    
 #endif
