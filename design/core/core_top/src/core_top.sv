@@ -1726,7 +1726,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .insn_valid_id_i    (insn_valid_id),
   .debug_ebreak_i     (dcsr_ebreak),
   .branch_taken_i     (branch_taken_valid),
-  .branch_target_address_i (branch_target_address),
+  .branch_recovery_target_i (branch_recovery_target),
   // IE-stage signals for misalign detection (done inside)
   .ie_mem_op_i        (ctrl_bus_ie.mem_op),
   .ie_ls_width_i      (ctrl_bus_ie.load_store_width),

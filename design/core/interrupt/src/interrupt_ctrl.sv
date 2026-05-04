@@ -44,7 +44,18 @@ module interrupt_ctrl (
     input        insn_valid_id_i,      // from hazard_unit
     input        debug_ebreak_i,       // dcsr[15] — ebreak enters debug, not trap
     input        branch_taken_i,       // IE-stage branch mispredict (flush incoming)
-    input [31:0] branch_target_address_i, // resolved target of the IE-stage branch/jump
+    // Where the branch should resume on async-trap epc capture. This is
+    // the SAME signal core_top uses to redirect fetch on mispredict —
+    //   pred=T, actual=NT  -> fall-through (predicted_pc_ie)
+    //   pred=T, actual=T (wrong target) -> actual taken target
+    //   pred=NT, actual=T  -> actual taken target
+    // Using the raw "branch_target_address" (always the would-be taken
+    // target) here was wrong for the pred=T,actual=NT case: a timer
+    // interrupt firing on the same cycle as the loop-exit bne would
+    // capture epc = taken target = loop top, then sret resumed inside
+    // the loop instead of the fall-through, looping forever (run #2 of
+    // Phase 2a, kernfs_name_hash on "cpu_slabs").
+    input [31:0] branch_recovery_target_i,
 
     // ── IE-stage CSR invalid (unimplemented CSR accessed) ────────────────
     input                ie_csr_invalid_i,
@@ -168,8 +179,9 @@ wire [31:0] pc_for_id = insn_page_fault_i  ? insn_fault_addr_i :
 // callee-saved regs → BUG_ON in random.c, ra=0xffff0a00 etc.
 //
 // Fix v2 (2026-04-28): for IE-stage mispredicting branch/jump
-// (branch_taken_i), use branch_target_address_i — the resolved
-// destination of the branch/jump. Rationale:
+// (branch_taken_i), use branch_recovery_target_i — same signal core_top
+// feeds to fetch on mispredict. Was branch_target_address_i which was
+// always the taken target; broken for pred=T/actual=NT. Rationale:
 //
 //   - The IE-stage branch's writeback (rd ← PC+4 for jal/jalr)
 //     propagates through IMEM→IWB and fires normally a couple
@@ -216,7 +228,7 @@ wire [31:0] pc_for_id = insn_page_fault_i  ? insn_fault_addr_i :
 // register is invalidated on flush so LR/SC pairs restart cleanly.
 wire async_use_branch = branch_taken_i;
 wire async_use_ie     = ie_stall_i;
-wire [31:0] pc_for_async = async_use_branch    ? branch_target_address_i :
+wire [31:0] pc_for_async = async_use_branch    ? branch_recovery_target_i :
                            async_use_ie        ? pc_ie_i :
                            (pc_id_i != 32'h0)  ? pc_id_i :
                            (pc_ie_i != 32'h0)  ? pc_ie_i :
