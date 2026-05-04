@@ -359,7 +359,7 @@ module soc_top
 
     // Address slices for peripherals
     wire [2:0] timer_addr = dmem_bus.addr[4:2];
-    wire [2:0] gpio_addr  = dmem_bus.addr[3:2];
+    wire [4:0] gpio_addr  = dmem_bus.addr[6:2];  // 5-bit word index, covers 0..0x40
     wire [7:0] spi_addr   = dmem_bus.addr[7:0];
     wire [7:0] i2c_addr   = dmem_bus.addr[7:0];
     wire [7:0] pwm_addr   = dmem_bus.addr[7:2];
@@ -496,7 +496,10 @@ module soc_top
     assign soft_intr       = clint_soft_irq;
 
     // ── PLIC (spec-compliant, memory-mapped claim/complete) ──
-    assign gpio_interrupt = gpio_itr_sig[3:2];
+    // GPIO IRQs to PLIC: bits [1:0] of the per-pin IRQ vector — gpio[0]
+    // and gpio[1] are the only IRQ-capable pins exposed to Linux for now.
+    // Phase 2a-ext will widen to a full 32-IRQ matrix.
+    assign gpio_interrupt = gpio_itr_sig[1:0];
 
     plic_rv #(
         .NUM_SOURCES   (6),

@@ -141,7 +141,12 @@
             status = "disabled";
         };
 
-        /* GPIO — target sifive,gpio0 (Phase 2a). */
+        /* GPIO — sifive,gpio0 (Phase 2a, RTL refactored to match). The
+         * Linux driver derives ngpio from the count of "interrupts"
+         * entries: ntiny exposes 2 IRQ-capable pins (gpio[0], gpio[1]),
+         * so Linux sees a 2-pin gpiochip. The other 30 pins still work
+         * for I/O via direct register access; full 32-IRQ matrix is a
+         * later sub-step (Phase 2a-ext). */
         gpio: gpio@10030000 {
             compatible = "sifive,gpio0";
             reg = <0x10030000 0x1000>;
@@ -152,7 +157,6 @@
             gpio-controller;
             #interrupt-cells = <2>;
             interrupt-controller;
-            status = "disabled";
         };
 
         /* PWM — target sifive,pwm0 (Phase 2e). No PWM IRQs wired in

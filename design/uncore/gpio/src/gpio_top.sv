@@ -1,164 +1,165 @@
-module gpio_top
-(
-		clk_i,
-		resetn_i,
-		address_i,
-		writedata_i,
-		write_i,
-		readdata_o,
-		read_i,
-		chipselect_i,
-		
-		gpio_oen,
-		gpio_i,
-		gpio_o,
-		interrupt_reg
+// ── ntiny GPIO ────────────────────────────────────────────────
+// Phase 2a of peripheral standardisation: register layout matches
+// SiFive GPIO0 (drivers/gpio/gpio-sifive.c, compatible "sifive,gpio0").
+//
+// address_i is a WORD INDEX (sliced from bus addr[6:2] in soc_top),
+// not a byte offset — same convention as the other ntiny peripherals.
+//
+// Register map (byte / word indices):
+//   0x00 / 0   input_val   (RO)  per-pin input values
+//   0x04 / 1   input_en    (RW)  input buffer enable (RAZ/WI here)
+//   0x08 / 2   output_en   (RW)  direction: 1 = drive pin
+//   0x0C / 3   output_val  (RW)  output values
+//   0x10 / 4   pue         (RAZ/WI)
+//   0x14 / 5   ds          (RAZ/WI)
+//   0x18 / 6   rise_ie     (RW)  rising-edge IRQ enable
+//   0x1C / 7   rise_ip     (W1C) rising-edge IRQ pending
+//   0x20 / 8   fall_ie     (RW)
+//   0x24 / 9   fall_ip     (W1C)
+//   0x28 / 10  high_ie     (RW)
+//   0x2C / 11  high_ip     (W1C)
+//   0x30 / 12  low_ie      (RW)
+//   0x34 / 13  low_ip      (W1C)
+//   0x38 / 14  iof_en      (RAZ/WI)
+//   0x3C / 15  iof_sel     (RAZ/WI)
+//   0x40 / 16  out_xor     (RW)
+//
+// Per-pin IRQ:
+//   interrupt_reg[i] = (rise_ip[i] & rise_ie[i]) | (fall_ip[i] & fall_ie[i])
+//                    | (high_ip[i] & high_ie[i]) | (low_ip[i] & low_ie[i])
+// soc_top forwards bits [1:0] to PLIC (2 IRQ-capable pins exposed today).
+
+module gpio_top (
+    input  logic        clk_i,
+    input  logic        resetn_i,        // active-high reset (legacy name)
+    input  logic [4:0]  address_i,       // word index, 0..16
+    input  logic [31:0] writedata_i,
+    input  logic        write_i,
+    output logic [31:0] readdata_o,
+    input  logic        read_i,
+    input  logic        chipselect_i,
+
+    output logic [31:0] gpio_oen,
+    input  logic [31:0] gpio_i,
+    output logic [31:0] gpio_o,
+
+    output logic [31:0] interrupt_reg
 );
 
+    // ── Registers ──────────────────────────────────────────────
+    logic [31:0] input_en_q;
+    logic [31:0] output_en_q;
+    logic [31:0] output_val_q;
+    logic [31:0] rise_ie_q, rise_ip_q;
+    logic [31:0] fall_ie_q, fall_ip_q;
+    logic [31:0] high_ie_q, high_ip_q;
+    logic [31:0] low_ie_q,  low_ip_q;
+    logic [31:0] out_xor_q;
 
-// signals for connecting to the Avalon fabric
-input logic 						clk_i;
-input logic							resetn_i;
-input logic 						write_i;
-input logic 						read_i;
-input logic 						chipselect_i;
-input logic 			[31:0]		writedata_i;
-input logic 			[2:0]		address_i;
-output logic		 	[31:0]		readdata_o;
-output	logic 			[31:0]		interrupt_reg;
-output logic 			[31:0] 		gpio_oen;
-output logic 			[31:0] 		gpio_o;
-input logic 			[31:0] 		gpio_i;
+    logic [31:0] gpio_prev_q;
 
+    // ── Word index constants ───────────────────────────────────
+    localparam WORD_INPUT_VAL  = 5'd0;
+    localparam WORD_INPUT_EN   = 5'd1;
+    localparam WORD_OUTPUT_EN  = 5'd2;
+    localparam WORD_OUTPUT_VAL = 5'd3;
+    localparam WORD_PUE        = 5'd4;
+    localparam WORD_DS         = 5'd5;
+    localparam WORD_RISE_IE    = 5'd6;
+    localparam WORD_RISE_IP    = 5'd7;
+    localparam WORD_FALL_IE    = 5'd8;
+    localparam WORD_FALL_IP    = 5'd9;
+    localparam WORD_HIGH_IE    = 5'd10;
+    localparam WORD_HIGH_IP    = 5'd11;
+    localparam WORD_LOW_IE     = 5'd12;
+    localparam WORD_LOW_IP     = 5'd13;
+    localparam WORD_IOF_EN     = 5'd14;
+    localparam WORD_IOF_SEL    = 5'd15;
+    localparam WORD_OUT_XOR    = 5'd16;
 
+    assign gpio_o   = output_val_q ^ out_xor_q;
+    assign gpio_oen = output_en_q;
 
-//var logic [31:0] module_var logic[0:1];//DDR,POUT,PIN
-//var logic[31:0] data_out;
+    // ── Edge detection ─────────────────────────────────────────
+    wire [31:0] pin_rise = gpio_i & ~gpio_prev_q;
+    wire [31:0] pin_fall = ~gpio_i & gpio_prev_q;
 
+    // ── Register writes + IP set/W1C ───────────────────────────
+    always_ff @(posedge clk_i or posedge resetn_i) begin
+        if (resetn_i) begin
+            input_en_q   <= 32'h0;
+            output_en_q  <= 32'h0;
+            output_val_q <= 32'h0;
+            rise_ie_q    <= 32'h0;
+            rise_ip_q    <= 32'h0;
+            fall_ie_q    <= 32'h0;
+            fall_ip_q    <= 32'h0;
+            high_ie_q    <= 32'h0;
+            high_ip_q    <= 32'h0;
+            low_ie_q     <= 32'h0;
+            low_ip_q     <= 32'h0;
+            out_xor_q    <= 32'h0;
+            gpio_prev_q  <= 32'h0;
+        end else begin
+            gpio_prev_q <= gpio_i;
 
-	///// memory mapped registers
-	var logic	[31:0]	DDR;		// data direction var logicister   1--> output logic, 0--> input logic
-	var logic 	[31:0]	Dout;		// output logic Data value(from processor) 
-	var logic	[31:0]	Din;		// input logic data value(to processor)
-	var logic 	[7:0]	cmd;		// command var logicisters.   0th bit --> clear output logic data(active high). 1st bit --> clear DDR var logic register (active high).
-												//	2nd bit --> softreset GPIO
-												//  5th --> intr_en
-	// cmd[4:3] 
-	// 00 -> posedge edge intr     01 -> neg edge intr    10 -> pos level intr   01 -> neg level intr
+            // Default IP set (event accumulates).
+            rise_ip_q <= rise_ip_q | pin_rise;
+            fall_ip_q <= fall_ip_q | pin_fall;
+            high_ip_q <= high_ip_q | gpio_i;
+            low_ip_q  <= low_ip_q  | ~gpio_i;
 
+            if (write_i && chipselect_i) begin
+                case (address_i)
+                    WORD_INPUT_EN:   input_en_q   <= writedata_i;
+                    WORD_OUTPUT_EN:  output_en_q  <= writedata_i;
+                    WORD_OUTPUT_VAL: output_val_q <= writedata_i;
+                    WORD_RISE_IE:    rise_ie_q    <= writedata_i;
+                    WORD_RISE_IP:    rise_ip_q    <= (rise_ip_q | pin_rise) & ~writedata_i;
+                    WORD_FALL_IE:    fall_ie_q    <= writedata_i;
+                    WORD_FALL_IP:    fall_ip_q    <= (fall_ip_q | pin_fall) & ~writedata_i;
+                    WORD_HIGH_IE:    high_ie_q    <= writedata_i;
+                    WORD_HIGH_IP:    high_ip_q    <= (high_ip_q | gpio_i) & ~writedata_i;
+                    WORD_LOW_IE:     low_ie_q     <= writedata_i;
+                    WORD_LOW_IP:     low_ip_q     <= (low_ip_q | ~gpio_i) & ~writedata_i;
+                    WORD_OUT_XOR:    out_xor_q    <= writedata_i;
+                    // PUE / DS / IOF_EN / IOF_SEL: RAZ/WI
+                    default: ;
+                endcase
+            end
+        end
+    end
 
-	wire logic[31:0] in;
+    // ── Reads ──────────────────────────────────────────────────
+    always_ff @(posedge clk_i) begin
+        if (read_i && chipselect_i) begin
+            case (address_i)
+                WORD_INPUT_VAL:  readdata_o <= gpio_i;
+                WORD_INPUT_EN:   readdata_o <= input_en_q;
+                WORD_OUTPUT_EN:  readdata_o <= output_en_q;
+                WORD_OUTPUT_VAL: readdata_o <= output_val_q;
+                WORD_RISE_IE:    readdata_o <= rise_ie_q;
+                WORD_RISE_IP:    readdata_o <= rise_ip_q;
+                WORD_FALL_IE:    readdata_o <= fall_ie_q;
+                WORD_FALL_IP:    readdata_o <= fall_ip_q;
+                WORD_HIGH_IE:    readdata_o <= high_ie_q;
+                WORD_HIGH_IP:    readdata_o <= high_ip_q;
+                WORD_LOW_IE:     readdata_o <= low_ie_q;
+                WORD_LOW_IP:     readdata_o <= low_ip_q;
+                WORD_OUT_XOR:    readdata_o <= out_xor_q;
+                // RAZ regs
+                WORD_PUE,
+                WORD_DS,
+                WORD_IOF_EN,
+                WORD_IOF_SEL:    readdata_o <= 32'h0;
+                default:         readdata_o <= 32'h0;
+            endcase
+        end
+    end
 
-
-
-	///// internal registers
-
-	var logic  [31:0] temp_in;
-
-
-// implement tristate logic to set GPIO as input logic or output logic
-/// output logic logic of tristate
-/*
-integer i;
-genvar gi;
-generate
-  for (gi=0; gi<32; gi=gi+1) begin : genbit
-    assign gpio_io[gi] = DDR[gi]? Dout[gi]: 1'bz;
-  end
-endgenerate
-// input logic logic for tristate
-assign in = gpio_io;
-*/
-assign in = gpio_i;
-assign gpio_o = Dout;
-assign gpio_oen = DDR;
-// Read or Write the internal var logicisters
-always_ff@(posedge clk_i or posedge resetn_i)
-begin
-	//Din <= in;
-	if(resetn_i) // reset asynchronous
-		begin
-			DDR		<=	32'b0;			// address 0   	(0x00)
-			Dout	<=	32'b0;			// address 1	(0x04)
-			//Din		<=	32'b0;			// address 2	(0x08)
-			cmd		<=	8'b0;			// address 3	(0x0a)
-			
-		end
-	else if (cmd[0])	/// reset Data out var logicister
-		begin
-			Dout	<=	32'b0;	// reset only output logic data var logicister (from processor)
-			cmd		<= 	8'b0;	// reset command var logicister after excuting command
-		end
-	else if (cmd[1])	//// reset Data Direction var logicister
-		begin
-			DDR		<=  32'b0;	// reset Data direction var logicister ( to input logic)
-			cmd		<=	8'b0;	// reset command var logicister after excuting command
-		end
-	else if (cmd[2]) //
-		begin
-			DDR		<=	32'b0;			// address 0   	(0x00)
-			Dout	<=	32'b0;			// address 1	(0x04)
-			//Din		<=	32'b0;			// address 2	(0x08)
-			cmd		<=	8'b0;			// address 3	(0x0a)
-			
-		end
-	else if(write_i & chipselect_i)
-		begin 
-		case (address_i)
-		3'd0:	DDR		<=	writedata_i;		// set DDR var logicister
-		3'd1:	Dout	<=	writedata_i;		// set Data out value (from  processor)
-		3'd3:	cmd		<=	writedata_i[7:0];	// set command var logicister value
-		default: ;  // unmapped register: ignore write
-		endcase
-		end
-	else if (read_i & chipselect_i)
-		begin
-		case (address_i)
-		3'd0:	readdata_o		<=	DDR;		// Read DDR var logicister
-		3'd1:	readdata_o		<=	Dout;		// Read Data_out var logic
-		3'd2:	readdata_o		<=	in;		// Read Data_in value to processor
-		3'd3:	readdata_o		<=	cmd;	// set command var logicister value
-		default: readdata_o <= 32'b0;  // unmapped register: read 0
-		endcase
-		end
-	 
-	//////////////////////////////////////////////////////////////
-	 // perform Commands given from processor via cmd var logicister //
-	//////////////////////////////////////////////////////////////
-	
-	 	
-	
-	// write the input logic vlaue(state) present on GPIO to Din var logicister	
-end
-
-/////
-
-	always_ff @( posedge clk_i or posedge resetn_i ) begin : temp_in_loigc
-		if (resetn_i)
-			temp_in		<=	32'b0;
-		else
-			temp_in		<=	in;
-	end
-	integer i;
-	always_ff @( posedge clk_i or posedge resetn_i ) begin : interrupt_reg_logic
-		if (resetn_i)
-			interrupt_reg	<=	32'b0;
-		else begin 
-			for (i = 0 ; i < 32; i = i + 1) begin : intr_logic
-				if (~DDR[i] & cmd[5]) begin // if gpio is input and intr is enabled
-					case (cmd[4:3])	// 
-					2'd0:	interrupt_reg[i]	<= in[i] & (~temp_in[i]);		// posedge 
-					2'd1:	interrupt_reg[i]	<= ~in[i] & (temp_in[i]);		// negedge 
-					2'd2:	interrupt_reg[i]	<= in[i];		// pos level
-					2'd3:	interrupt_reg[i]	<= ~in[i];		// neg level				
-					endcase
-				end
-				else 
-					interrupt_reg[i] <= 1'b0;
-			end
-		end
-
-
-	end
+    assign interrupt_reg = (rise_ip_q & rise_ie_q)
+                         | (fall_ip_q & fall_ie_q)
+                         | (high_ip_q & high_ie_q)
+                         | (low_ip_q  & low_ie_q);
 
 endmodule
