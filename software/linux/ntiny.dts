@@ -152,15 +152,19 @@
             status = "disabled";
         };
 
-        /* I2C0 — opencores,i2c-ocores (Phase 2c: RTL refactored to
-         * the upstream layout — prelo/prehi at 0x00/0x04, ctrl at
+        /* I2C0 — opencores,i2c-ocores (Phase 2c). RTL refactored to
+         * the upstream layout (prelo/prehi at 0x00/0x04, ctrl at
          * 0x08, tx/rx aliased on 0x0C, cmd/status aliased on 0x10).
-         * DT keeps status="disabled": enabling the node currently
-         * triggers a layout-sensitive get_page_from_freelist NULL
-         * deref in init (or a sysctl hang depending on LEGACY_PTYS).
-         * The RTL refactor itself is correct (bare-metal peek/poke
-         * passes); only the Linux driver enablement is parked
-         * pending a separate kernel-side debug session. */
+         *
+         * Earlier in the same branch we saw an intermittent boot
+         * crash (NULL deref in get_page_from_freelist after init)
+         * when this node was enabled. A subsequent re-test with the
+         * sync-fault forensic probe armed reproduced the boot
+         * cleanly to login + i2c.driver PASS in the self-test. The
+         * crash appears to be timing-sensitive (a layout-sensitive
+         * page-aliasing class bug, see _progress.md analysis) — keep
+         * an eye out on future runs. If it reproduces, the probe
+         * already in tb_soc_top.v will capture the fault details. */
         i2c@10020000 {
             compatible = "opencores,i2c-ocores";
             reg = <0x10020000 0x1000>;
@@ -172,7 +176,6 @@
             reg-io-width = <4>;
             #address-cells = <1>;
             #size-cells = <0>;
-            status = "disabled";
         };
 
         /* GPIO — sifive,gpio0 (Phase 2a, RTL refactored to match). The

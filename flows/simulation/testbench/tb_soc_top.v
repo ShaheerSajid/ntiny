@@ -305,8 +305,14 @@ end
 reg fault_dumped = 1'b0;
 integer fi;
 always @(posedge clk) begin
-    if (!reset && wp_int_v && (wp_ecause[31] == 1'b0) && (wp_ecause[7:0] < 8'd16)
-        && (wp_priv == 2'd1) && !fault_dumped) begin
+    // Filter to FAULTS only (cause >= 12 = page faults; cause 2 illegal
+    // insn; cause 0/1/4/5/6/7 misalign/access). Exclude ECALLs (8,9).
+    // Also require epc in kernel high-half so we skip the transient
+    // instruction fault head.S takes during MMU enable.
+    if (!reset && wp_int_v && (wp_ecause[31] == 1'b0)
+        && ((wp_ecause[7:0] >= 8'd12) || (wp_ecause[7:0] == 8'd2)
+            || (wp_ecause[7:0] <= 8'd7))
+        && (wp_priv == 2'd1) && (wp_epc[31:28] == 4'hc) && !fault_dumped) begin
         $fwrite(fault_log_fd,
             "@%0d KERNEL SYNC FAULT cause=%08h epc=%08h badaddr=%08h\n",
             wp_cycle, wp_ecause, wp_epc, wp_mtval);
