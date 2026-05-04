@@ -222,6 +222,81 @@ always @(posedge clk) begin
     end
 end
 
+// ── kernfs_name_hash inner-loop progress sampler ───────────────
+// At each timer tick, the trap probe captures EPC inside this
+// function. Sample the suspected `len` register (a4) and the
+// `name` pointer (a5) at that same cycle so we can watch them
+// progress (or not) across iterations.
+integer kfh_log_fd;
+initial kfh_log_fd = $fopen("logs/kfh_progress.log", "w");
+
+// Iteration-resolution probe: at every IE-stage commit of the bne at
+// PC c0112834, capture s1+a0+predicted_taken+branch_taken. Filtered
+// to only fire when s1 is "near" a0 (within 0x40 bytes either side)
+// to keep volume sane while still catching the equality moment.
+wire [31:0] wp_a0 = soc_top_inst.core_top_inst.regfile_inst.regfile[10];
+wire [31:0] wp_s1 = soc_top_inst.core_top_inst.regfile_inst.regfile[9];
+wire        wp_branch_taken = soc_top_inst.core_top_inst.branch_taken;
+wire        wp_pred_taken   = soc_top_inst.core_top_inst.ctrl_bus_ie.predicted_taken;
+wire        wp_mispredict   = soc_top_inst.core_top_inst.bpu_mispredict;
+wire        wp_ie_flush     = soc_top_inst.core_top_inst.ie_flush;
+wire [31:0] wp_pc_ie        = soc_top_inst.core_top_inst.pc_ie;
+
+// Track whether we've already hit the stuck loop (a0 = c0c6b049, s1
+// crossing a0). After that point, log every 1000th iter so we can
+// verify the loop is still spinning without flooding.
+reg kfh_in_stuck = 1'b0;
+reg [31:0] kfh_iter = 32'h0;
+always @(posedge clk) begin
+    if (!reset && wp_priv == 2'd1 &&
+        wp_pc_ie == 32'hc0112834) begin
+        // Always log when s1 is "near" a0
+        if ((wp_a0 > wp_s1 ? wp_a0 - wp_s1 : wp_s1 - wp_a0) <= 32'h40) begin
+            $fwrite(kfh_log_fd,
+                "@%0d BNE  s1=%08h a0=%08h taken=%0d pred=%0d misp=%0d ie_flush=%0d\n",
+                wp_cycle, wp_s1, wp_a0, wp_branch_taken, wp_pred_taken,
+                wp_mispredict, wp_ie_flush);
+            $fflush(kfh_log_fd);
+            if (wp_a0 == 32'hc0c6b049) kfh_in_stuck <= 1'b1;
+        end else if (kfh_in_stuck && (kfh_iter[15:0] == 16'h0)) begin
+            // Sparse periodic log inside stuck loop
+            $fwrite(kfh_log_fd,
+                "@%0d STUCK s1=%08h a0=%08h\n",
+                wp_cycle, wp_s1, wp_a0);
+            $fflush(kfh_log_fd);
+        end
+        kfh_iter <= kfh_iter + 1;
+    end
+end
+
+// ── Trap probe ─────────────────────────────────────────────────
+// Captures every committed trap (sync exception or async interrupt)
+// plus stvec / sscratch / satp / tp / sp at the moment of commit.
+// Goal: identify the page-fault-loop source after the cpio-shift
+// boot regression. Filtered to S-mode (priv=1) to keep volume sane.
+integer trap_log_fd;
+initial trap_log_fd = $fopen("logs/trap_probe.log", "w");
+
+wire        wp_int_v   = soc_top_inst.core_top_inst.interrupt_valid;
+wire [31:0] wp_ecause  = soc_top_inst.core_top_inst.ecause_csr;
+wire [31:0] wp_epc     = soc_top_inst.core_top_inst.epc_csr;
+wire [31:0] wp_mtval   = soc_top_inst.core_top_inst.mtval_csr;
+wire        wp_to_s    = soc_top_inst.core_top_inst.trap_to_s;
+wire [31:0] wp_satp    = soc_top_inst.core_top_inst.satp_csr;
+wire [31:0] wp_status  = soc_top_inst.core_top_inst.status_csr;
+wire [31:0] wp_tp_reg  = soc_top_inst.core_top_inst.regfile_inst.regfile[4];
+wire [31:0] wp_sp_reg  = soc_top_inst.core_top_inst.regfile_inst.regfile[2];
+
+always @(posedge clk) begin
+    if (!reset && wp_int_v) begin
+        $fwrite(trap_log_fd,
+            "@%0d trap priv=%0d to_s=%0d cause=%08h epc=%08h tval=%08h satp=%08h status=%08h tp=%08h sp=%08h\n",
+            wp_cycle, wp_priv, wp_to_s, wp_ecause, wp_epc, wp_mtval,
+            wp_satp, wp_status, wp_tp_reg, wp_sp_reg);
+        $fflush(trap_log_fd);
+    end
+end
+
 `ifndef VERILATOR_SIM
 	always begin
 		 #10 clk = !clk;
