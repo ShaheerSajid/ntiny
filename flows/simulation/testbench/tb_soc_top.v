@@ -269,6 +269,69 @@ always @(posedge clk) begin
     end
 end
 
+// ── Kernel sync-fault forensic probe ─────────────────────────────
+// On the FIRST priv=1 (S-mode kernel) synchronous exception
+// (cause < 16, not a timer/external interrupt), dump full register
+// state + a 32-entry PC history. Use this to root-cause kernel oopses
+// like the i2c-enabled init NULL-deref in get_page_from_freelist —
+// figure out what SET the registers to the values that caused the
+// fault.
+integer fault_log_fd;
+initial fault_log_fd = $fopen("logs/sync_fault.log", "w");
+
+// Direct hierarchical register taps (avoid array hier ref issues).
+wire [31:0] wp_x1  = soc_top_inst.core_top_inst.regfile_inst.regfile[1];
+wire [31:0] wp_x2  = soc_top_inst.core_top_inst.regfile_inst.regfile[2];
+wire [31:0] wp_x3  = soc_top_inst.core_top_inst.regfile_inst.regfile[3];
+wire [31:0] wp_x4  = soc_top_inst.core_top_inst.regfile_inst.regfile[4];
+wire [31:0] wp_x8  = soc_top_inst.core_top_inst.regfile_inst.regfile[8];
+wire [31:0] wp_x10 = soc_top_inst.core_top_inst.regfile_inst.regfile[10];
+wire [31:0] wp_x11 = soc_top_inst.core_top_inst.regfile_inst.regfile[11];
+wire [31:0] wp_x12 = soc_top_inst.core_top_inst.regfile_inst.regfile[12];
+wire [31:0] wp_x13 = soc_top_inst.core_top_inst.regfile_inst.regfile[13];
+wire [31:0] wp_x14 = soc_top_inst.core_top_inst.regfile_inst.regfile[14];
+wire [31:0] wp_x15 = soc_top_inst.core_top_inst.regfile_inst.regfile[15];
+
+// Last-32 PC ring (overwritten round-robin so always have 32 most-recent).
+reg [31:0] fault_pc_ring [0:31];
+reg [4:0]  fault_pc_idx = 5'd0;
+always @(posedge clk) begin
+    if (!reset) begin
+        fault_pc_ring[fault_pc_idx] <= wp_pc_iwb;
+        fault_pc_idx <= fault_pc_idx + 5'd1;
+    end
+end
+
+reg fault_dumped = 1'b0;
+integer fi;
+always @(posedge clk) begin
+    if (!reset && wp_int_v && (wp_ecause[31] == 1'b0) && (wp_ecause[7:0] < 8'd16)
+        && (wp_priv == 2'd1) && !fault_dumped) begin
+        $fwrite(fault_log_fd,
+            "@%0d KERNEL SYNC FAULT cause=%08h epc=%08h badaddr=%08h\n",
+            wp_cycle, wp_ecause, wp_epc, wp_mtval);
+        $fwrite(fault_log_fd,
+            "  satp=%08h status=%08h\n", wp_satp, wp_status);
+        $fwrite(fault_log_fd,
+            "  ra=%08h sp=%08h gp=%08h tp=%08h\n",
+            wp_x1, wp_x2, wp_x3, wp_x4);
+        $fwrite(fault_log_fd,
+            "  s0=%08h\n", wp_x8);
+        $fwrite(fault_log_fd,
+            "  a0=%08h a1=%08h a2=%08h a3=%08h\n",
+            wp_x10, wp_x11, wp_x12, wp_x13);
+        $fwrite(fault_log_fd,
+            "  a4=%08h a5=%08h\n", wp_x14, wp_x15);
+        $fwrite(fault_log_fd, "  PC ring (32 entries, oldest first):\n");
+        for (fi = 0; fi < 32; fi = fi + 1) begin
+            $fwrite(fault_log_fd, "    [%2d] %08h\n",
+                fi, fault_pc_ring[(fault_pc_idx + fi) & 5'h1f]);
+        end
+        $fflush(fault_log_fd);
+        fault_dumped <= 1'b1;
+    end
+end
+
 // ── Trap probe ─────────────────────────────────────────────────
 // Captures every committed trap (sync exception or async interrupt)
 // plus stvec / sscratch / satp / tp / sp at the moment of commit.

@@ -56,25 +56,67 @@ Static audit done so far (rules out the obvious culprits):
 - **Bare-metal driver works** with the new RTL (peek/poke + functional
   test pass).
 
-Strongest remaining hypothesis: same layout-sensitive HW bug class
-that bit kernfs_name_hash earlier this session. Enabling the I2C node
-(a) shifts kernel BSS/data layout (just by registering another
-platform device's worth of allocations), (b) i2c_add_adapter does
-substantial kobject / kernfs activity that exercises slab allocator
-fast paths — exactly the kind of code that the page-aliasing bug
-class corrupts unpredictably.
+**Updated forensic analysis from existing crash dump:** decoded the
+faulting RVC instruction `c2d0` properly. It's `c.sw a2, 4(a3)`, NOT
+4(a0) — rs1' is 5 (= a3), so the trap's badaddr=0x4 = a3+4 with
+a3=NULL matches.
 
-Plan for next debug session:
+The PC c00b2f3a sits inside the standard `list_del` epilogue inside
+get_page_from_freelist:
 
-1. Collect a tighter trap probe with sync-fault filtering and
-   register-window snapshot at the moment of NULL deref.
-2. With that, identify the stale PA being read, then check whether
-   it's part of a kernel buddy/pcp structure that lives at a PA
-   recently written-to by another agent (PTW Svadu writeback, AMO
-   reservation, etc).
-3. If yes, this is a fresh manifestation of the kernel-user page
-   aliasing class — and worth a targeted RTL fix in `core_top.sv` /
-   `amo_unit.sv` rather than DT-level workarounds.
+```
+lw  a5, 16(s7)        ; a5 = entry pointer
+lw  a2, 4(a5)         ; a2 = entry->next
+lw  a3, 0(a5)         ; a3 = entry->prev   <-- NULL
+sw  a2, 4(a3)         ; prev->next = next  <-- FAULTS
+sw  a3, 0(a2)         ; next->prev = prev
+sw  s6, 0(a5)         ; entry->next = LIST_POISON1 (256)
+sw  s4, 4(a5)         ; entry->prev = LIST_POISON2 (290)
+```
+
+Killer detail from the register dump:
+- `s4 = 0x122` (= LIST_POISON2 the kernel is about to write)
+- `a2 = 0x122` (= entry->next that was LOADED a few cycles earlier)
+- `s6 = 0x100` (= LIST_POISON1)
+
+**`entry->next` is ALREADY LIST_POISON2.** This entry was `list_del`'d
+once before. The current `list_del` is a DOUBLE-DELETE — and the only
+reason it doesn't trip the LIST_POISON-aware sanity check earlier is
+that `entry->prev` was wiped to NULL (instead of the matching
+LIST_POISON1=0x100), bypassing the typical "if (entry->next ==
+LIST_POISON2) BUG()" guard.
+
+Reading: someone did `list_del(entry)` correctly (poisons next →
+LIST_POISON2, prev → LIST_POISON1). Then something stomped the prev
+field from 0x100 to 0x00. Then the page allocator finds this entry
+on a freelist and does another `list_del`. The poisoned next slips
+through the corrupted-prev check and we fault on the prev=NULL
+deref.
+
+The "stomped to 0" pattern fits the PA-aliasing bug class: a HW
+writer (PTW Svadu writeback, an AMO leak, or speculative wrong-path
+store leakage) deposits a zero-valued word at a PA that happens to
+hold a Linux freelist's prev pointer. Adding the I2C node shifts
+slab allocations enough that the relevant struct page lru lands on
+a PA the bad writer hits.
+
+Plan for next debug session (when sims are tolerated):
+
+1. Re-enable I2C node, run sim with the in-flight `sync_fault.log`
+   probe (already added in tb_soc_top.v locally, uncommitted) — it
+   dumps all GPRs + a 32-entry PC ring on the first kernel sync
+   exception.
+2. Add a parallel "kernel address watchpoint" probe: snoop every bus
+   write whose target PA is in the kernel's freelist range
+   (0xc7000000-0xc8000000 area, where slab allocations land), filter
+   for stores of value 0 to offsets that look like list_head.prev.
+   Trace which bus master + which PC committed those stores.
+3. Cross-reference the offending master's PC with the AMO/PTW/store
+   pipeline state at that cycle. If it's an AMO-after-PTW writeback
+   or speculative-wrong-path commit, that's the RTL fix target.
+4. Likely fix lives in `design/core/amo_unit/` (response steering),
+   `design/core/mmu/` (Svadu writeback gating), or the IWB squash
+   path in `core_top.sv`.
 
 Until then Phase 2d (SPI) and Phase 2e (PWM) can proceed. Their RTL
 refactors are independent and won't regress on the I2C kernel issue.
