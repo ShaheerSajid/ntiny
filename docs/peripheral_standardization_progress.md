@@ -26,6 +26,59 @@ Pre-requisite work completed alongside the per-peripheral phases:
   layout-sensitive boot-hang in `kernfs_name_hash` exposed by Phase 2a's
   cpio shift.
 
+## Phase 2c follow-up — Linux i2c-ocores enablement debug
+
+The RTL refactor in `256d66f` is correct (verified by bare-metal
+peek/poke). DT keeps `status = "disabled"` because flipping it to
+`"okay"` triggers a kernel-side bug in init:
+
+- LEGACY_PTYS=y baseline → `Unable to handle kernel access to user
+  memory ... at virtual address 00000004 ... epc :
+  get_page_from_freelist+0x18e/0xb3c`. NULL deref at offset 4 of a
+  zero pointer (likely a NULL `struct zone *` or freelist pointer
+  inside the PCP fast path).
+- LEGACY_PTYS=n variant → silent sysctl hang: 188 M sim cycles of
+  pure kernel idle with zero U-mode samples. Userspace process called
+  a syscall and never returned.
+
+Static audit done so far (rules out the obvious culprits):
+
+- **i2c.sv RTL is quiescent after probe**: at reset ctrl=0 ⇒
+  s_core_en=0 ⇒ cmd writes are gated off, byte_controller stays in
+  ST_IDLE, cmd_ack stays 0, irq_flag stays 0, interrupt_o stays 0.
+  Driver writes ctrl=EN=0x80 last; bit 6 (IEN) is never set during
+  probe, so even if irq_flag were set, the qualified output stays 0.
+- **PLIC wiring is correct**: `sources_i[3] = i2c_interrupt`,
+  matching DT `interrupts = <4>` (PLIC source 4).
+- **i2c-ocores driver flow looks vanilla**: ioremap + clk_get +
+  request_irq + ocores_init (read-modify-write ctrl, set prelo/prehi,
+  IACK, enable) + i2c_add_adapter. No DMA, no shared resources.
+- **Bare-metal driver works** with the new RTL (peek/poke + functional
+  test pass).
+
+Strongest remaining hypothesis: same layout-sensitive HW bug class
+that bit kernfs_name_hash earlier this session. Enabling the I2C node
+(a) shifts kernel BSS/data layout (just by registering another
+platform device's worth of allocations), (b) i2c_add_adapter does
+substantial kobject / kernfs activity that exercises slab allocator
+fast paths — exactly the kind of code that the page-aliasing bug
+class corrupts unpredictably.
+
+Plan for next debug session:
+
+1. Collect a tighter trap probe with sync-fault filtering and
+   register-window snapshot at the moment of NULL deref.
+2. With that, identify the stale PA being read, then check whether
+   it's part of a kernel buddy/pcp structure that lives at a PA
+   recently written-to by another agent (PTW Svadu writeback, AMO
+   reservation, etc).
+3. If yes, this is a fresh manifestation of the kernel-user page
+   aliasing class — and worth a targeted RTL fix in `core_top.sv` /
+   `amo_unit.sv` rather than DT-level workarounds.
+
+Until then Phase 2d (SPI) and Phase 2e (PWM) can proceed. Their RTL
+refactors are independent and won't regress on the I2C kernel issue.
+
 ## Phase 2d — SPI standardisation (`sifive,spi0`)
 
 **Scope:** the existing ntiny SPI uses a Xilinx-style register layout
@@ -239,6 +292,62 @@ bullet list of remaining work after 2d + 2e:
   `cdns,macb` (Cadence MACB-compatible) — well-supported in Linux.
 - True RTC. Currently jiffies + CLINT. Adding an RTC peripheral is
   quality-of-life only.
+
+## Phase 5 — IEEE / industry-standard peripheral migration (long-term)
+
+The SiFive + OpenCores targets we're moving to in Phase 2 are
+upstream-Linux-friendly but are still **vendor-specific register
+layouts**, not industry standards. The longer-term direction is to
+migrate again to peripherals whose register layouts ARE the actual
+industry/IEEE specs, so any OS (not just Linux) recognises them and
+COTS reference firmware works without modification. Concrete moves:
+
+| Peripheral | Current target (Phase 2) | IEEE / industry target | Linux compat impact |
+|---|---|---|---|
+| UART | `sifive,uart0` | NS16550/8250-compatible (`ns16550a`) | Wider (every OS has a 16550 driver — Linux, BSD, U-Boot, EDK2, FreeRTOS, …). Drops the SiFive-specific lying-clock hack. |
+| SPI | `sifive,spi0` | DesignWare APB SPI (`snps,dw-apb-ssi`) or PL022 | DesignWare is in every embedded SoC; PL022 is the ARM Primecell standard. Both have richer register sets but well-documented industry specs. |
+| I2C | `opencores,i2c-ocores` | OpenCores i2c-ocores IS an industry-tracked open spec already; this stays. Alt: SMBus-compliant Designware I2C (`snps,designware-i2c`). | OpenCores was the right pick; SMBus designware is heavier but covers SMBus extensions. |
+| GPIO | `sifive,gpio0` | Generic `linux,gpio-mmio` (the lowest-common-denominator) | Wider compatibility but loses SiFive's IRQ matrix; we'd need to drop to a poll-mode model or rebuild IRQ wiring around IEEE-style "single composite GPIO IRQ + status register". |
+| PWM | `sifive,pwm0` | No IEEE std; closest is `pwm-mmio-generic` (kernel >=6.0). | Vendor lock-in is the SiFive cost; generic mmio has fewer features. |
+| TIMER | (drop) | (n/a) | n/a |
+| Ethernet MAC | (n/a today) | IEEE 802.3 + Cadence MACB or DW EQOS | Industry standard MACs come with full IEEE 802.3 framing. |
+| JTAG / Debug | RV-debug spec (already standard) | IEEE 1149.1 / 1149.7 | Already aligned. |
+
+**Why not IEEE-first from day one?** The Phase 2 SiFive targets are a
+*much* smaller RTL refactor (each peripheral is 200-500 LOC of register
+decode), and prove the end-to-end Linux-driver-binding flow with
+minimum risk. Phase 5 is bigger because each industry-spec target has
+considerably more registers, more side-effects, and stricter timing
+guarantees:
+
+- `ns16550a` UART: 12 registers including 2 shadow banks selected by
+  DLAB, FIFO threshold programming, modem-control lines. ~3-4× the
+  Phase 2b SiFive UART RTL.
+- `snps,dw-apb-ssi` SPI: ~30 registers including DMA channels,
+  programmable burst length, slave select polarity, etc.
+- `snps,designware-i2c`: SMBus protocols, DMA, hardware filtering.
+
+Each Phase 5 step gets its own focused session, lands as one commit,
+and **deprecates the corresponding Phase 2 target** by retiring the
+sifive,*/opencores,* compat string. Bare-metal drivers + tests and the
+boot self-test all migrate alongside.
+
+**Cross-cutting cleanup needed first:**
+- Bus arbiter that issues true grant signals to MMIO masters
+  (`docs/bus_revamp_plan.md` Phase 1) — eliminates the response-leak
+  bug class that has bitten us before. Phase 5 IPs typically have
+  more concurrent state (FIFOs + DMA), making bus correctness more
+  load-bearing.
+- 32-IRQ matrix expansion (Phase 3 cleanup, listed above) — many
+  IEEE-std peripherals have more interrupts per device.
+- A standard clock controller node so all the peripherals can declare
+  proper input clocks (drops the "lying clock" UART workaround
+  permanently).
+
+**Order:** Phase 2 (SiFive/OCores) lands first → Phase 3 cleanup →
+**Phase 5 only after Phase 4 has stabilised the SoC integration**. The
+gap between Phase 4 and Phase 5 may be measured in tape-out cycles
+(this is a longer-term direction, not a near-term sprint).
 
 ## Order of operations summary
 
