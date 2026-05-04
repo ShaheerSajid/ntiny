@@ -213,14 +213,22 @@
             interrupt-controller;
         };
 
-        /* PWM — target sifive,pwm0 (Phase 2e). No PWM IRQs wired in
-         * RTL today; driver will fall back to non-IRQ mode. */
-        pwm@10040000 {
+        /* PWM — sifive,pwm0 (Phase 2e, RTL refactored to match). Single
+         * 31-bit free-running counter + 4 independent 16-bit compare
+         * channels. Output i is HIGH while the scaled count is below
+         * cmp[i], LOW once it fires. The Linux driver works in poll
+         * mode (no PLIC IRQ wired); ip bits are observable in PWMCFG
+         * but not wired through the PLIC. Driver requires
+         * PWM_POLARITY_INVERSED (the only mode the SiFive PWM
+         * generates).
+         *
+         * Phase 2e first cut. No PWM IRQs wired in RTL today; driver
+         * works in poll mode. */
+        pwm0: pwm@10040000 {
             compatible = "sifive,pwm0";
             reg = <0x10040000 0x1000>;
             clocks = <&soc_clk>;
             #pwm-cells = <3>;
-            status = "disabled";
         };
 
         /* TIMER — to be dropped Phase 3 (CLINT mtime covers OS tick). */
