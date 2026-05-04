@@ -15,29 +15,26 @@ int i2c_test()
 	// if uart is working fine we can peak and poke every registers of I2C.
 	// test to check if writing and reading to the registers is correctly happening. 
 
-	for (int i = 0; i<16; i++) // setting every single bits of the prescaler register and conforming it
-	{
-		poke_reg(m_i2c,REG_CLK_PRESCALER,1<<i);
-		if (peak_reg(m_i2c,REG_CLK_PRESCALER)!= (1<<i))
-		{
-			uart_puts("I2C clock prescaler register is not working correctly\n");
-			return 1;
+	/* Phase 2c: prescaler is split into PRELO/PREHI 8-bit halves (each
+	 * RW). Walk a single bit through each. */
+	uint32_t pres_list[] = {REG_PRELO, REG_PREHI};
+	for (int p = 0; p < 2; p++)
+		for (int i = 0; i < 8; i++) {
+			poke_reg(m_i2c, pres_list[p], 1u << i);
+			if (peak_reg(m_i2c, pres_list[p]) != (1u << i)) {
+				uart_puts("I2C prescaler register is not working correctly\n");
+				return 1;
+			}
 		}
-	}
-	
-	uint32_t register_list[] = {REG_CTRL,REG_RX,REG_TX,REG_CMD};
-	
-	for ( int registers = 0; registers <4; registers++) // iterating through all 5 registers of I2C
-	{
-		for (int i = 0; i<8; i++) // setting every single bits of the register and conforming it
-		{
-			poke_reg(m_i2c,register_list[registers],1<<i);
-			
-			if (peak_reg(m_i2c,register_list[registers])!= (1<<i))
-				{
-					ee_printf ("I2C register at address map %d is not working correctly\n",register_list[registers]);
-					return 1;
-				}
+
+	/* CTRL is the only other register where reads return the last
+	 * written byte (DATA reads return rx, CMDSTAT reads return status —
+	 * neither matches the written value, so peek/poke isn't applicable). */
+	for (int i = 0; i < 8; i++) {
+		poke_reg(m_i2c, REG_CTRL, 1u << i);
+		if (peak_reg(m_i2c, REG_CTRL) != (1u << i)) {
+			ee_printf("I2C CTRL register is not working correctly\n");
+			return 1;
 		}
 	}
 	I2C_close();

@@ -3,13 +3,21 @@
 
 `include "i2c_master_defines.sv"
 
-
-`define REG_CLK_PRESCALER 3'b000 //BASEADDR+0x00
-`define REG_CTRL          3'b001 //BASEADDR+0x04
-`define REG_RX            3'b010 //BASEADDR+0x08
-`define REG_STATUS        3'b011 //BASEADDR+0x0C
-`define REG_TX            3'b100 //BASEADDR+0x10
-`define REG_CMD           3'b101 //BASEADDR+0x14
+// Phase 2c peripheral standardisation: register layout matches the
+// upstream Linux i2c-ocores driver (drivers/i2c/busses/i2c-ocores.c,
+// compatible "opencores,i2c-ocores") with reg-shift=2 + reg-io-width=4.
+//
+// Word index (=byte addr/4):
+//   0  prescale_lo
+//   1  prescale_hi
+//   2  ctrl
+//   3  data    — write = tx, read = rx (aliased)
+//   4  cmdstat — write = cmd, read = status (aliased)
+`define REG_PRELO   3'd0
+`define REG_PREHI   3'd1
+`define REG_CTRL    3'd2
+`define REG_DATA    3'd3
+`define REG_CMDSTAT 3'd4
 
 module i2c_top
  
@@ -86,13 +94,15 @@ module i2c_top
                 r_cmd[2:1] <= 2'b0;                 // reserved bits
                 r_cmd[0]   <= 1'b0;                 // clear IRQ_ACK bit
                 case (i2c_addr_map)
-                    `REG_CLK_PRESCALER:
-                        r_pre <= avl_wdata[15:0];
+                    `REG_PRELO:
+                        r_pre[7:0]  <= avl_wdata[7:0];
+                    `REG_PREHI:
+                        r_pre[15:8] <= avl_wdata[7:0];
                     `REG_CTRL:
                         r_ctrl <= avl_wdata[7:0];
-                    `REG_TX:
+                    `REG_DATA:    // write = tx
                         r_tx <= avl_wdata[7:0];
-                    `REG_CMD:
+                    `REG_CMDSTAT: // write = cmd
                     begin
                         if(s_core_en)
                             r_cmd <= avl_wdata[7:0];
@@ -116,18 +126,16 @@ module i2c_top
             avl_rdata <= 32'h0;
         else if (avl_chipsel) begin
             case (i2c_addr_map)
-                `REG_CLK_PRESCALER:
-                    avl_rdata <= {16'h0,r_pre};
+                `REG_PRELO:
+                    avl_rdata <= {24'h0, r_pre[7:0]};
+                `REG_PREHI:
+                    avl_rdata <= {24'h0, r_pre[15:8]};
                 `REG_CTRL:
-                    avl_rdata <= {24'h0,r_ctrl};
-                `REG_RX:
-                    avl_rdata <= {24'h0,s_rx};
-                `REG_STATUS: 
-                    avl_rdata <= {24'h0,s_status};
-                `REG_TX:    
-                    avl_rdata <= {24'h0,r_tx};
-                `REG_CMD:
-                    avl_rdata <= {24'h0,r_cmd};
+                    avl_rdata <= {24'h0, r_ctrl};
+                `REG_DATA:    // read = rx
+                    avl_rdata <= {24'h0, s_rx};
+                `REG_CMDSTAT: // read = status
+                    avl_rdata <= {24'h0, s_status};
                 default:
                     avl_rdata <= 32'h0;
             endcase

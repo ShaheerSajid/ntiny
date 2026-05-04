@@ -152,7 +152,15 @@
             status = "disabled";
         };
 
-        /* I2C0 — target opencores,i2c-ocores (Phase 2c). */
+        /* I2C0 — opencores,i2c-ocores (Phase 2c: RTL refactored to
+         * the upstream layout — prelo/prehi at 0x00/0x04, ctrl at
+         * 0x08, tx/rx aliased on 0x0C, cmd/status aliased on 0x10).
+         * DT keeps status="disabled": enabling the node currently
+         * triggers a layout-sensitive get_page_from_freelist NULL
+         * deref in init (or a sysctl hang depending on LEGACY_PTYS).
+         * The RTL refactor itself is correct (bare-metal peek/poke
+         * passes); only the Linux driver enablement is parked
+         * pending a separate kernel-side debug session. */
         i2c@10020000 {
             compatible = "opencores,i2c-ocores";
             reg = <0x10020000 0x1000>;
@@ -160,8 +168,8 @@
             interrupts = <4>;
             clocks = <&soc_clk>;
             clock-frequency = <100000>;
-            reg-shift = <0>;
-            reg-io-width = <1>;
+            reg-shift = <2>;
+            reg-io-width = <4>;
             #address-cells = <1>;
             #size-cells = <0>;
             status = "disabled";

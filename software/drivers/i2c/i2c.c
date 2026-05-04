@@ -6,21 +6,18 @@ static volatile uint32_t *m_I2C;
 // Initialize I2C module
 ///////////////////////////////////////////////////
 void I2C_init ( uint32_t i2c_freq)
-{ 
-	  uint32_t clock_prescaler = (50000000/(5*i2c_freq)) - 1 ;
-	  uint32_t ctrl_reg = 0;
-	 m_I2C =	(volatile uint32_t *)BASE_ADDR;
-	 // Reset
-	 m_I2C[REG_CTRL] = 0;
-	
-	 
-	 m_I2C[REG_CMD] = 0;
-	 ctrl_reg		= 0x80;
-	 //clock_prescaler = 0x3ff;
-	 m_I2C[REG_CLK_PRESCALER] = clock_prescaler;
-	
-	m_I2C[REG_CTRL] = ctrl_reg;
-	
+{
+	uint32_t clock_prescaler = (50000000/(5*i2c_freq)) - 1 ;
+	m_I2C = (volatile uint32_t *)BASE_ADDR;
+	/* Disable + clear command. */
+	m_I2C[REG_CTRL] = 0;
+	m_I2C[REG_CMD]  = 0;
+	/* Phase 2c: prescaler is split into low/high 8-bit halves at separate
+	 * word offsets (i2c-ocores upstream layout). */
+	m_I2C[REG_PRELO] = clock_prescaler & 0xff;
+	m_I2C[REG_PREHI] = (clock_prescaler >> 8) & 0xff;
+	/* Enable I2C core (bit 7). */
+	m_I2C[REG_CTRL] = 0x80;
 }
 
 ///////////////////////////////////////////////////
