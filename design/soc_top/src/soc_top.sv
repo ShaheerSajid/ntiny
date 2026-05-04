@@ -362,7 +362,7 @@ module soc_top
     wire [4:0] gpio_addr  = dmem_bus.addr[6:2];  // 5-bit word index, covers 0..0x40
     wire [7:0] spi_addr   = dmem_bus.addr[7:0];
     wire [7:0] i2c_addr   = dmem_bus.addr[7:0];
-    wire [7:0] pwm_addr   = dmem_bus.addr[7:2];
+    wire [7:0] pwm_addr   = dmem_bus.addr[7:0];
     wire [2:0] crc_addr   = dmem_bus.addr[4:2];
 
     // (plic_addr removed — new PLIC uses full address)

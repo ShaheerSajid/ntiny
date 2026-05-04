@@ -2,58 +2,38 @@
 #define __PWM_H__
 
 #include <stdint.h>
-#include"ee_printf.h"
-
-//-----------------------------------------------------------------
-// Memory Mapped Addressing:
-//-----------------------------------------------------------------
-
 #include "mem_map.h"
-#define PRESCALER_REG  0x00
 
-//	control register for controlling PWM modules
-//	{8'b0, inverting2,inverting1,center_edge2,center_edge1,com_re2,com_re1,pwm_2_en,pwm_1_en}	
-//	com_re -> complementry_redundent
-#define CONTROL_REG    0x01 
+/* sifive,pwm0 register map. Phase 2e standardisation. */
 
+#define PWM_PWMCFG          0x00
+    #define PWM_PWMCFG_SCALE_MASK       0xfu
+    #define PWM_PWMCFG_STICKY_SHIFT     8
+    #define PWM_PWMCFG_ZEROCMP_SHIFT    9
+    #define PWM_PWMCFG_DEGLITCH_SHIFT   10
+    #define PWM_PWMCFG_ENALWAYS_SHIFT   12
+    #define PWM_PWMCFG_ENONCE_SHIFT     13
+    #define PWM_PWMCFG_CENTER_SHIFT     16
+    #define PWM_PWMCFG_GANG_SHIFT       24
+    #define PWM_PWMCFG_IP_SHIFT         28      /* bits[31:28] = ip[3:0] */
 
-#define PERIOD1_REG    0x02
-#define PERIOD2_REG    0x03 
-#define COMPARE1_REG   0x04
-#define COMPARE2_REG   0x05 
-#define DEADTIME1_REG  0x06 
-#define DEADTIME2_REG  0x07 
-//-----------------------------------------------------------------
-// Prototypes:
-//-----------------------------------------------------------------
+#define PWM_PWMCOUNT        0x08
+#define PWM_PWMS            0x10
 
-void pwm_init (void); 
+#define PWM_PWMCMP0         0x20
+#define PWM_PWMCMP1         0x24
+#define PWM_PWMCMP2         0x28
+#define PWM_PWMCMP3         0x2c
+#define PWM_PWMCMP(i)       (PWM_PWMCMP0 + 4u * (i))
 
-void set_compare1 (uint32_t comapre_value);
+#define PWM_NCHANNELS       4
 
-void set_compare2 (uint32_t comapre_value1);
-
-void set_prescaler (uint32_t prescaler_value);
-
-void set_period1 (uint32_t period_reg_value);
-
-void set_period2 (uint32_t period_reg_value);
-
-void set_deadtime1 (uint32_t deadtime1);
-
-void set_deadtime2 (uint32_t deadtime2);
-
-void pwm1_start (void);
-
-void pwm2_start (void);
-
-void pwm1_stop (void);
-
-void pwm2_stop (void);
-
-uint32_t read_control ();
-
-void pwm1_set_mode (int com_re, int cen_edge);
-void pwm2_set_mode (int com_re, int cen_edge);
+void     pwm_init(void);
+void     pwm_set_scale(uint8_t scale);          /* 0..15 */
+void     pwm_set_cmp(int ch, uint16_t value);   /* ch = 0..3 */
+uint16_t pwm_get_cmp(int ch);
+void     pwm_enable(void);                      /* sets EN_ALWAYS */
+void     pwm_disable(void);                     /* clears EN_ALWAYS */
+uint32_t pwm_get_pwms(void);                    /* current scaled count */
 
 #endif

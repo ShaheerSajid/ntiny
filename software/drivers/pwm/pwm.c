@@ -1,137 +1,54 @@
 #include "pwm.h"
-#include <stdint.h>
 
-//-----------------------------------------------------------------
-// Locals
-//-----------------------------------------------------------------
 static volatile uint32_t *m_pwm;
 
-//-----------------------------------------------------------------
-// init: setting memory mapped based address of pwm.
-//-----------------------------------------------------------------
-void pwm_init (void)
+static inline uint32_t pwm_rd(uint32_t off) { return m_pwm[off / 4]; }
+static inline void     pwm_wr(uint32_t off, uint32_t v) { m_pwm[off / 4] = v; }
+
+void pwm_init(void)
 {
-	m_pwm = ( uint32_t *)pwm_base_addr;
-	m_pwm[CONTROL_REG] =  0x0;
+    m_pwm = (volatile uint32_t *)pwm_base_addr;
+    pwm_wr(PWM_PWMCFG,  0u);
+    pwm_wr(PWM_PWMCMP0, 0u);
+    pwm_wr(PWM_PWMCMP1, 0u);
+    pwm_wr(PWM_PWMCMP2, 0u);
+    pwm_wr(PWM_PWMCMP3, 0u);
 }
 
-
-//-----------------------------------------------------------------
-// set_compare1: setting value of pwm comapre1 register
-//-----------------------------------------------------------------
-void set_compare1 (uint32_t comapre_value)
+void pwm_set_scale(uint8_t scale)
 {
-	m_pwm[COMPARE1_REG] =  comapre_value;
+    uint32_t cfg = pwm_rd(PWM_PWMCFG);
+    cfg = (cfg & ~PWM_PWMCFG_SCALE_MASK) | (scale & PWM_PWMCFG_SCALE_MASK);
+    pwm_wr(PWM_PWMCFG, cfg);
 }
 
-//-----------------------------------------------------------------
-// set_compare2: setting value of pwm comapre2 register
-//-----------------------------------------------------------------
-void set_compare2 (uint32_t comapre_value1)
+void pwm_set_cmp(int ch, uint16_t value)
 {
-	m_pwm[COMPARE2_REG] =  comapre_value1;
+    if (ch < 0 || ch >= PWM_NCHANNELS) return;
+    pwm_wr(PWM_PWMCMP(ch), value);
 }
 
-//-----------------------------------------------------------------
-// set_prescaler: setting value of pwm prescaler register
-//-----------------------------------------------------------------
-void set_prescaler (uint32_t prescaler_value)
+uint16_t pwm_get_cmp(int ch)
 {
-	m_pwm[PRESCALER_REG] =  prescaler_value;
+    if (ch < 0 || ch >= PWM_NCHANNELS) return 0;
+    return (uint16_t)pwm_rd(PWM_PWMCMP(ch));
 }
 
-//-----------------------------------------------------------------
-// set_period1: setting value of pwm period1 register
-//-----------------------------------------------------------------
-void set_period1 (uint32_t period_reg_value)
+void pwm_enable(void)
 {
-	m_pwm[PERIOD1_REG] =  period_reg_value;
+    uint32_t cfg = pwm_rd(PWM_PWMCFG);
+    cfg |= (1u << PWM_PWMCFG_ENALWAYS_SHIFT);
+    pwm_wr(PWM_PWMCFG, cfg);
 }
 
-//-----------------------------------------------------------------
-// set_period2: setting value of pwm period2 register
-//-----------------------------------------------------------------
-void set_period2 (uint32_t period_reg_value)
+void pwm_disable(void)
 {
-	m_pwm[PERIOD2_REG] =  period_reg_value;
+    uint32_t cfg = pwm_rd(PWM_PWMCFG);
+    cfg &= ~(1u << PWM_PWMCFG_ENALWAYS_SHIFT);
+    pwm_wr(PWM_PWMCFG, cfg);
 }
 
-//-----------------------------------------------------------------
-// set_deadtime1: setting value of deadtime for complimentry PWM1
-//-----------------------------------------------------------------
-void set_deadtime1 (uint32_t deadtime1)
+uint32_t pwm_get_pwms(void)
 {
-	m_pwm[DEADTIME1_REG] =  deadtime1;
-}
-
-//-----------------------------------------------------------------
-// set_deadtime2: setting value of deadtime for complimentry PWM2
-//-----------------------------------------------------------------
-void set_deadtime2 (uint32_t deadtime2)
-{
-	m_pwm[DEADTIME2_REG] =  deadtime2;
-}
-
-
-//-----------------------------------------------------------------
-// start: setting value of pwm control register
-//-----------------------------------------------------------------
-void pwm1_start ()
-{
-	m_pwm[CONTROL_REG] |=  0x1;
-}
-
-//-----------------------------------------------------------------
-// start: setting value of pwm control register
-//-----------------------------------------------------------------
-void pwm2_start ()
-{
-	m_pwm[CONTROL_REG] |=  0x2;
-}
-
-//-----------------------------------------------------------------
-//  stop: setting value of pwm control register
-//-----------------------------------------------------------------
-void pwm1_stop ()
-{
-	m_pwm[CONTROL_REG] &=  0xfe;
-}
-
-//-----------------------------------------------------------------
-//  stop: setting value of pwm control register
-//-----------------------------------------------------------------
-void pwm2_stop ()
-{
-	m_pwm[CONTROL_REG] &=  0xfd;
-}
-
-//-----------------------------------------------------------------
-//  read_control: reading value of pwm control register
-//-----------------------------------------------------------------
-uint32_t read_control ()
-{
-	return m_pwm[CONTROL_REG];
-}
-
-//-----------------------------------------------------------------
-// pwm1_set_mode: setting value of pwm control register
-//-----------------------------------------------------------------
-void pwm1_set_mode (int com_re, int cen_edge)
-{
-
-	m_pwm[CONTROL_REG] = com_re? m_pwm[CONTROL_REG] | (0x1<<2): m_pwm[CONTROL_REG] & ~(0x1<<2);
-	m_pwm[CONTROL_REG] = cen_edge? m_pwm[CONTROL_REG] | (0x1<<4): m_pwm[CONTROL_REG] & ~(0x1<<4);
-	
-
-}
-//-----------------------------------------------------------------
-// pwm2_set_mode: setting value of pwm control register
-//-----------------------------------------------------------------
-void pwm2_set_mode (int com_re, int cen_edge)
-{
-
-	m_pwm[CONTROL_REG] = com_re? m_pwm[CONTROL_REG] | (0x1<<3): m_pwm[CONTROL_REG] & ~(0x1<<3);
-	m_pwm[CONTROL_REG] = cen_edge? m_pwm[CONTROL_REG] | (0x1<<5): m_pwm[CONTROL_REG] & ~(0x1<<5);
-	
-
+    return pwm_rd(PWM_PWMS);
 }
