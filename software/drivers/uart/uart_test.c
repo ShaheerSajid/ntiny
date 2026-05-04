@@ -36,13 +36,15 @@ int uart_peak_poke_test ()
         delay_ms(500);
     }
 
-    // testing registers write/read fucntionality
+    /* testing registers write/read functionality — divisor (U_DIV)
+     * is the only register where every bit is freely R/W; status-style
+     * registers in the SiFive layout have field-specific masks. */
 
     for (int i = 0; i<32; i++) // setting every single bits of the register and conforming it
     {
-        poke_reg(m_uart,U_baudrate/4,1<<i);
-        
-        if (peak_reg(m_uart,U_baudrate/4)!= (1<<i))
+        poke_reg(m_uart,U_DIV/4,1<<i);
+
+        if (peak_reg(m_uart,U_DIV/4)!= (1<<i))
             {
                 gpio_mode(7,1);
                 gpio_write_pin(7,1);    // error signal

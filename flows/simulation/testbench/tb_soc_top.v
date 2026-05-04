@@ -196,7 +196,7 @@ always @(posedge clk) begin
 	if (!reset &&
 	    soc_top_inst.dmem_bus.req &&
 	    soc_top_inst.dmem_bus.we &&
-	    soc_top_inst.dmem_bus.addr == 32'h10000004) begin  // UART TX @ 0x10000004
+	    soc_top_inst.dmem_bus.addr == 32'h10000000) begin  // UART TXDATA @ 0x10000000 (sifive,uart0 layout)
 		$fwrite(sim_con_fd, "%c", soc_top_inst.dmem_bus.wdata[7:0]);
 		$fflush(sim_con_fd);
 	end

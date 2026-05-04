@@ -26,34 +26,40 @@
 #define NTINY_UART_ADDR         0x10000000UL
 #define NTINY_TIMER_FREQ        50000000UL  /* 50 MHz */
 
-/* ── ntiny UART registers ────────────────────────────────────── */
-#define UART_RX         0x00
-#define UART_TX         0x04
-#define UART_STATUS     0x08
-#define UART_STATUS_RXVALID (1 << 0)
-#define UART_STATUS_TXFULL  (1 << 3)
-#define UART_BAUDRATE   0x10
-#define UART_CONTROL    0x0C
+/* ── ntiny UART registers (sifive,uart0 layout, Phase 2b) ────── */
+#define UART_TXDATA     0x00    /* W: data; R: bit 31 = full flag      */
+#define UART_RXDATA     0x04    /* R: bit 31 = empty, bits[7:0] = data */
+#define UART_TXCTRL     0x08    /* bit 0 = txen, bit 1 = nstop         */
+#define UART_RXCTRL     0x0C    /* bit 0 = rxen                        */
+#define UART_IE         0x10
+#define UART_IP         0x14
+#define UART_DIV        0x18
+
+#define UART_TXDATA_FULL_BIT   (1u << 31)
+#define UART_RXDATA_EMPTY_BIT  (1u << 31)
+#define UART_TXCTRL_TXEN       (1u << 0)
+#define UART_RXCTRL_RXEN       (1u << 0)
 
 /* ── UART console driver ─────────────────────────────────────── */
 static volatile void *uart_base;
 
 static void ntiny_uart_putc(char c)
 {
-    /* At 250000 baud one byte takes ~2000 cycles to shift out — small
-       enough that polling TXFULL is affordable, and necessary so the
-       SoC paces TX bytewise. Without pacing, back-to-back writes can
-       race the uartdpi RX state machine and corrupt PTS output. */
-    while (readl(uart_base + UART_STATUS) & UART_STATUS_TXFULL)
+    /* Poll txdata.full (bit 31) so we don't over-write the in-flight
+       byte. At 250 kbaud this is ~2000 cycles per byte — affordable. */
+    while (readl(uart_base + UART_TXDATA) & UART_TXDATA_FULL_BIT)
         ;
-    writel(c, uart_base + UART_TX);
+    writel((unsigned int)(unsigned char)c, uart_base + UART_TXDATA);
 }
 
 static int ntiny_uart_getc(void)
 {
-    if (!(readl(uart_base + UART_STATUS) & UART_STATUS_RXVALID))
+    /* SiFive convention: rxdata read returns bit 31 = "empty" if no
+       byte available, else bits [7:0] = the byte (and dequeues it). */
+    unsigned int v = readl(uart_base + UART_RXDATA);
+    if (v & UART_RXDATA_EMPTY_BIT)
         return -1;
-    return readl(uart_base + UART_RX) & 0xff;
+    return v & 0xff;
 }
 
 static struct sbi_console_device ntiny_uart = {
@@ -66,13 +72,12 @@ static void ntiny_uart_init(void)
 {
     uart_base = (void *)NTINY_UART_ADDR;
 
-    /* Reset TX/RX + enable interrupts (same as bare-metal uart_init) */
-    writel((1 << 2) | (1 << 1) | (1 << 0), uart_base + UART_CONTROL);
-    /* Baud rate = clk / (baud + 1). 250000 baud: 50MHz/250000 - 1 = 199.
-       Compromise between 115200 (slow sim wallclock from polling-free
-       per-symbol TX delay) and 1M+ (uartdpi RX state machine races
-       SoC TX at high rates). testbench/tb_soc_top.v BAUD must match. */
-    writel(199, uart_base + UART_BAUDRATE);
+    /* SiFive convention (matches drivers/tty/serial/sifive.c): div = clk
+       / baud - 1. For 250 kbaud at 50 MHz that's 199. testbench BAUD
+       must match the parameter compiled into uartdpi. */
+    writel(199, uart_base + UART_DIV);
+    writel(UART_TXCTRL_TXEN, uart_base + UART_TXCTRL);
+    writel(UART_RXCTRL_RXEN, uart_base + UART_RXCTRL);
 
     sbi_console_set_device(&ntiny_uart);
 }

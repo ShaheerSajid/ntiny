@@ -45,6 +45,13 @@
         bootargs = "earlycon=sbi console=hvc0";
     };
 
+    /* SiFive UART driver requires aliases entry for tty index assignment;
+     * without it tty_register_device is skipped and /dev/ttyS0 never
+     * appears. */
+    aliases {
+        serial0 = &uart0;
+    };
+
     cpus {
         #address-cells = <1>;
         #size-cells = <0>;
@@ -81,6 +88,22 @@
         clock-output-names = "soc_clk";
     };
 
+    /* "Lying" UART clock node. The SiFive serial driver computes
+     *   div = uartclk / baud - 1
+     * and writes div on probe, using SIFIVE_DEFAULT_BAUD_RATE = 115200.
+     * To get div = 199 (matches the testbench uartdpi BAUD = 250000
+     * + OpenSBI's matching value) without slowing the actual TX rate,
+     * we tell the driver the clock is 23.04 MHz: 23.04M / 115200 - 1
+     * = 199. The hardware itself still runs at 50 MHz; this fiction
+     * is purely so the SiFive driver doesn't reprogram div=433 and
+     * corrupt the UART after probe. */
+    uart_clk: clock-23m {
+        compatible = "fixed-clock";
+        #clock-cells = <0>;
+        clock-frequency = <23040000>;
+        clock-output-names = "uart_clk";
+    };
+
     soc {
         #address-cells = <1>;
         #size-cells = <1>;
@@ -104,14 +127,17 @@
             riscv,ndev = <6>;
         };
 
-        /* UART0 — target sifive,uart0 (Phase 2b will refactor RTL). */
-        serial@10000000 {
+        /* UART0 — sifive,uart0 (Phase 2b: RTL refactored to match).
+         * The HVC console keeps going through OpenSBI (no Linux UART
+         * driver involved). With this node enabled, the SiFive driver
+         * additionally probes and exposes /dev/ttySIF0 — the boot
+         * test script will report uart.driver PASS once it appears. */
+        uart0: serial@10000000 {
             compatible = "sifive,uart0";
             reg = <0x10000000 0x1000>;
             interrupt-parent = <&plic>;
-            interrupts = <1>;          /* uart_rx (single muxed IRQ) */
-            clocks = <&soc_clk>;
-            status = "disabled";
+            interrupts = <1>;          /* uart_rx */
+            clocks = <&uart_clk>;      /* lying clock — see clock-23m comment */
         };
 
         /* SPI0 — target sifive,spi0 (Phase 2d). */
