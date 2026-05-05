@@ -16,12 +16,16 @@ check_mem_map:
 	python3 ../../scripts/gen_mem_map.py --check
 
 # --- Common Verilator flags ---
+# UNOPTFLAT (combinational loops) and CASEINCOMPLETE are FATAL — surfacing
+# UNOPTFLAT is how we caught the BPU/mmu_i_stall race in pty_init debug,
+# so any new comb loop must fail the build. Other lint warnings (WIDTH,
+# MULTIDRIVEN, UNSIGNED) stay silenced because the codebase has many
+# pre-existing benign instances; revisit if a regression turns one into
+# a real bug.
 VERILATOR_WARNINGS = \
-	-Wno-UNOPTFLAT \
 	-Wno-INITIALDLY \
 	-Wno-UNUSED \
 	-Wno-WIDTH \
-	-Wno-CASEINCOMPLETE \
 	-Wno-PINMISSING \
 	-Wno-MULTIDRIVEN \
 	-Wno-STMTDLY \

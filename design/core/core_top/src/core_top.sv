@@ -1786,6 +1786,32 @@ always_ff@(posedge clk_i or posedge reset_i)
 			predicted_pc_ie <= 0;
 			predicted_target_ie <= 0;
 		end
+		else if(arb_redirect_valid && arb_redirect_kind == RDR_BPU
+		        && aligner_valid && !ie_stall) begin
+			// BPU at ID is the arbitrated redirect winner this cycle.
+			// The branch is at the aligner output and MUST reach IE to
+			// resolve the prediction. Capture it here, BEFORE the
+			// ie_flush clause — because the BPU's own redirect →
+			// imem.req asserts mmu_i_stall_i combinationally same
+			// cycle, lifting if_id_stall_o and forcing hazard_unit
+			// case 4'b1000 to set ie_flush=1. consumer_can_take's
+			// mmu_i_stall_q is registered (1-cycle delayed) to break
+			// the comb loop, so BPU fires while the branch is about
+			// to be killed by ie_flush. Without this clause the
+			// branch is dropped and the predicted target commits
+			// unguarded — see project_pty_init_kernfs_corruption.md
+			// (bltu c0276ebe / radix_tree_extend BUG_ON).
+			ctrl_bus_ie <= (aligner_fault || xret_draining) ? CTRL_BUS_NOP() : ctrl_bus_if_id;
+			pc_ie <= pc_id;
+			imm_ie <= imm_id;
+			rs1_forwarded_ie <= rs1_forwarded_id;
+			rs2_forwarded_ie <= rs2_forwarded_id;
+			rs3_forwarded_ie <= rs3_forwarded_id;
+			predicted_pc_ie <= predicted_pc_id;
+			predicted_target_ie <= predicted_target_id;
+			c_valid_ie <= c_valid;
+			stale_ie <= stale_id;
+		end
 		else if(ie_flush || interrupt_valid) begin
 			ctrl_bus_ie <= CTRL_BUS_NOP();
 			pc_ie <= 0;
@@ -2561,7 +2587,17 @@ amo_unit amo_unit_inst
 	// last transaction is discarded by amo_unit. After ptw_active_q
 	// drops, amo_unit's own request goes on the bus and the bus's
 	// subsequent response is genuinely AMO's.
-	.dbus_stall_i     (ptw_owns_bus |
+	// Also include mmu_d_stall so the AMO never issues bus traffic
+	// while MMU translation is in flight (TLB miss + PTW walk, or the
+	// pre-PTW translation latency where d_paddr is unstable). Without
+	// this gate, AMO's dbus_read can latch garbage rdata from a
+	// previous transaction OR fire a request with stale d_paddr,
+	// producing wild low-PA reads that alias to early RAM in our
+	// model. Caught with bus_read.log probe: 1005 wild AMO LR reads
+	// per Linux v7.0 boot, the data of which feeds the IDR's
+	// radix_tree state and corrupts shift fields, ultimately
+	// crashing pty_init via radix_tree_extend BUG_ON.
+	.dbus_stall_i     (ptw_owns_bus | mmu_d_stall |
 	                   (amo_dbus_read ? ~dmem_port.rvalid : ~dmem_port.ready)),
 	// Control
 	.result_o         (amo_result),
@@ -2584,13 +2620,47 @@ wire d_req_raw = amo_active ? (amo_dbus_read | amo_dbus_write) :
 assign dmem_port.addr  = ptw_active ? ptw_addr : d_paddr;
 assign dmem_port.be    = ptw_active ? 4'b1111 :
                          amo_active ? amo_dbus_byteenable : c2a_byteenable;
+// MMU-translation gate: while mmu_d_stall is high (DTLB miss in flight,
+// PTW walking, or translation pre-settled), `d_paddr` is NOT stable —
+// can be garbage / pre-translation / partially-walked. The IE-stage holds
+// the store and `c2a_write` is asserted combinationally from
+// ctrl_bus_ie.mem_op every cycle; without this gate, the always-ready
+// RAM accepts every cycle of `req && we`, committing the store to whatever
+// d_paddr happens to be, giving multiple commits to wild PAs (caught by
+// the bus_write probe: 8703 wild low-PA writes per Linux v7.0 boot,
+// silently aliasing to early RAM via incomplete decode in ram_dp.sv,
+// corrupting OpenSBI/kernel memory and crashing pty_init layout-sensitively).
+//
+// Suppress the c2a-path commit until the MMU has finished translating.
+// PTW path is unaffected (gated only by ptw_active). AMO path is
+// unaffected (it interlocks via amo_unit's own dbus_stall_i which already
+// includes ptw_active). exception_from_ie / mmu_d_access_fault /
+// mmu_d_fault still suppress as before.
+//
+// The first attempt at this bug used `ie_flush` instead, which broke
+// boot because most ie_flush events come from interrupts retiring on a
+// committed store (architecturally-required commit-then-trap contract).
+// `mmu_d_stall` correctly captures only the cycles where d_paddr isn't
+// trustworthy yet.
+// Gate BOTH the c2a-path AND the amo-path bus outputs by
+// d_xlat_pending. AMO's dbus_stall_i already covers translation, but
+// the AMO state machine still drives amo_dbus_read/amo_dbus_write
+// outputs at the bus level — without an output-side gate, those
+// signals reach dmem_port.req while d_paddr is still unstable,
+// producing wild low-PA AMO LR/SC reads (1005 per Linux v7.0 boot
+// caught by bus_read probe). PTW is unaffected (ptw_addr is
+// independent of d_paddr).
+wire d_xlat_pending = mmu_d_stall;
 assign dmem_port.req   = ptw_active ? ptw_req :
                          (mmu_d_access_fault || mmu_d_fault) ? 1'b0 :  // PMP/page fault: suppress bus
+                         d_xlat_pending ? 1'b0 :                        // MMU translation in flight (covers c2a+amo)
                          amo_active ? (amo_dbus_read | amo_dbus_write) :
                                       (c2a_read | c2a_write);
 assign dmem_port.we    = ptw_active ? ptw_we :
                          (mmu_d_access_fault || mmu_d_fault) ? 1'b0 :  // PMP/page fault: suppress bus
-                         amo_active ? amo_dbus_write : c2a_write;
+                         d_xlat_pending ? 1'b0 :                        // MMU translation in flight (covers c2a+amo)
+                         amo_active ? amo_dbus_write :
+                                      c2a_write;
 assign dmem_port.wdata = ptw_active ? ptw_wdata :
                          amo_active ? amo_dbus_writedata  : c2a_writedata;
 

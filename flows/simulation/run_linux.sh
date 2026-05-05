@@ -20,23 +20,21 @@ fi
 if [ ! -f Vtb_soc_top ] || [ ! -d obj_dir ]; then
     echo "Building Verilator model (128MB RAM, no traces)..."
     rm -rf obj_dir Vtb_soc_top
-    # Suppression policy:
-    #   Correctness-relevant warnings are NOT silenced — UNOPTFLAT
-    #   (combinational loops), MULTIDRIVEN, CASEINCOMPLETE, WIDTH,
-    #   UNSIGNED. A real instance of any of these is almost always a
-    #   bug. Style / Verilator-specific cleanups (UNUSED, PINMISSING,
+    # Suppression policy (2026-05-05 update):
+    #   Correctness-relevant warnings are FATAL — UNOPTFLAT (comb
+    #   loops), MULTIDRIVEN, CASEINCOMPLETE, WIDTH, UNSIGNED. Any
+    #   new instance breaks the build so we have to fix it (or
+    #   localise with `// verilator lint_off UNOPTFLAT` markers).
+    #   This was tightened to surface comb-loop races discovered in
+    #   the BPU/mmu_i_stall path during pty_init debug.
+    #   Style / Verilator-specific cleanups (UNUSED, PINMISSING,
     #   INITIALDLY, STMTDLY, UNPACKED, LITENDIAN, MODDUP, MISINDENT)
     #   stay silenced because the codebase has many benign instances
     #   that aren't worth the noise.
-    #
-    #   --Wno-fatal makes warnings visible but non-fatal: a new
-    #   UNOPTFLAT is reported but doesn't break the build, while still
-    #   being noticeable in the elaboration log. The pre-existing
-    #   loops (interrupt_ctrl ecall_valid / ebreak_valid /
-    #   illegal_valid) and CASEINCOMPLETE warnings stay informational.
-    verilator --Wno-fatal -Wno-INITIALDLY -Wno-UNUSED \
-        -Wno-PINMISSING -Wno-STMTDLY \
-        -Wno-UNPACKED -Wno-LITENDIAN -Wno-MODDUP -Wno-MISINDENT \
+    verilator -Wno-INITIALDLY -Wno-UNUSED -Wno-WIDTH \
+        -Wno-PINMISSING -Wno-MULTIDRIVEN -Wno-STMTDLY \
+        -Wno-UNPACKED -Wno-UNSIGNED \
+        -Wno-LITENDIAN -Wno-MODDUP -Wno-MISINDENT \
         --no-timing --timescale-override 1ns/10ps -O3 --threads 4 \
         -DVERILATOR_SIM -DDV_TRACER -sv --top-module tb_soc_top --cc \
         +define+RAM_SIZE_BYTES=134217728 \

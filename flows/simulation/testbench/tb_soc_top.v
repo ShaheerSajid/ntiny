@@ -295,6 +295,13 @@ wire [31:0] wp_x12 = soc_top_inst.core_top_inst.regfile_inst.regfile[12];
 wire [31:0] wp_x13 = soc_top_inst.core_top_inst.regfile_inst.regfile[13];
 wire [31:0] wp_x14 = soc_top_inst.core_top_inst.regfile_inst.regfile[14];
 wire [31:0] wp_x15 = soc_top_inst.core_top_inst.regfile_inst.regfile[15];
+// Loop-control + shift_input registers for radix_tree_extend BUG_ON debug:
+// s1 (x9)  = local maxshift, s2 (x18) = local shift loop var,
+// s11 (x27) = caller's shift arg (idr_get_free).
+wire [31:0] wp_x9   = soc_top_inst.core_top_inst.regfile_inst.regfile[9];
+wire [31:0] wp_x18  = soc_top_inst.core_top_inst.regfile_inst.regfile[18];
+wire [31:0] wp_x19  = soc_top_inst.core_top_inst.regfile_inst.regfile[19];
+wire [31:0] wp_x27  = soc_top_inst.core_top_inst.regfile_inst.regfile[27];
 
 // Last-32 PC ring (overwritten round-robin so always have 32 most-recent).
 reg [31:0] fault_pc_ring [0:31];
@@ -306,20 +313,27 @@ always @(posedge clk) begin
     end
 end
 
-reg fault_dumped = 1'b0;
+// Dump up to FAULT_DUMP_MAX faults (originally one-shot, now 8) so we
+// catch both the WARN ebreak (cause=3) AND the lethal load/page fault
+// that follows. Each dump includes PC-ring snapshot.
+localparam integer FAULT_DUMP_MAX = 8;
+reg [3:0] fault_count = 4'd0;
 integer fi;
 always @(posedge clk) begin
-    // Filter to FAULTS only (cause >= 12 = page faults; cause 2 illegal
-    // insn; cause 0/1/4/5/6/7 misalign/access). Exclude ECALLs (8,9).
-    // Also require epc in kernel high-half so we skip the transient
-    // instruction fault head.S takes during MMU enable.
+    // Filter: real synchronous exceptions in S-mode kernel high-half.
+    //   cause 0/1/4/5/6/7  : misalign / access fault
+    //   cause 2            : illegal insn
+    //   cause 3            : breakpoint (WARN/BUG ebreak)
+    //   cause 12/13/15     : insn / load / store page fault
+    // Exclude ECALL (8,9,11) and async interrupts (high bit set).
     if (!reset && wp_int_v && (wp_ecause[31] == 1'b0)
         && ((wp_ecause[7:0] >= 8'd12) || (wp_ecause[7:0] == 8'd2)
-            || (wp_ecause[7:0] <= 8'd7))
-        && (wp_priv == 2'd1) && (wp_epc[31:28] == 4'hc) && !fault_dumped) begin
+            || (wp_ecause[7:0] == 8'd3) || (wp_ecause[7:0] <= 8'd7))
+        && (wp_priv == 2'd1) && (wp_epc[31:28] == 4'hc)
+        && (fault_count < FAULT_DUMP_MAX[3:0])) begin
         $fwrite(fault_log_fd,
-            "@%0d KERNEL SYNC FAULT cause=%08h epc=%08h badaddr=%08h\n",
-            wp_cycle, wp_ecause, wp_epc, wp_mtval);
+            "@%0d [#%0d] KERNEL SYNC FAULT cause=%08h epc=%08h badaddr=%08h\n",
+            wp_cycle, fault_count, wp_ecause, wp_epc, wp_mtval);
         $fwrite(fault_log_fd,
             "  satp=%08h status=%08h\n", wp_satp, wp_status);
         $fwrite(fault_log_fd,
@@ -332,13 +346,272 @@ always @(posedge clk) begin
             wp_x10, wp_x11, wp_x12, wp_x13);
         $fwrite(fault_log_fd,
             "  a4=%08h a5=%08h\n", wp_x14, wp_x15);
+        $fwrite(fault_log_fd,
+            "  s1=%08h s2=%08h s3=%08h s11=%08h\n",
+            wp_x9, wp_x18, wp_x19, wp_x27);
         $fwrite(fault_log_fd, "  PC ring (32 entries, oldest first):\n");
         for (fi = 0; fi < 32; fi = fi + 1) begin
             $fwrite(fault_log_fd, "    [%2d] %08h\n",
                 fi, fault_pc_ring[(fault_pc_idx + fi) & 5'h1f]);
         end
         $fflush(fault_log_fd);
-        fault_dumped <= 1'b1;
+        fault_count <= fault_count + 4'd1;
+    end
+end
+
+// ── AMO commit snoop ───────────────────────────────────────────
+// Log every AMO write that hits the d-port. Targets bus-response-leak
+// bug class (xas_load fix in commit a few weeks ago was AMO-related).
+// Volume is low — AMOs are rare during boot.
+integer amo_log_fd;
+initial amo_log_fd = $fopen("logs/amo_commit.log", "w");
+
+wire        wp_amo_active = soc_top_inst.core_top_inst.amo_active;
+wire        wp_amo_dbus_we    = soc_top_inst.core_top_inst.amo_dbus_write;
+wire [31:0] wp_amo_dbus_addr  = soc_top_inst.core_top_inst.amo_dbus_addr;
+wire [31:0] wp_amo_dbus_wdata = soc_top_inst.core_top_inst.amo_dbus_writedata;
+wire [3:0]  wp_amo_dbus_be    = soc_top_inst.core_top_inst.amo_dbus_byteenable;
+
+always @(posedge clk) begin
+    if (!reset && wp_amo_active && wp_amo_dbus_we) begin
+        $fwrite(amo_log_fd,
+            "@%0d AMO_WR addr=%08h wdata=%08h be=%h pc_iwb=%08h\n",
+            wp_cycle, wp_amo_dbus_addr, wp_amo_dbus_wdata,
+            wp_amo_dbus_be, wp_pc_iwb);
+        $fflush(amo_log_fd);
+    end
+end
+
+// ── PTW writeback snoop ────────────────────────────────────────
+// Log every PTW write that hits the d-port. Should only be Svadu
+// A/D bit updates targeting page-table entry addresses. Anything
+// else (or bursts of writes here) is suspicious.
+integer ptw_log_fd;
+initial ptw_log_fd = $fopen("logs/ptw_writeback.log", "w");
+
+wire        wp_ptw_active = soc_top_inst.core_top_inst.ptw_active;
+wire        wp_dmem_we    = soc_top_inst.dmem_bus.we;
+wire        wp_dmem_req   = soc_top_inst.dmem_bus.req;
+wire [31:0] wp_dmem_addr  = soc_top_inst.dmem_bus.addr;
+wire [31:0] wp_dmem_wdata = soc_top_inst.dmem_bus.wdata;
+
+always @(posedge clk) begin
+    if (!reset && wp_ptw_active && wp_dmem_req && wp_dmem_we) begin
+        $fwrite(ptw_log_fd,
+            "@%0d PTW_WB addr=%08h wdata=%08h pc_iwb=%08h\n",
+            wp_cycle, wp_dmem_addr, wp_dmem_wdata, wp_pc_iwb);
+        $fflush(ptw_log_fd);
+    end
+end
+
+// ── Cycle-windowed bus-write log w/ master tag ─────────────────
+// Every committed write on dmem_bus during a focused window around
+// the v7.0 panic (~98.6M cycles), tagged with master + flush state.
+// The window keeps the log manageable; widen for other crash sites.
+//
+// Also unconditionally log any write targeting PA 0x82015000..0x82015fff
+// (the kernel slab page that hosts the IDR radix_tree_root passed to
+// the BUG_ON site at v7.0 pty_init crash). Captures cross-boot
+// corruption candidates regardless of cycle.
+localparam integer BUSWR_WIN_LO = 32'd95_000_000;
+localparam integer BUSWR_WIN_HI = 32'd99_500_000;
+
+integer wr_log_fd;
+initial wr_log_fd = $fopen("logs/bus_write.log", "w");
+
+wire [3:0]  wp_dmem_be    = soc_top_inst.dmem_bus.be;
+wire        wp_c2a_write  = soc_top_inst.core_top_inst.c2a_write;
+wire        wp_excpt_ie   = soc_top_inst.core_top_inst.exception_from_ie;
+wire        wp_iwb_flush  = soc_top_inst.core_top_inst.iwb_flush;
+// NB: wp_ie_flush + wp_pc_ie are declared at top of kfh probe block above.
+
+// Targets the panic-relevant slab page (PA 0x82015000-0x82015fff).
+wire wp_addr_panicpage = (wp_dmem_addr[31:12] == 20'h82015);
+// Targets the radix_tree_node slab area (0x82400000-0x824FFFFF) for ALL
+// shift-byte writes throughout the entire boot. Catches the shift=36
+// corruption source that was written before our bus_write window.
+wire wp_addr_rtnode    = (wp_dmem_addr[31:20] == 12'h824) &&
+                          wp_dmem_be == 4'b0001;
+
+always @(posedge clk) begin
+    if (!reset && wp_dmem_req && wp_dmem_we
+        && ((wp_cycle >= BUSWR_WIN_LO && wp_cycle <= BUSWR_WIN_HI)
+            || wp_addr_panicpage
+            || wp_addr_rtnode)) begin
+        $fwrite(wr_log_fd,
+            "@%0d %s addr=%08h wdata=%08h be=%h c2a=%0d excie=%0d ief=%0d iwbf=%0d pc_ie=%08h pc_iwb=%08h%s%s\n",
+            wp_cycle,
+            wp_ptw_active ? "PTW" :
+            wp_amo_active ? "AMO" : "COR",
+            wp_dmem_addr, wp_dmem_wdata, wp_dmem_be,
+            wp_c2a_write, wp_excpt_ie, wp_ie_flush, wp_iwb_flush,
+            wp_pc_ie, wp_pc_iwb,
+            wp_addr_panicpage ? " *PANIC_PAGE*" : "",
+            wp_addr_rtnode ? " *RTNODE_SHIFT*" : "");
+        $fflush(wr_log_fd);
+    end
+end
+
+// ── Memory snapshot at first sync fault ────────────────────────
+// On first kernel sync fault, dump 4KB of RAM around the suspect
+// kernel slab page (covering 0xc2015000-0xc2016fff virt = phys
+// 0x82015000-0x82016fff). This is the page that hosts the IDR
+// radix_tree_root that crashed the v7.0 boot. Lets us see what
+// values are at the corrupted struct fields at fault time.
+integer mem_snap_fd;
+initial mem_snap_fd = $fopen("logs/mem_snapshot.log", "w");
+
+reg mem_snap_done = 1'b0;
+integer si;
+// RAM index of phys 0x82415000 = (0x82415000 - 0x80000000) / 4 = 0x90_5400
+// (with v7.0 page offset). We dump 4096 words = 16KB from that index,
+// covering 0x82415000-0x82418fff — the slab pages that hold the IDR
+// root + its child radix_tree_nodes (the BUGgy one is at 0x82415be0).
+localparam integer SNAP_BASE_IDX = 32'h0090_5400;
+localparam integer SNAP_WORDS    = 32'd4096;
+
+always @(posedge clk) begin
+    if (!reset && wp_int_v && (wp_ecause[31] == 1'b0)
+        && ((wp_ecause[7:0] >= 8'd12) || (wp_ecause[7:0] == 8'd2)
+            || (wp_ecause[7:0] == 8'd3) || (wp_ecause[7:0] <= 8'd7))
+        && (wp_priv == 2'd1) && (wp_epc[31:28] == 4'hc)
+        && !mem_snap_done) begin
+        $fwrite(mem_snap_fd,
+            "@%0d MEM SNAPSHOT cause=%08h epc=%08h\n",
+            wp_cycle, wp_ecause, wp_epc);
+        $fwrite(mem_snap_fd,
+            "  range: phys 0x%08h .. 0x%08h\n",
+            32'h80000000 + (SNAP_BASE_IDX << 2),
+            32'h80000000 + ((SNAP_BASE_IDX + SNAP_WORDS) << 2) - 1);
+        for (si = 0; si < SNAP_WORDS; si = si + 1) begin
+            if ((si & 32'd3) == 32'd0)
+                $fwrite(mem_snap_fd, "\n  %08h:",
+                    32'h80000000 + ((SNAP_BASE_IDX + si) << 2));
+            $fwrite(mem_snap_fd, " %08h",
+                soc_top_inst.ram_inst.mem[SNAP_BASE_IDX + si]);
+        end
+        $fwrite(mem_snap_fd, "\n");
+        $fflush(mem_snap_fd);
+        mem_snap_done <= 1'b1;
+    end
+end
+
+// ── Bus read log (windowed) — captures req cycle + next-cycle rdata
+// so we can confirm whether the data the bus returns to the core
+// matches what's actually at the requested PA, or whether it's stale
+// from a previous transaction (the suspected load-path bug).
+integer rd_log_fd;
+initial rd_log_fd = $fopen("logs/bus_read.log", "w");
+wire wp_dmem_read = wp_dmem_req & ~wp_dmem_we;
+
+// Latch req-cycle metadata so we can pair it with next-cycle rdata.
+reg        rd_pending_q   = 1'b0;
+reg [31:0] rd_addr_q      = 32'h0;
+reg [3:0]  rd_be_q        = 4'h0;
+reg [31:0] rd_pc_ie_q     = 32'h0;
+reg [31:0] rd_pc_iwb_q    = 32'h0;
+reg        rd_ptw_q       = 1'b0;
+reg        rd_amo_q       = 1'b0;
+reg        rd_in_window_q = 1'b0;
+
+always @(posedge clk) begin
+    if (!reset && rd_pending_q && rd_in_window_q) begin
+        $fwrite(rd_log_fd,
+            "@%0d %s addr=%08h be=%h rdata=%08h pc_ie=%08h pc_iwb=%08h\n",
+            wp_cycle - 1,  // event happened on previous cycle's req
+            rd_ptw_q ? "PTW" : (rd_amo_q ? "AMO" : "COR"),
+            rd_addr_q, rd_be_q,
+            soc_top_inst.dmem_bus.rdata,  // rdata available NOW
+            rd_pc_ie_q, rd_pc_iwb_q);
+        $fflush(rd_log_fd);
+    end
+    // Latch this cycle's req for next-cycle rdata pairing.
+    rd_pending_q   <= wp_dmem_read;
+    rd_addr_q      <= wp_dmem_addr;
+    rd_be_q        <= wp_dmem_be;
+    rd_pc_ie_q     <= wp_pc_ie;
+    rd_pc_iwb_q    <= wp_pc_iwb;
+    rd_ptw_q       <= wp_ptw_active;
+    rd_amo_q       <= wp_amo_active;
+    rd_in_window_q <= (wp_cycle >= BUSWR_WIN_LO &&
+                       wp_cycle <= BUSWR_WIN_HI);
+end
+
+// ── Branch resolution probe at IE ──────────────────────────────
+// Capture branch_taken_valid + pc_ie + actual branch operands AS SEEN
+// at the IE stage (where the HW resolves the branch), so we can
+// compare to regfile state at IWB and identify forwarding misses.
+integer brres_log_fd;
+initial brres_log_fd = $fopen("logs/brres.log", "w");
+wire        wp_branch_taken_v = soc_top_inst.core_top_inst.branch_taken_valid;
+wire        wp_branch_taken_h = soc_top_inst.core_top_inst.branch_taken;
+always @(posedge clk) begin
+    if (!reset && wp_pc_ie == 32'hc0276ebe) begin
+        $fwrite(brres_log_fd,
+            "@%0d BRRES_IE pc_ie=%08h branch_taken=%0d branch_taken_v=%0d a3_rf=%08h s6_rf=%08h s11_rf=%08h\n",
+            wp_cycle, wp_pc_ie, wp_branch_taken_h, wp_branch_taken_v,
+            wp_x13_a3_pre, wp_x16_s6, wp_x27);
+        $fflush(brres_log_fd);
+    end
+end
+
+// ── BLTU register snapshot probe ───────────────────────────────
+// At PC c0276ebe (idr_get_free's `bltu a3, s6, c027704e` — the only
+// path that calls radix_tree_extend), capture a3 and s6 to determine
+// whether the bltu fired because of a HW shift bug, a kernel-side
+// `iter->next_index` corruption, or some other condition.
+//
+// Also capture at c0276eba (the bltu BEFORE this one) so we have the
+// register state ONE INSTRUCTION earlier — unaffected by any later
+// writes. Plus capture every entry into radix_tree_extend (PC c0275d14)
+// so we can correlate.
+integer bltu_log_fd;
+initial bltu_log_fd = $fopen("logs/bltu_snap.log", "w");
+wire [31:0] wp_x12_a2 = soc_top_inst.core_top_inst.regfile_inst.regfile[12];
+wire [31:0] wp_x16_s6 = soc_top_inst.core_top_inst.regfile_inst.regfile[22]; // s6 is x22
+wire [31:0] wp_x13_a3_pre  = soc_top_inst.core_top_inst.regfile_inst.regfile[13];
+always @(posedge clk) begin
+    if (!reset && wp_pc_iwb == 32'hc0276ebe) begin
+        $fwrite(bltu_log_fd,
+            "@%0d BLTU pc_iwb=%08h a3=%08h s6=%08h s11=%08h cond_a3<s6=%0d\n",
+            wp_cycle, wp_pc_iwb, wp_x13_a3_pre, wp_x16_s6, wp_x27,
+            (wp_x13_a3_pre < wp_x16_s6) ? 1 : 0);
+        $fflush(bltu_log_fd);
+    end
+    // Also log the prior bltu (c0276eba) and extend-entry (c0275d14)
+    if (!reset && wp_pc_iwb == 32'hc0275d14) begin
+        $fwrite(bltu_log_fd,
+            "@%0d EXT_ENTRY pc_iwb=%08h a0=%08h a1=%08h a2=%08h a3=%08h s11=%08h\n",
+            wp_cycle, wp_pc_iwb, wp_x10, wp_x11, wp_x12, wp_x13_a3_pre, wp_x27);
+        $fflush(bltu_log_fd);
+    end
+end
+
+// ── Anomaly detector: c2a_write asserts under exception_from_ie ──
+// The c2a mem_op is supposed to be NOP when exception_from_ie is high.
+// If c2a_write somehow asserts simultaneously, that's a wrong-path
+// store leak.
+integer anom_log_fd;
+initial anom_log_fd = $fopen("logs/store_anomaly.log", "w");
+
+always @(posedge clk) begin
+    if (!reset && wp_c2a_write && wp_excpt_ie) begin
+        $fwrite(anom_log_fd,
+            "@%0d STORE_UNDER_EXCPT addr=%08h wdata=%08h pc_ie=%08h pc_iwb=%08h\n",
+            wp_cycle, soc_top_inst.core_top_inst.c2a_address,
+            soc_top_inst.core_top_inst.c2a_writedata,
+            wp_pc_ie, wp_pc_iwb);
+        $fflush(anom_log_fd);
+    end
+    // Also flag: ie_flush asserted yet c2a_write still high — wrong-path
+    // store about to commit despite the squash signal being raised.
+    if (!reset && wp_c2a_write && wp_ie_flush) begin
+        $fwrite(anom_log_fd,
+            "@%0d STORE_UNDER_IE_FLUSH addr=%08h wdata=%08h pc_ie=%08h pc_iwb=%08h\n",
+            wp_cycle, soc_top_inst.core_top_inst.c2a_address,
+            soc_top_inst.core_top_inst.c2a_writedata,
+            wp_pc_ie, wp_pc_iwb);
+        $fflush(anom_log_fd);
     end
 end
 
