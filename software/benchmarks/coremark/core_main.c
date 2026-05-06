@@ -117,7 +117,7 @@ MAIN_RETURN_TYPE
 main(int argc, char *argv[])
 {
 #endif
-    uart_init(115200);
+    uart_init(250000);  /* match uartdpi BAUD in tb_soc_top.v */
     ee_u16       i, j = 0, num_algorithms = 0;
     ee_s16       known_id = -1, total_errors = 0;
     ee_u16       seedcrc = 0;
