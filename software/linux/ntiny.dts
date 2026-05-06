@@ -62,8 +62,8 @@
             reg = <0>;
             compatible = "riscv";
             riscv,isa-base = "rv32i";
-            riscv,isa = "rv32imacb_zicsr_zifencei_zihintpause_zihintntl_zicbop_zicntr_zihpm_zicond_zba_zbb_zbc_zbs_zkr";
-            riscv,isa-extensions = "i", "m", "a", "c", "b", "zicsr", "zifencei", "zihintpause", "zihintntl", "zicbop", "zicntr", "zihpm", "zicond", "zba", "zbb", "zbc", "zbs", "zkr";
+            riscv,isa = "rv32imacb_zicsr_zifencei_zihintpause_zihintntl_zicbop_zicntr_zihpm_zicond_zba_zbb_zbc_zbs_zkr_sstc";
+            riscv,isa-extensions = "i", "m", "a", "c", "b", "zicsr", "zifencei", "zihintpause", "zihintntl", "zicbop", "zicntr", "zihpm", "zicond", "zba", "zbb", "zbc", "zbs", "zkr", "sstc";
             mmu-type = "riscv,sv32";
 
             cpu0_intc: interrupt-controller {
@@ -185,8 +185,16 @@
         i2c@10020000 {
             compatible = "opencores,i2c-ocores";
             reg = <0x10020000 0x1000>;
-            interrupt-parent = <&plic>;
-            interrupts = <4>;
+            /* IRQ deliberately omitted — forces the i2c-ocores driver
+             * into polling mode (ocores_xfer_polling). The HW IRQ line
+             * is wired (i2c.sv interrupt_o → PLIC source 4 → SEIP) but
+             * the IRQ-driven path's kernel-side delivery wasn't
+             * reliable in early v7.0 bring-up; polling avoids the
+             * 1s-per-NACK wait_event_timeout the IRQ path would suffer
+             * if delivery were intermittent. The same pattern is used
+             * upstream by SiFive FU540 (OCORES_FLAG_BROKEN_IRQ). To
+             * re-enable IRQ mode once the delivery path is verified,
+             * add: interrupt-parent = <&plic>; interrupts = <4>; */
             clocks = <&soc_clk>;
             clock-frequency = <100000>;
             reg-shift = <2>;
@@ -224,11 +232,18 @@
          *
          * Phase 2e first cut. No PWM IRQs wired in RTL today; driver
          * works in poll mode. */
+        /* PWM TEMPORARILY DISABLED 2026-05-05 — PWM_SIFIVE driver was
+         * newly built into the v7.0 image (Phase 2e enabled PWM_SIFIVE
+         * in ntiny_defconfig + canonical Makefile build). With the
+         * driver bound, kernel boot stalls before reaching /init —
+         * suspected hang in clk_notifier_register or pwmchip_add path
+         * during probe. Re-enable once the probe issue is debugged. */
         pwm0: pwm@10040000 {
             compatible = "sifive,pwm0";
             reg = <0x10040000 0x1000>;
             clocks = <&soc_clk>;
             #pwm-cells = <3>;
+            status = "disabled";
         };
 
         /* TIMER — to be dropped Phase 3 (CLINT mtime covers OS tick). */

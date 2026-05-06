@@ -130,8 +130,14 @@ static int ntiny_final_init(bool cold_boot)
      * menvcfgh[29] on rv32. Linux's trap entry stores to thread_info
      * pages with D=0; without ADUE=1 the PTW page-faults and the
      * trap handler itself page-faults saving context -> boot hang.
+     *
+     * Enable Sstc (S-mode timer compare). menvcfg.STCE = bit 63 ->
+     * menvcfgh[31] on rv32. With STCE=1 the kernel can program
+     * stimecmp directly via CSR write, eliminating one SBI ecall per
+     * scheduler tick. Linux discovers Sstc via DT riscv,isa-extensions
+     * and the supervisor-side bit in mhartid extensions.
      */
-    csr_set(CSR_MENVCFGH, BIT(29));
+    csr_set(CSR_MENVCFGH, BIT(29) | BIT(31));
     return 0;
 }
 

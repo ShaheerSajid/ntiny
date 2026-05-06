@@ -52,6 +52,8 @@ module csr_unit (
   output [31:0]mideleg_o,
   output [31:0]satp_o,
   output logic        menvcfg_adue_o,   // menvcfgh[29] — Svadu HW A/D update enable
+  output logic        menvcfg_stce_o,   // menvcfgh[31] — Sstc S-mode timer enable
+  output logic [63:0] stimecmp_o,       // S-mode timer compare (Sstc)
   output logic [31:0] pmpcfg_o  [4],
   output logic [31:0] pmpaddr_o [16],
 
@@ -103,6 +105,9 @@ module csr_unit (
 	logic [31:0] _MENVCFG;
 	logic [31:0] _MENVCFGH;
 	logic [31:0] _SENVCFG;
+	// Sstc — S-mode timer compare register (split LO/HI for RV32)
+	logic [31:0] _STIMECMP;
+	logic [31:0] _STIMECMPH;
 	// PMP CSRs
 	logic [31:0] _PMPCFG  [4];
 	logic [31:0] _PMPADDR [16];
@@ -125,6 +130,7 @@ module csr_unit (
 	logic MEDELEG_sel, MIDELEG_sel;
 	logic MCOUNTEREN_sel, SCOUNTEREN_sel;
 	logic MENVCFG_sel, MENVCFGH_sel, SENVCFG_sel;
+	logic STIMECMP_sel, STIMECMPH_sel;
 
 	assign MSTATUS_sel      = csr_addr_i == MSTATUS;
 	assign SSTATUS_sel      = csr_addr_i == SSTATUS;
@@ -158,6 +164,8 @@ module csr_unit (
 	assign MENVCFG_sel      = csr_addr_i == MENVCFG;
 	assign MENVCFGH_sel     = csr_addr_i == MENVCFGH;
 	assign SENVCFG_sel      = csr_addr_i == SENVCFG;
+	assign STIMECMP_sel     = csr_addr_i == STIMECMP;
+	assign STIMECMPH_sel    = csr_addr_i == STIMECMPH;
 
 
 	// ── CSR write data ───────────────────────────────────────────
@@ -363,6 +371,19 @@ module csr_unit (
 	csr_register_32 #(32'h0) csr_senvcfg    (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(SENVCFG_sel),
 	                                          .wdata(csr_data),.update(_SENVCFG), .csr(_SENVCFG));
 
+	// ── Sstc — S-mode timer compare ──────────────────────────────
+	// stimecmp / stimecmph are addressed at 0x14D / 0x15D. Reset to all-ones
+	// so a freshly-booted hart doesn't fire STIP until S-mode arms it. Per
+	// spec the register is 64-bit; we expose lo/hi halves for RV32.
+	// Permission gate (menvcfg.STCE) is enforced at the kernel/SBI level —
+	// we don't trap S-mode access when STCE=0 (a benign deviation: software
+	// just sees the value it wrote, no IRQ until STCE flips). OpenSBI sets
+	// STCE in M-mode init when it advertises Sstc, before handing off to S.
+	csr_register_32 #(32'hFFFFFFFF) csr_stimecmp  (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(STIMECMP_sel),
+	                                                .wdata(csr_data),.update(_STIMECMP), .csr(_STIMECMP));
+	csr_register_32 #(32'hFFFFFFFF) csr_stimecmph (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(STIMECMPH_sel),
+	                                                .wdata(csr_data),.update(_STIMECMPH), .csr(_STIMECMPH));
+
 	// ── SATP (Sv32 MMU) ──────────────────────────────────────────
 	csr_register_32 #(32'h0) csr_satp       (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(SATP_sel),
 	                                          .wdata(csr_data),.update(_SATP), .csr(_SATP));
@@ -468,6 +489,17 @@ module csr_unit (
 	wire mstatus_sd = 1'b0;
 `endif
 
+	// ── Sstc — HW-driven STIP ────────────────────────────────────
+	// When menvcfgh.STCE=1, mip.STIP becomes HW-driven from the comparator
+	// (mtime >= stimecmp) and SW writes to it via mip/sip are ignored.
+	// Mask used: 32'h20 (bit 5 = STIP). Used in:
+	//   - mip/sip read mux: OR stip_hw_inj into the visible value
+	//   - ip_o (drives interrupt_ctrl): same OR
+	//   - MIP/SIP write paths: silently drop bit 5 writes when STCE=1
+	wire stce_en  = _MENVCFGH[31];
+	wire stip_hw  = stce_en && (mtime_i >= {_STIMECMPH, _STIMECMP});
+	wire [31:0] stip_hw_inj = stip_hw ? 32'h0000_0020 : 32'h0;
+
 	// ── CSR read mux ─────────────────────────────────────────────
 	// Only flag invalid for actual CSR read/write ops, not SYSTEM-type
 	// instructions (ecall, ebreak, mret, sret, wfi, sfence.vma) which
@@ -520,7 +552,7 @@ module csr_unit (
 			MEPC:           csr_value_o = _MEPC;
 			MCAUSE:         csr_value_o = _MCAUSE;
 			MTVAL:          csr_value_o = _MTVAL;
-			MIP:            csr_value_o = _MIP | (ext_irq_s_hw_i ? 32'h0000_0200 : 32'h0);
+			MIP:            csr_value_o = _MIP | (ext_irq_s_hw_i ? 32'h0000_0200 : 32'h0) | stip_hw_inj;
 			MCYCLE:         csr_value_o = _MCYCLE;
 			MINSTRET:       csr_value_o = _MINSTRET;
 			MCYCLEH:        csr_value_o = _MCYCLEH;
@@ -533,6 +565,8 @@ module csr_unit (
 			MIMPID:         csr_value_o = 32'h0;  // Implementation-specific
 			MENVCFG:        csr_value_o = _MENVCFG;
 			MENVCFGH:       csr_value_o = _MENVCFGH;
+			STIMECMP:       csr_value_o = _STIMECMP;
+			STIMECMPH:      csr_value_o = _STIMECMPH;
 			MCONFIGPTR:     csr_value_o = 32'h0;  // No config data structure
 			SENVCFG:        csr_value_o = _SENVCFG;
 			MEDELEG:        csr_value_o = _MEDELEG;
@@ -547,7 +581,7 @@ module csr_unit (
 			SEPC:           csr_value_o = _SEPC;
 			SCAUSE:         csr_value_o = _SCAUSE;
 			SBADADDR:       csr_value_o = _STVAL;
-			SIP:            csr_value_o = (_MIP | (ext_irq_s_hw_i ? 32'h0000_0200 : 32'h0)) & S_INT_MASK;
+			SIP:            csr_value_o = (_MIP | (ext_irq_s_hw_i ? 32'h0000_0200 : 32'h0) | stip_hw_inj) & S_INT_MASK;
 			SATP:           csr_value_o = _SATP;
 			// PMP CSRs
 			PMPCFG0:        csr_value_o = _PMPCFG[0];
@@ -581,7 +615,8 @@ module csr_unit (
 	// ── Outputs ──────────────────────────────────────────────────
 	// ip_o feeds interrupt_ctrl. SEIP HW signal ORed in so PLIC ctx-1
 	// assertions trigger s_external_valid without needing CSR write.
-	assign ip_o      = _MIP | (ext_irq_s_hw_i ? 32'h0000_0200 : 32'h0);
+	// Sstc: STIP HW signal (mtime>=stimecmp && STCE=1) ORed in too.
+	assign ip_o      = _MIP | (ext_irq_s_hw_i ? 32'h0000_0200 : 32'h0) | stip_hw_inj;
 	assign ie_o      = _MIE;
 	assign vec_o     = trap_to_s_i ? _STVEC : _MTVEC;
 	assign mtvec_o   = _MTVEC;
@@ -594,6 +629,8 @@ module csr_unit (
 	assign mideleg_o = _MIDELEG;
 	assign satp_o    = _SATP;
 	assign menvcfg_adue_o = _MENVCFGH[29];  // Svadu enable (spec: menvcfg bit 61)
+	assign menvcfg_stce_o = _MENVCFGH[31];  // Sstc S-mode timer enable (spec: menvcfg bit 63)
+	assign stimecmp_o     = {_STIMECMPH, _STIMECMP};
 
 endmodule
 

@@ -198,6 +198,8 @@ logic [31:0]mideleg;
 logic       trap_to_s;
 logic [31:0]satp_csr;
 logic       menvcfg_adue;
+logic       menvcfg_stce;        // Sstc — S-mode timer compare enable
+logic [63:0] stimecmp_csr;       // S-mode timer compare register value
 logic [31:0] pmpcfg_csr  [4];
 logic [31:0] pmpaddr_csr [16];
 
@@ -1734,6 +1736,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .ie_addr_lsb_i      (alu_result[1:0]),
   .ie_fault_addr_i    (alu_result),
   .amo_in_progress_i  (amo_in_progress),
+  .amo_active_i       (amo_active),
   .ie_stall_i         (ie_stall),
   // MMU page faults
   .insn_page_fault_i  (mmu_i_fault_r),
@@ -2358,6 +2361,8 @@ csr_unit csr_unit_inst
   .mideleg_o            (mideleg),
   .satp_o               (satp_csr),
   .menvcfg_adue_o       (menvcfg_adue),
+  .menvcfg_stce_o       (menvcfg_stce),
+  .stimecmp_o           (stimecmp_csr),
   .pmpcfg_o             (pmpcfg_csr),
   .pmpaddr_o            (pmpaddr_csr)
 );

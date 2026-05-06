@@ -263,6 +263,11 @@ typedef enum logic[11:0] {
     SCAUSE      	= 12'h142,
     SBADADDR    	= 12'h143,
     SIP         	= 12'h144,
+    // Sstc — S-mode timer compare (gated by menvcfgh.STCE = bit 31 on RV32).
+    // When STCE=1 and stimecmp <= mtime, mip.STIP is set by HW, eliminating
+    // the SBI ecall to set the timer per Linux jiffy.
+    STIMECMP        = 12'h14D,
+    STIMECMPH       = 12'h15D,
     SATP        	= 12'h180
 } csr_reg_e;
 

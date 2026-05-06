@@ -67,6 +67,12 @@ module interrupt_ctrl (
     input [1:0]          ie_addr_lsb_i,    // alu_result[1:0]
     input [31:0]         ie_fault_addr_i,  // alu_result (full address for mtval)
     input                amo_in_progress_i,
+    // amo_unit.active_o (AMO_READ || AMO_WRITE) — true ONLY when AMO
+    // is mid-bus-FSM and uncommitted. Excludes IDLE (no AMO) and DONE
+    // (memory write already committed). Used to gate sepc=pc_ie for
+    // re-execute on async trap so the AMO restart from scratch works
+    // (amo_unit aborts to IDLE on flush_i = interrupt_valid).
+    input                amo_active_i,
 
     // ── IE-stage uncommitted indicator ──────────────────────────────────
     // High when the IE-stage instruction has not yet committed (multi-
@@ -227,7 +233,28 @@ wire [31:0] pc_for_id = insn_page_fault_i  ? insn_fault_addr_i :
 // uncommitted, false once it's retiring. amo_unit's reservation
 // register is invalidated on flush so LR/SC pairs restart cleanly.
 wire async_use_branch = branch_taken_i;
-wire async_use_ie     = ie_stall_i;
+// async_use_ie originally was `ie_stall_i` (covers AMO+MUL/DIV+PTW+
+// dmem_busy stalls). That gate was over-broad: when ie_stall=1 from
+// dmem_busy on a normal load/store/ALU op, the IMEM-stage register-
+// wall has ALREADY captured Z's exec_result via the imem_stall=0
+// quirk. Setting sepc=pc_ie there made Z re-execute after sret,
+// doubling its effects (e.g. mntput's `addi sp,-16` decremented sp
+// by 32 → terminate_walk's `lw ra, 28(sp)` loaded ra=0xfffff000
+// → crash; preempt_disable in worker boot doubled → preempt_count=2
+// → "scheduling while atomic" BUG).
+//
+// Narrow the gate to `amo_active_i` only — `(state == AMO_READ ||
+// state == AMO_WRITE)` from amo_unit. AMO is the one IE-stage op
+// where amo_unit explicitly aborts to IDLE on flush, leaving the
+// memory operation uncommitted; for all other ie_stall sources, Z
+// has either already retired through IMEM/IWB or its rd writeback
+// will not happen (so sepc=pc_id correctly skips Z one-time).
+//
+// Excluding DONE state matters: amo_unit's memory write is already
+// committed in DONE, so re-executing would double-decrement (the
+// chr_dev_init rwsem.count regression the author warned about when
+// they tried the broader `ie_amo_op != NO_AMO_OP` gate).
+wire async_use_ie     = amo_active_i;
 wire [31:0] pc_for_async = async_use_branch    ? branch_recovery_target_i :
                            async_use_ie        ? pc_ie_i :
                            (pc_id_i != 32'h0)  ? pc_id_i :
