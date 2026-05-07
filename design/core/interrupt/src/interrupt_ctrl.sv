@@ -73,12 +73,32 @@ module interrupt_ctrl (
     // re-execute on async trap so the AMO restart from scratch works
     // (amo_unit aborts to IDLE on flush_i = interrupt_valid).
     input                amo_active_i,
+    // mmu_d_stall — true while a PTW walk is in flight for the IE-stage
+    // load/store. dmem_port.we is suppressed by d_xlat_pending = mmu_d_stall
+    // so a store stalled mid-PTW has NOT committed to the bus yet. Async
+    // trap during PTW kills imem propagation and the store is permanently
+    // lost unless we re-execute. Symptom (Linux v7.0 terminate_walk):
+    // sw ra,28(sp) of a function prologue silently dropped → ra slot kept
+    // prior tenant's data (e.g. PAGE_MASK=0xfffff000) → ret jumped to
+    // 0xfffff000 → instruction page fault.
+    input                mmu_d_stall_i,
 
     // ── IE-stage uncommitted indicator ──────────────────────────────────
     // High when the IE-stage instruction has not yet committed (multi-
     // cycle op like AMO/MUL/DIV/PTW still working). Used to choose
     // pc_ie vs pc_id for async-trap epc.
     input                ie_stall_i,
+
+    // ── IE-stage instruction length ─────────────────────────────────────
+    // c_valid (compressed-instruction-valid) at IE stage. 1 = 16-bit
+    // compressed insn, 0 = 32-bit. Used by pc_for_async fallback so
+    // the "skip Z" sepc points to pc_ie + insn_len (not pc_ie raw)
+    // when pc_id is 0 (= ID stage empty post-redirect/context-switch).
+    // Without this, async traps that fire while ID is freshly empty
+    // would set sepc=pc_ie even though Z has already retired through
+    // IMEM/IWB → kernel re-executes Z → double-decrement of sp etc.
+    // (mntput's `addi sp,-16` was hitting this exact case.)
+    input                c_valid_ie_i,
 
     // ── MMU page faults ─────────────────────────────────────────────────
     input        insn_page_fault_i,    // registered mmu_i_fault_r
@@ -254,11 +274,24 @@ wire async_use_branch = branch_taken_i;
 // committed in DONE, so re-executing would double-decrement (the
 // chr_dev_init rwsem.count regression the author warned about when
 // they tried the broader `ie_amo_op != NO_AMO_OP` gate).
-wire async_use_ie     = amo_active_i;
+//
+// Also include mmu_d_stall_i — a PTW walk in flight on a load/store
+// suppresses dmem_port.we via d_xlat_pending, so the store has not
+// committed yet. Without re-execute, async trap during PTW silently
+// drops the store (Linux v7.0 terminate_walk's `sw ra, 28(sp)` lost
+// → ra slot kept stale data → ret to 0xfffff000 instruction page fault).
+wire async_use_ie     = amo_active_i | mmu_d_stall_i;
+// Insn-length-aware "next-PC of Z" for the pc_id=0 fallback.
+// When the ID stage is empty (post-redirect / post-context-switch),
+// pc_id is held at 0 and the legacy fallback used pc_ie raw —
+// re-executing Z after sret. Use pc_ie + insn_len so we correctly
+// skip Z (which has already retired through IMEM/IWB by the time
+// the trap commits, in the non-AMO/non-PTW case).
+wire [31:0] pc_ie_next   = pc_ie_i + (c_valid_ie_i ? 32'd2 : 32'd4);
 wire [31:0] pc_for_async = async_use_branch    ? branch_recovery_target_i :
                            async_use_ie        ? pc_ie_i :
                            (pc_id_i != 32'h0)  ? pc_id_i :
-                           (pc_ie_i != 32'h0)  ? pc_ie_i :
+                           (pc_ie_i != 32'h0)  ? pc_ie_next :
                                                  pc_out_i;
 
 // Phase 4.14b (Bug 29): PC for IE-stage synchronous data faults.

@@ -1606,6 +1606,7 @@ reg_file regfile_inst
 `endif
 
 
+
 //forwarding
 forwarding_logic forwarding_logic_id_inst
 (
@@ -1614,11 +1615,11 @@ forwarding_logic forwarding_logic_id_inst
 	.rs1_float_i	  (ctrl_bus_if_id.rs1_float),
 	.rs2_float_i	  (ctrl_bus_if_id.rs2_float),
 	.rs3_float_i	  (ctrl_bus_if_id.rs3_float),
-	.rd_mem_i		    (ctrl_bus_imem.rd_int), 
+	.rd_mem_i		    (ctrl_bus_imem.rd_int),
 	.rd_wb_i		    (ctrl_bus_iwb.rd_int),
-	.rd_float_mem_i	(ctrl_bus_imem.rd_float), 
+	.rd_float_mem_i	(ctrl_bus_imem.rd_float),
 	.rd_float_wb_i	(ctrl_bus_iwb.rd_float),
-	.wb_mem_i	    	(ctrl_bus_imem.wb_sel), 
+	.wb_mem_i	    	(ctrl_bus_imem.wb_sel),
 	.wb_wb_i		    (ctrl_bus_iwb.wb_sel),
 	.forwarda_id_o	(forwarda_id),
 	.forwardb_id_o	(forwardb_id),
@@ -1737,7 +1738,9 @@ interrupt_ctrl interrupt_ctrl_inst
   .ie_fault_addr_i    (alu_result),
   .amo_in_progress_i  (amo_in_progress),
   .amo_active_i       (amo_active),
+  .mmu_d_stall_i      (mmu_d_stall),
   .ie_stall_i         (ie_stall),
+  .c_valid_ie_i       (c_valid_ie),
   // MMU page faults
   .insn_page_fault_i  (mmu_i_fault_r),
   .insn_fault_addr_i  (mmu_i_fault_addr_r),
@@ -1790,7 +1793,7 @@ always_ff@(posedge clk_i or posedge reset_i)
 			predicted_target_ie <= 0;
 		end
 		else if(arb_redirect_valid && arb_redirect_kind == RDR_BPU
-		        && aligner_valid && !ie_stall) begin
+		        && aligner_valid && !ie_stall && !interrupt_valid) begin
 			// BPU at ID is the arbitrated redirect winner this cycle.
 			// The branch is at the aligner output and MUST reach IE to
 			// resolve the prediction. Capture it here, BEFORE the
@@ -1804,6 +1807,18 @@ always_ff@(posedge clk_i or posedge reset_i)
 			// branch is dropped and the predicted target commits
 			// unguarded — see project_pty_init_kernfs_corruption.md
 			// (bltu c0276ebe / radix_tree_extend BUG_ON).
+			//
+			// !interrupt_valid override: when an async trap commits the
+			// SAME cycle the BPU wins arbitration, the trap MUST take
+			// priority. Capturing the branch into IE here lets the
+			// branch's IE-cycle exec_result (e.g. jal's link-write to ra)
+			// commit through IMEM/IWB after the trap redirect, corrupting
+			// the kernel's GP registers as the handler entry saves them
+			// to stack. Symptom (Linux v7.0 Sstc-driven timer): kernel
+			// ra silently overwritten with a bogus value, eventually
+			// causing a function ret to 0xfffff000 → instruction page
+			// fault. The trap's NOP clause (next branch) handles this
+			// case correctly when we yield priority to it.
 			ctrl_bus_ie <= (aligner_fault || xret_draining) ? CTRL_BUS_NOP() : ctrl_bus_if_id;
 			pc_ie <= pc_id;
 			imm_ie <= imm_id;
@@ -1907,11 +1922,11 @@ forwarding_logic forwarding_logic_ie_inst
 	.rs1_float_i	  (ctrl_bus_ie.rs1_float),
 	.rs2_float_i	  (ctrl_bus_ie.rs2_float),
 	.rs3_float_i	  (ctrl_bus_ie.rs3_float),
-	.rd_mem_i		    (ctrl_bus_imem.rd_int), 
+	.rd_mem_i		    (ctrl_bus_imem.rd_int),
 	.rd_wb_i		    (ctrl_bus_iwb.rd_int),
-	.rd_float_mem_i	(ctrl_bus_imem.rd_float), 
+	.rd_float_mem_i	(ctrl_bus_imem.rd_float),
 	.rd_float_wb_i	(ctrl_bus_iwb.rd_float),
-	.wb_mem_i		    (ctrl_bus_imem.wb_sel), 
+	.wb_mem_i		    (ctrl_bus_imem.wb_sel),
 	.wb_wb_i		    (ctrl_bus_iwb.wb_sel),
 	.forwarda_id_o	(forwarda_ie),
 	.forwardb_id_o	(forwardb_ie),
