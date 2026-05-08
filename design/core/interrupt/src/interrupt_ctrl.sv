@@ -43,12 +43,25 @@ module interrupt_ctrl (
     input        illegal_insn_i,       // from privilege_unit (already computed)
     input        insn_valid_id_i,      // from hazard_unit
     input        debug_ebreak_i,       // dcsr[15] — ebreak enters debug, not trap
-    input        branch_taken_i,       // IE-stage branch mispredict (flush incoming)
+    input        branch_taken_i,       // IE-stage branch MISPREDICT (= bpu_mispredict, flush incoming)
+    // Architectural direction from branch_comp at the IE stage:
+    //   1 = the IE-stage instruction is a branch/jump that IS taking
+    //       this cycle (BRANCH+condition-met, or JUMP/JUMP_R always).
+    //   0 = not a taken branch.
+    // Used to fix Layer 3 (project_v7_layer3_xarray_slot.md): when async-
+    // trap fires the same cycle as a CORRECTLY-PREDICTED-TAKEN branch,
+    // branch_taken_i (=mispredict) is 0, but the branch IS architecturally
+    // committing. The legacy logic fell through to pc_ie+insn_len = the
+    // FALL-THROUGH PC of a branch that took, so sret resumed at the wrong
+    // place. Gating async_use_branch on (mispredict | architecturally-
+    // taken) makes brcvr the sepc source whenever a branch is committing.
+    input        branch_taken_h_i,
     // Where the branch should resume on async-trap epc capture. This is
     // the SAME signal core_top uses to redirect fetch on mispredict —
     //   pred=T, actual=NT  -> fall-through (predicted_pc_ie)
     //   pred=T, actual=T (wrong target) -> actual taken target
     //   pred=NT, actual=T  -> actual taken target
+    //   pred=T, actual=T (correct) -> branch_target_address (taken target)
     // Using the raw "branch_target_address" (always the would-be taken
     // target) here was wrong for the pred=T,actual=NT case: a timer
     // interrupt firing on the same cycle as the loop-exit bne would
@@ -73,6 +86,17 @@ module interrupt_ctrl (
     // re-execute on async trap so the AMO restart from scratch works
     // (amo_unit aborts to IDLE on flush_i = interrupt_valid).
     input                amo_active_i,
+    // amo_unit.pending_o — high while an AMO is at IE waiting to start
+    // (state == IDLE but amo_op != NO_AMO_OP). Async-trap fires same
+    // cycle as the AMO reaches IE → flush_i blocks IDLE → READ
+    // transition → amo_active stays 0. Without this gate, async_use_ie
+    // misses the squashed-AMO case and sepc captures pc_id, leaving
+    // a5 holding amo_unit.result_q's stale/zero value → kernel sees
+    // a5=0 on resume → beqz fires refcount_warn_saturate. Symptom:
+    // project_v7_layer3_fix_event_create_dir_regression. pending_i
+    // stays 0 in DONE state so already-committed AMOs correctly skip
+    // via pc_id (no double-execute).
+    input                amo_pending_i,
     // mmu_d_stall — true while a PTW walk is in flight for the IE-stage
     // load/store. dmem_port.we is suppressed by d_xlat_pending = mmu_d_stall
     // so a store stalled mid-PTW has NOT committed to the bus yet. Async
@@ -252,7 +276,17 @@ wire [31:0] pc_for_id = insn_page_fault_i  ? insn_fault_addr_i :
 // downstream. ie_stall is exactly true while the IE op is
 // uncommitted, false once it's retiring. amo_unit's reservation
 // register is invalidated on flush so LR/SC pairs restart cleanly.
-wire async_use_branch = branch_taken_i;
+// async_use_branch fires when an IE-stage branch is committing this
+// cycle. Two flavours:
+//   - branch_taken_i (=mispredict) covers the cases where fetch needs
+//     redirecting (pred=T,actual=NT and pred=NT,actual=T and wrong-target).
+//   - branch_taken_h_i covers the correctly-predicted-TAKEN case
+//     (no mispredict, but branch IS architecturally taking — sepc must
+//     point at the taken target, not pc_ie+insn_len). Layer-3 fix.
+// brcvr_recovery_target_i collapses all four direction/predict
+// combinations into the architecturally-correct sepc target, so a
+// single OR gate is sufficient here.
+wire async_use_branch = branch_taken_i | branch_taken_h_i;
 // async_use_ie originally was `ie_stall_i` (covers AMO+MUL/DIV+PTW+
 // dmem_busy stalls). That gate was over-broad: when ie_stall=1 from
 // dmem_busy on a normal load/store/ALU op, the IMEM-stage register-
@@ -280,7 +314,17 @@ wire async_use_branch = branch_taken_i;
 // committed yet. Without re-execute, async trap during PTW silently
 // drops the store (Linux v7.0 terminate_walk's `sw ra, 28(sp)` lost
 // → ra slot kept stale data → ret to 0xfffff000 instruction page fault).
-wire async_use_ie     = amo_active_i | mmu_d_stall_i;
+//
+// Also include amo_pending_i — AMO at IE in IDLE (waiting to start).
+// flush_i = interrupt_valid blocks the IDLE→READ transition so
+// amo_active stays 0; without this gate, async_use_ie misses the
+// case and pc_for_async falls back to pc_id (= AMO+4), skipping the
+// AMO. amo_unit.result_q (= 0 or stale) is the rd writeback that
+// retires anyway, so sret resumes with a5=0 → kernel's beqz fires
+// refcount_warn_saturate. amo_pending_i goes 0 in DONE so already-
+// committed AMOs still take the pc_id (skip) path. Symptom of
+// missing this gate: project_v7_layer3_fix_event_create_dir_regression.
+wire async_use_ie     = amo_active_i | mmu_d_stall_i | amo_pending_i;
 // Insn-length-aware "next-PC of Z" for the pc_id=0 fallback.
 // When the ID stage is empty (post-redirect / post-context-switch),
 // pc_id is held at 0 and the legacy fallback used pc_ie raw —

@@ -35,7 +35,12 @@ module amo_unit (
     output logic [31:0] result_o,       // value written back to rd
     output logic        stall_o,        // stall IE stage
     output logic        active_o,       // this unit controls bus
-    output logic        in_progress_o   // FSM has left IDLE (address latched)
+    output logic        in_progress_o,  // FSM has left IDLE (address latched)
+    // High when an AMO is at IE waiting to start but hasn't activated.
+    // Distinguishes "pre-start" (uncommitted, must re-execute on async
+    // trap) from "DONE" (memory committed, must skip on async trap).
+    // True iff amo_op_i != NO_AMO_OP and state == IDLE.
+    output logic        pending_o
 );
 
 // ── Reservation register (LR/SC) ──────────────────────────────
@@ -227,5 +232,18 @@ assign active_o = (state == AMO_READ) || (state == AMO_WRITE);
 // on alu_result, which becomes unreliable after forwarding data is
 // flushed by pipeline stall logic.
 assign in_progress_o = (state != IDLE);
+
+// ── Output: pending (AMO at IE waiting to start, hasn't activated) ──
+// True iff amo_op_i is a real AMO and FSM is in IDLE. Used by
+// interrupt_ctrl to set sepc=pc_ie when an async trap fires the same
+// cycle as an IE-stage AMO that flush_i prevents from activating —
+// without this gate, async_use_ie misses the case (amo_active stays
+// 0 across the squash) and sepc captures pc_id (= insn AFTER the
+// AMO), so sret skips the AMO. The AMO's spurious result_q (= 0 or
+// stale from a prior AMO) is what causes the
+// project_v7_layer3_fix_event_create_dir_regression refcount=0 WARN.
+// pending_o stays 0 in DONE state so already-committed AMOs still
+// take the pc_id (skip) path.
+assign pending_o = (amo_op_i != NO_AMO_OP) && (state == IDLE);
 
 endmodule

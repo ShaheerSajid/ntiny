@@ -355,6 +355,7 @@ logic [31:0] amo_result;
 onebit_sig_e amo_stall;
 logic        amo_active;
 logic        amo_in_progress;
+logic        amo_pending;
 
 // core2avl intermediate signals (muxed with AMO unit)
 logic [31:0] c2a_address;
@@ -1729,6 +1730,11 @@ interrupt_ctrl interrupt_ctrl_inst
   .insn_valid_id_i    (insn_valid_id),
   .debug_ebreak_i     (dcsr_ebreak),
   .branch_taken_i     (branch_taken_valid),
+  // Architectural direction from branch_comp (= TRUE when IE-stage
+  // branch/jump is committing to its taken target this cycle, including
+  // correctly-predicted-TAKEN where branch_taken_valid is 0).
+  // Layer-3 fix: project_v7_layer3_xarray_slot.md.
+  .branch_taken_h_i   (branch_taken == TRUE),
   .branch_recovery_target_i (branch_recovery_target),
   // IE-stage signals for misalign detection (done inside)
   .ie_mem_op_i        (ctrl_bus_ie.mem_op),
@@ -1738,6 +1744,7 @@ interrupt_ctrl interrupt_ctrl_inst
   .ie_fault_addr_i    (alu_result),
   .amo_in_progress_i  (amo_in_progress),
   .amo_active_i       (amo_active),
+  .amo_pending_i      (amo_pending),
   .mmu_d_stall_i      (mmu_d_stall),
   .ie_stall_i         (ie_stall),
   .c_valid_ie_i       (c_valid_ie),
@@ -2623,7 +2630,8 @@ amo_unit amo_unit_inst
 	.result_o         (amo_result),
 	.stall_o          (amo_stall),
 	.active_o         (amo_active),
-	.in_progress_o    (amo_in_progress)
+	.in_progress_o    (amo_in_progress),
+	.pending_o        (amo_pending)
 );
 
 // D-port mux: PTW > AMO > core data access
