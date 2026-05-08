@@ -5,91 +5,70 @@
 
 #include "Vtb_soc_top.h"
 #include "verilated.h"
-#if VM_TRACE
-#include <verilated_vcd_c.h>
-#endif
+#include "verilated_fst_c.h"
 
 // Default timeout: 10M cycles (20M half-cycles)
 #define DEFAULT_MAX_CYCLES 10000000
 #define RESET_CYCLES 10
+#define TRACE_DEPTH 99
 
 static void usage() {
 	fprintf(stderr,
-		"Usage: Vtb_soc_top [options]\n"
-		"  --timeout <cycles>          Max simulation cycles (default 10M)\n"
-		"  --trace                     Always-on VCD tracing (whole simulation)\n"
+		"Usage: Vtb_soc_top [options] [+plusargs ...]\n"
+		"  --timeout <cycles>   Max simulation cycles (default 10M)\n"
+		"  --help, -h           Show this help\n"
 		"\n"
-		"VCD trigger options (forward-only — no cycles before start are captured):\n"
-		"  --vcd-start-cycle <N>       Open VCD at this exact cycle\n"
-		"  --vcd-stop-cycle  <N>       Close VCD at this exact cycle and exit\n"
-		"  --vcd-start-pc    <hex>     Open VCD when pc_id first matches this PC\n"
-		"  --vcd-stop-pc     <hex>     Close VCD when pc_id first matches this PC\n"
-		"  --vcd-after-cycle <N>       Ignore PC triggers BEFORE this cycle (gating)\n"
-		"  --vcd-margin      <cycles>  Cycles to record after stop trigger (default 50)\n"
-		"  --vcd-output      <file>    VCD output filename (default waveform.vcd)\n"
+		"FST waveform dumping is driven via plusargs:\n"
+		"  +wave_start=<cycle>  Open FST and start dumping at this cycle\n"
+		"  +wave_stop=<cycle>   Stop dumping (file finalised; sim keeps running)\n"
+		"  +wave_file=<path>    Output FST path (default /tmp/wave.fst)\n"
 		"\n"
-		"Trigger precedence: --vcd-start-cycle / --vcd-stop-cycle override the PC\n"
-		"triggers. PC triggers fire on the first match AFTER --vcd-after-cycle.\n"
+		"Without +wave_start the FST machinery stays dormant (~no overhead).\n"
+		"Once dumping ends the file does not grow further — bounded disk use.\n"
 		"\n"
-		"Example: capture the SRET deadlock window from uart.log markers\n"
-		"  PC[146800640] pc=c0134c12 → PC[147849216] pc=c0003076\n"
-		"  ./Vtb_soc_top --timeout 200000000 --vcd-start-cycle 146500000 \\\n"
-		"                --vcd-stop-cycle 148000000 --vcd-output sret_bug.vcd\n"
-		"\n"
-		"Example: PC triggers gated by cycle (skip early kernel calls)\n"
-		"  ./Vtb_soc_top --vcd-start-pc c0229cc4 --vcd-stop-pc c0003076 \\\n"
-		"                --vcd-after-cycle 145000000 --vcd-margin 200\n"
+		"Other plusargs forwarded to the testbench:\n"
+		"  +tracer_start_pc=<hex>  dv_tracer arm PC\n"
+		"  +tracer_stop_pc=<hex>   dv_tracer disarm PC\n"
+		"  +sig_file=<path>        RISCOF signature dump path\n"
+		"  +sig_begin=<hex>        Signature start address\n"
+		"  +sig_end=<hex>          Signature end address\n"
 	);
+}
+
+// Read a +plusarg=<value> from argv. Returns true if found, value
+// parsed into *out. Format-string `fmt` is one of "%llu", "%s",
+// "%x" — same convention Verilator's $value$plusargs uses.
+static bool read_plusarg_u64(int argc, char **argv, const char *key, uint64_t *out) {
+	size_t klen = strlen(key);
+	for (int i = 1; i < argc; i++) {
+		if (argv[i][0] != '+') continue;
+		if (strncmp(argv[i] + 1, key, klen) != 0) continue;
+		if (argv[i][1 + klen] != '=') continue;
+		*out = strtoull(argv[i] + 1 + klen + 1, NULL, 0);
+		return true;
+	}
+	return false;
+}
+
+static bool read_plusarg_str(int argc, char **argv, const char *key, const char **out) {
+	size_t klen = strlen(key);
+	for (int i = 1; i < argc; i++) {
+		if (argv[i][0] != '+') continue;
+		if (strncmp(argv[i] + 1, key, klen) != 0) continue;
+		if (argv[i][1 + klen] != '=') continue;
+		*out = argv[i] + 1 + klen + 1;
+		return true;
+	}
+	return false;
 }
 
 int main(int argc, char **argv) {
 	Verilated::commandArgs(argc, argv);
 
-	// Parse args
 	vluint64_t max_cycles = DEFAULT_MAX_CYCLES;
-	bool enable_trace_full = false;
-	uint32_t vcd_start_pc = 0;
-	uint32_t vcd_stop_pc  = 0;
-	bool have_start_pc = false;
-	bool have_stop_pc  = false;
-	vluint64_t vcd_start_cycle = 0;
-	vluint64_t vcd_stop_cycle_arg = 0;
-	bool have_start_cycle = false;
-	bool have_stop_cycle  = false;
-	vluint64_t vcd_after_cycle = 0;
-	vluint64_t vcd_margin = 50;
-	const char *vcd_filename = "waveform.vcd";
-
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
 			max_cycles = strtoull(argv[i + 1], NULL, 10);
-			i++;
-		} else if (strcmp(argv[i], "--trace") == 0) {
-			enable_trace_full = true;
-		} else if (strcmp(argv[i], "--vcd-start-pc") == 0 && i + 1 < argc) {
-			vcd_start_pc = strtoul(argv[i + 1], NULL, 16);
-			have_start_pc = true;
-			i++;
-		} else if (strcmp(argv[i], "--vcd-stop-pc") == 0 && i + 1 < argc) {
-			vcd_stop_pc = strtoul(argv[i + 1], NULL, 16);
-			have_stop_pc = true;
-			i++;
-		} else if (strcmp(argv[i], "--vcd-start-cycle") == 0 && i + 1 < argc) {
-			vcd_start_cycle = strtoull(argv[i + 1], NULL, 10);
-			have_start_cycle = true;
-			i++;
-		} else if (strcmp(argv[i], "--vcd-stop-cycle") == 0 && i + 1 < argc) {
-			vcd_stop_cycle_arg = strtoull(argv[i + 1], NULL, 10);
-			have_stop_cycle = true;
-			i++;
-		} else if (strcmp(argv[i], "--vcd-after-cycle") == 0 && i + 1 < argc) {
-			vcd_after_cycle = strtoull(argv[i + 1], NULL, 10);
-			i++;
-		} else if (strcmp(argv[i], "--vcd-margin") == 0 && i + 1 < argc) {
-			vcd_margin = strtoull(argv[i + 1], NULL, 10);
-			i++;
-		} else if (strcmp(argv[i], "--vcd-output") == 0 && i + 1 < argc) {
-			vcd_filename = argv[i + 1];
 			i++;
 		} else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
 			usage();
@@ -97,76 +76,44 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	// Mode selection: full trace XOR triggered trace
-	bool trigger_mode = have_start_pc || have_start_cycle;
-	if (trigger_mode && enable_trace_full) {
-		fprintf(stderr, "ERROR: --trace and --vcd-start-* are mutually exclusive\n");
-		return 1;
+	// FST plusargs
+	uint64_t wave_start = 0;
+	uint64_t wave_stop  = 0;
+	const char *wave_file = "/tmp/wave.fst";
+	bool wave_enabled = read_plusarg_u64(argc, argv, "wave_start", &wave_start);
+	bool have_stop    = read_plusarg_u64(argc, argv, "wave_stop",  &wave_stop);
+	read_plusarg_str(argc, argv, "wave_file", &wave_file);
+	if (wave_enabled && !have_stop) wave_stop = UINT64_MAX;
+
+	if (wave_enabled) {
+		Verilated::traceEverOn(true);
+		fprintf(stderr, "FST: armed file=%s window=[%llu, %llu]\n",
+			wave_file,
+			(unsigned long long)wave_start,
+			(unsigned long long)wave_stop);
 	}
 
-	if (trigger_mode) {
-		fprintf(stderr, "Triggered VCD:");
-		if (have_start_cycle)
-			fprintf(stderr, " start_cycle=%llu", (unsigned long long)vcd_start_cycle);
-		if (have_start_pc)
-			fprintf(stderr, " start_pc=0x%08x", vcd_start_pc);
-		if (have_stop_cycle)
-			fprintf(stderr, " stop_cycle=%llu", (unsigned long long)vcd_stop_cycle_arg);
-		if (have_stop_pc)
-			fprintf(stderr, " stop_pc=0x%08x", vcd_stop_pc);
-		if (vcd_after_cycle > 0)
-			fprintf(stderr, " after_cycle=%llu", (unsigned long long)vcd_after_cycle);
-		fprintf(stderr, " margin=%llu output=%s\n",
-			(unsigned long long)vcd_margin, vcd_filename);
-	}
-
-	// Create DUT instance
 	Vtb_soc_top *tb = new Vtb_soc_top;
 
-#if VM_TRACE
-	VerilatedVcdC *m_trace = NULL;
-	bool vcd_opened = false;  // tracks whether m_trace->open() was actually called
-
-	if (enable_trace_full || trigger_mode) {
-		Verilated::traceEverOn(true);
-		m_trace = new VerilatedVcdC;
-		tb->trace(m_trace, 99);
+	VerilatedFstC *m_trace = NULL;
+	bool wave_opened = false;
+	bool wave_finished = false;
+	uint64_t cycle_count = 0;
+	if (wave_enabled) {
+		m_trace = new VerilatedFstC;
+		tb->trace(m_trace, TRACE_DEPTH);
 	}
-
-	// Full-trace mode: open file immediately
-	if (enable_trace_full && m_trace) {
-		remove(vcd_filename);
-		m_trace->open(vcd_filename);
-		vcd_opened = true;
-	}
-
-	// Triggered mode: pre-emptively delete any stale VCD so it doesn't
-	// linger if the trigger never fires
-	if (trigger_mode) {
-		remove(vcd_filename);
-	}
-#endif
 
 	vluint64_t sim_time = 0;
 	vluint64_t half_cycles = max_cycles * 2;
 	int exit_code = 2; // default: TIMEOUT
 
-	// Trigger state machine
-	bool vcd_armed = trigger_mode;        // waiting for start trigger
-	bool vcd_dumping = false;             // currently writing to VCD
-	bool vcd_stopped = false;             // stop trigger seen, counting down margin
-	vluint64_t vcd_close_cycle = 0;       // cycle at which to close & exit
-	vluint64_t prev_pc = 0;
-	vluint64_t cycle_count = 0;           // counts full clock cycles (not half)
-
-	// Simulation loop
 	while (sim_time < half_cycles) {
 		if (Verilated::gotFinish()) {
 			exit_code = 0;
 			break;
 		}
 
-		// Reset for first N cycles
 		if (sim_time < RESET_CYCLES * 2)
 			tb->reset = 1;
 		else
@@ -175,79 +122,29 @@ int main(int argc, char **argv) {
 		tb->clk ^= 1;
 		tb->eval();
 
-#if VM_TRACE
-		// Sample once per cycle at posedge clk
-		if (trigger_mode && tb->clk == 1 && !tb->reset) {
-			uint32_t pc_now = (uint32_t)tb->pc_id_o;
+		// Cycle-resolution book-keeping at posedge clk after reset deasserts
+		if (wave_enabled && !wave_finished && tb->clk == 1 && !tb->reset) {
 			cycle_count++;
-
-			// ── Start trigger ──────────────────────────────────────────
-			// Cycle-based start: open at exact cycle (overrides PC trigger)
-			if (vcd_armed && have_start_cycle && cycle_count >= vcd_start_cycle) {
-				fprintf(stderr,
-					"[VCD] start at cycle %llu (cycle trigger) — opening %s\n",
-					(unsigned long long)cycle_count, vcd_filename);
-				m_trace->open(vcd_filename);
-				vcd_opened = true;
-				vcd_dumping = true;
-				vcd_armed = false;
+			if (!wave_opened && cycle_count >= wave_start) {
+				m_trace->open(wave_file);
+				wave_opened = true;
+				fprintf(stderr, "FST: dumpon  @cycle=%llu (file=%s)\n",
+					(unsigned long long)cycle_count, wave_file);
 			}
-			// PC-based start: gated by --vcd-after-cycle
-			else if (vcd_armed && have_start_pc &&
-			         cycle_count >= vcd_after_cycle &&
-			         pc_now == vcd_start_pc && pc_now != prev_pc) {
-				fprintf(stderr,
-					"[VCD] start at cycle %llu, pc=0x%08x (pc trigger) — opening %s\n",
-					(unsigned long long)cycle_count, pc_now, vcd_filename);
-				m_trace->open(vcd_filename);
-				vcd_opened = true;
-				vcd_dumping = true;
-				vcd_armed = false;
-			}
-
-			// ── Stop trigger (only after dumping started) ─────────────
-			if (vcd_dumping && !vcd_stopped) {
-				bool stop_now = false;
-				const char *reason = "";
-				if (have_stop_cycle && cycle_count >= vcd_stop_cycle_arg) {
-					stop_now = true;
-					reason = "cycle";
-				} else if (have_stop_pc && pc_now == vcd_stop_pc && pc_now != prev_pc) {
-					stop_now = true;
-					reason = "pc";
-				}
-				if (stop_now) {
-					vcd_close_cycle = cycle_count + vcd_margin;
-					vcd_stopped = true;
-					fprintf(stderr,
-						"[VCD] stop at cycle %llu, pc=0x%08x (%s trigger) — "
-						"will close at cycle %llu (+%llu margin)\n",
-						(unsigned long long)cycle_count, pc_now, reason,
-						(unsigned long long)vcd_close_cycle,
-						(unsigned long long)vcd_margin);
-				}
-			}
-
-			// Reached the post-stop margin: close VCD and exit
-			if (vcd_stopped && cycle_count >= vcd_close_cycle) {
-				fprintf(stderr,
-					"[VCD] closing at cycle %llu — VCD saved to %s\n",
-					(unsigned long long)cycle_count, vcd_filename);
+			if (wave_opened && cycle_count >= wave_stop) {
 				m_trace->dump(sim_time);
 				m_trace->close();
-				vcd_opened = false;
 				delete m_trace;
 				m_trace = NULL;
-				exit_code = 0;
-				goto cleanup;
+				wave_opened = false;
+				wave_finished = true;
+				fprintf(stderr, "FST: dumpoff @cycle=%llu\n",
+					(unsigned long long)cycle_count);
 			}
-
-			prev_pc = pc_now;
 		}
 
-		if (m_trace && (enable_trace_full || vcd_dumping))
+		if (wave_opened && m_trace)
 			m_trace->dump(sim_time);
-#endif
 
 		sim_time++;
 	}
@@ -255,31 +152,16 @@ int main(int argc, char **argv) {
 	if (exit_code == 2) {
 		fprintf(stderr, "TIMEOUT after %llu cycles\n",
 			(unsigned long long)max_cycles);
-#if VM_TRACE
-		if (trigger_mode && !vcd_opened) {
-			fprintf(stderr,
-				"[VCD] start trigger NEVER fired — no VCD written\n");
-		} else if (trigger_mode && vcd_opened && !vcd_stopped) {
-			fprintf(stderr,
-				"[VCD] start trigger fired but stop trigger NEVER fired — "
-				"VCD contains all cycles from start\n");
-		}
-#endif
 	}
 
-cleanup:
 	tb->final();
-#if VM_TRACE
 	if (m_trace) {
-		// Only flush + close if the file was actually opened
-		if (vcd_opened) {
+		if (wave_opened) {
 			m_trace->dump(sim_time);
 			m_trace->close();
 		}
 		delete m_trace;
 	}
-#endif
 	delete tb;
-
 	return exit_code;
 }

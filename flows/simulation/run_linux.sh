@@ -16,9 +16,9 @@ if [ -z "$OPENSBI_BIN" ]; then
     exit 1
 fi
 
-# Build Verilator model if needed (128MB RAM, no traces)
+# Build Verilator model if needed (128MB RAM, FST tracing armed but dormant)
 if [ ! -f Vtb_soc_top ] || [ ! -d obj_dir ]; then
-    echo "Building Verilator model (128MB RAM, no traces)..."
+    echo "Building Verilator model (128MB RAM, FST tracing compiled in)..."
     rm -rf obj_dir Vtb_soc_top
     # Suppression policy (2026-05-05 update):
     #   Correctness-relevant warnings are FATAL — UNOPTFLAT (comb
@@ -31,11 +31,18 @@ if [ ! -f Vtb_soc_top ] || [ ! -d obj_dir ]; then
     #   INITIALDLY, STMTDLY, UNPACKED, LITENDIAN, MODDUP, MISINDENT)
     #   stay silenced because the codebase has many benign instances
     #   that aren't worth the noise.
+    #
+    # FST tracing (2026-05-07): tb_soc_top.v exposes +wave_start /
+    # +wave_stop / +wave_file plusargs that gate $dumpon/$dumpoff on
+    # a cycle window. With no plusarg the trace machinery stays
+    # dormant; the cost is ~2-3x runtime even when not dumping. Use
+    # GTKWave (or surfer/scviewer) to inspect /tmp/wave.fst post-hoc.
     verilator -Wno-INITIALDLY -Wno-UNUSED -Wno-WIDTH \
         -Wno-PINMISSING -Wno-MULTIDRIVEN -Wno-STMTDLY \
         -Wno-UNPACKED -Wno-UNSIGNED \
         -Wno-LITENDIAN -Wno-MODDUP -Wno-MISINDENT \
         --no-timing --timescale-override 1ns/10ps -O3 --threads 4 \
+        --trace-fst --trace-structs --trace-params --trace-threads 2 \
         -DVERILATOR_SIM -DDV_TRACER -sv --top-module tb_soc_top --cc \
         +define+RAM_SIZE_BYTES=134217728 \
         +incdir+../../design/common/ \
