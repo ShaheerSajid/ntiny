@@ -1,28 +1,36 @@
-# ntiny — RV32IMAFCSU SoC
+# ntiny — RV32IMACBSU SoC
 
-A RISC-V SoC built around a single-issue, in-order 4-stage pipeline core with Sv32 virtual memory. Taped out on TSMC 65nm as part of NUST's microprocessor project and successfully tested on a custom PCB.
+A RISC-V SoC built around a single-issue, in-order 4-stage pipeline
+core with Sv32 virtual memory. Taped out on TSMC 65nm as part of
+NUST's microprocessor project and successfully tested on a custom PCB.
+
+ntiny boots Linux 6.6 to a buildroot login prompt and Linux 7.0
+through to busybox `/init`. Forty-plus bugs found and fixed during
+bring-up are catalogued in [docs/bugs/](docs/bugs/index.html).
 
 ## ISA Support
 
 | Extension | Description |
 |-----------|-------------|
-| RV32I | Base integer instruction set |
-| M | Hardware multiply/divide |
-| A | Atomic instructions (LR.W, SC.W, AMO.W) |
-| F | Single-precision floating point (PakFPU) |
-| C | Compressed (16-bit) instructions |
-| Zba | Address generation bit-manipulation |
-| Zbb | Basic bit-manipulation |
-| Zicsr | CSR instructions |
-| Zifencei | Instruction-fetch fence |
+| RV32I    | Base integer instruction set |
+| M        | Hardware multiply/divide |
+| A        | Atomic instructions (LR.W, SC.W, AMO.W) |
+| F        | Single-precision floating point (PakFPU) |
+| C        | Compressed (16-bit) instructions |
+| Zba/Zbb/Zbc/Zbs | Bit manipulation |
+| Zicond   | Conditional move (`czero.eqz/nez`) |
+| Sstc     | S-mode timer extension (`stimecmp`) |
+| Zkr      | Entropy source (CSR `seed`) |
+| Zicsr / Zifencei | CSR + i-fence baseline |
 
 ## SoC Features
 
 - **Pipeline**: 4-stage in-order (IF/ID → IE → IMEM → IWB) with full forwarding
-- **Privilege modes**: M, S, and U with trap delegation (`medeleg`/`mideleg`)
-- **Virtual memory**: Sv32 MMU with ITLB, DTLB, hardware page table walker, and A/D bit handling
+- **Privilege modes**: M, S, and U with trap delegation (`medeleg` / `mideleg`)
+- **Virtual memory**: Sv32 MMU with ITLB, DTLB, HW page table walker, and A/D bit handling (Svadu)
+- **Atomics**: full Zaamo + Zalrsc with reservation set in `amo_unit`
 - **Debug**: JTAG debug interface with halt/resume/single-step
-- **Interrupts**: PLIC + CLINT (machine timer, software interrupts)
+- **Interrupts**: PLIC + CLINT + S-mode timer (Sstc)
 
 ### Peripherals
 
@@ -114,7 +122,8 @@ make riscof_summary
 make riscof_testlist
 ```
 
-Current status (non-PMP): **156/156 pass** (base), **495/495 pass** (with F-ext). PMP is not yet implemented.
+Current status: **204/5 pass** (5 known misalign false-negatives — see
+[reference_misalign_abi memory](https://github.com)). Zba+Zbb+Zbc+Zbs all pass.
 
 ### Other Simulators
 
@@ -141,9 +150,38 @@ make -C flows/simulation gen_mem_map    # or via Makefile
 |---------|----------|-------------|
 | **default** | 32 KB | Taped-out SoC (TSMC 65nm) |
 | **riscof** | 16 MB | RISCOF compliance (vm_sv32 page tables need large RAM) |
-| **linux** | 8 MB | Linux boot (kernel + rootfs) |
+| **linux** | 128 MB | Linux boot (OpenSBI + kernel + initramfs) |
 
 All profiles use unified RAM at `0x80000000` (code + data in one region).
+
+## Linux
+
+```bash
+cd software/linux
+make prepare              # one-time: clone + patch external/{linux,opensbi}
+make build                # build kernel + opensbi + ram.hex
+make run                  # launch verilator sim, stream uart.log
+
+# Switch kernel version
+make build LINUX_TAG=v7.0 LINUX_DIR=~/Downloads/linux-v7.0
+
+# Build a release image with a specific cpio
+make release VERSION=1.0
+```
+
+See [`software/linux/README.md`](software/linux/README.md) for details.
+
+## Documentation
+
+| Doc | What |
+|-----|------|
+| [docs/bugs/](docs/bugs/index.html) | Bug catalog with detail pages for recent fixes |
+| [docs/linux_boot_process.md](docs/linux_boot_process.md) | Linux boot walkthrough (OpenSBI → kernel → init) |
+| [docs/roadmap.md](docs/roadmap.md) | What's next: BPU re-enable, bus revamp, SMP |
+| [docs/peripheral_standardization_plan.md](docs/peripheral_standardization_plan.md) | Phase 2 plan: refactor peripherals to upstream Linux IP layouts |
+| [docs/bus_revamp_plan.md](docs/bus_revamp_plan.md) | Bus arbiter + write-back caches |
+| [docs/multicore_plan.md](docs/multicore_plan.md) | SMP overlay (depends on bus revamp Phase 1) |
+| [docs/privileged_architecture.md](docs/privileged_architecture.md) | Privilege spec implementation notes |
 
 ### Default Address Map
 

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sstc IE→IMEM pipeline race — ntiny bug D</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="title">Sstc IE→IMEM pipeline race</p>
+  <p class="crumb"><a href="index.html">← bug catalog</a> · Bug D · <span class="pill fixed">fixed</span> · commit <code>2e803a1</code></p>
+</header>
+
+<dl class="kv">
+  <dt>Symptom</dt>
+  <dd>With Sstc (S-mode timer extension) enabled, an S-mode timer
+      interrupt fires while an IE-stage instruction is committing to
+      IMEM. The instruction commits AND its PC ends up in
+      <code>sepc</code>. After <code>sret</code> the kernel re-runs
+      the same instruction, doubling its effects.</dd>
+
+  <dt>Files touched</dt>
+  <dd><code>design/core/core_top/src/core_top.sv</code></dd>
+</dl>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>What the kernel saw</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Without Sstc, S-mode timer interrupts go through an SBI ecall to
+  M-mode, which adds enough latency that a colliding interrupt
+  basically can't happen. With Sstc the timer fires directly in
+  S-mode &mdash; cycle-accurate &mdash; and starts hitting the
+  pipeline in places SBI never could.
+</p>
+
+<p>
+  Concrete observed effect: the &quot;just-committed&quot; instruction's
+  side effect (a register update or a store) happened twice. For
+  example a <code>sw ra, 28(sp)</code> in a function prologue
+  committed once normally, then again after sret &mdash; the second
+  time corrupted because <code>ra</code> in the meantime had been
+  overwritten by the trap-handler entry sequence.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>What actually happened</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  In ntiny's pipeline, the IE-stage register-wall captures the IE-stage
+  instruction's exec result on the cycle the instruction is allowed to
+  retire. Async-trap entry has a window where:
+</p>
+
+<ul>
+  <li>The IE-stage instruction's writeback path has already latched
+      its result &mdash; it WILL retire through IMEM and IWB.</li>
+  <li>Simultaneously, the trap controller decides
+      <code>sepc = pc_ie</code> (the very instruction whose result is
+      already in the writeback pipeline).</li>
+</ul>
+
+<p>
+  After <code>sret</code>, the kernel resumes at <code>sepc</code>
+  &mdash; the instruction we already committed &mdash; and runs it
+  again. The first commit's effect is permanent; the second
+  re-execution adds another effect on top.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>The plain-language version</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Imagine the kernel writes a check to pay a bill. They sign and seal
+  it. Just as the courier picks it up, the fire alarm rings. The
+  kernel notes &quot;I was about to write that check&quot; in their
+  to-do list, then runs to the alarm. When they come back, they read
+  their to-do, see &quot;write check&quot;, and write a second copy.
+  The bill gets paid twice.
+</p>
+
+<p>
+  The fix is to recognise: the courier already left with the first
+  check &mdash; so the to-do entry should say &quot;done, move on&quot;,
+  not &quot;to-do&quot;.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>The fix</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Inject an IMEM bubble (a NOP that doesn't retire) on the cycle of
+  trap entry, gated by <code>interrupt_valid &amp;&amp;
+  ecause_csr[31]</code> &mdash; the high bit of cause indicates an
+  asynchronous interrupt. This stops the IE-stage instruction's
+  writeback from propagating into IMEM that cycle, so the trap fires
+  cleanly with the IE op uncommitted &mdash; <code>sepc = pc_ie</code>
+  is then the right answer, and re-execution is safe.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>Aftermath</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Sstc is now safe to leave on in the device tree. The fix was
+  bundled with the &quot;narrow async-trap re-execute gate to AMO
+  mid-FSM&quot; commit (<code>2e803a1</code>), which together pushed
+  Linux 6.6 RV32 SMP-N=1 boot through to userspace.
+</p>
+
+<p>
+  See also:
+  <a href="async-trap-ie-amo.html">bug A (AMO collision)</a>,
+  <a href="async-trap-ie-branch.html">bug B (branch collision)</a>,
+  <a href="async-trap-pcid-zero.html">bug E (post-context-switch
+  empty-ID epc)</a>. All four are different shades of the same
+  problem: getting the right architectural <code>sepc</code> when
+  asynchronous interrupts collide with in-flight pipeline state.
+</p>
+
+<footer>
+  <p><a href="index.html">← back to catalog</a></p>
+</footer>
+
+</div>
+</body>
+</html>

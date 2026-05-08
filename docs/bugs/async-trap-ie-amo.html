@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>async-trap collides with AMO at IE — ntiny bug A</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="title">async-trap collides with AMO at IE</p>
+  <p class="crumb"><a href="index.html">← bug catalog</a> · Bug A · <span class="pill fixed">fixed</span> · commit <code>9766f90</code></p>
+</header>
+
+<dl class="kv">
+  <dt>Symptom</dt>
+  <dd>Linux 7.0 boot stops with <code>refcount_t: addition on 0; use-after-free</code> WARN inside <code>event_create_dir+0x232</code> while <code>event_trace_init</code> runs in a workqueue. The kworker dies and <code>/init</code> never gets scheduled.</dd>
+
+  <dt>Found at</dt>
+  <dd>sim cycle ~179.69M (sim_time 359 376 576) on Linux 7.0 boot</dd>
+
+  <dt>Files touched</dt>
+  <dd><code>design/core/amo_unit/src/amo_unit.sv</code>, <code>design/core/interrupt/src/interrupt_ctrl.sv</code>, <code>design/core/core_top/src/core_top.sv</code></dd>
+</dl>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>What the kernel saw</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Linux puts the <code>refcount_t</code> family of counters under a hard
+  guard: <em>incrementing a counter that is already zero is a
+  use-after-free, period.</em> If anyone tries it, the kernel fires a
+  <code>BUG_ON</code>-style breakpoint (<code>ebreak</code>, cause=3) and
+  dumps a stack trace.
+</p>
+
+<p>
+  The trace pointed cleanly at <code>event_create_dir</code>, which
+  registers tracefs entries for every kernel trace event. The instruction
+  is a single atomic increment on the event's refcount field:
+</p>
+
+<pre><code>c00ae664: addi a0, s4, 40         # a0 = &amp;event_call-&gt;refcount
+c00ae668: li   a1, 1
+c00ae66a: amoadd.w a5, a1, (a0)   # a5 = OLD value, *a0 += 1
+c00ae66e: beqz a5, c00ae7dc       # if OLD was 0, jump to WARN call
+c00ae7dc: li   a1, 2              # WARN_SATURATE_INC
+c00ae7e2: jalr ra, refcount_warn_saturate</code></pre>
+
+<p>
+  So <code>a5 = 0</code> after the AMO. Either the in-memory refcount
+  really was zero, or the AMO returned a wrong value for some other
+  reason. The smoking gun was buried in the pipeline.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>What actually happened</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  The cycle the <code>amoadd.w</code> reached the IE (execute) stage,
+  the S-mode timer interrupt fired in the same cycle. We captured the
+  pipeline state in an FST waveform and walked it cycle-by-cycle:
+</p>
+
+<pre><code>sim_time   pc_ie        interrupt_valid   ie_flush   amo_active   amo_dbus_*
+358999156  c00ae66a     1                 1          0            (no transition)
+358999158  squashed     0                 0          0            (no transition)
+358999160  c00ae66e     0                 0          0            (no transition)
+                        ↑ AMO retire writeback fires: rd=a5, data=0</code></pre>
+
+<p>
+  Three things matter:
+</p>
+
+<ol>
+  <li>The AMO never accessed memory. <code>amo_dbus_addr</code>,
+      <code>amo_dbus_read</code>, <code>amo_dbus_write</code> &mdash; all
+      stayed flat. The <code>flush_i</code> input to <code>amo_unit</code>
+      (driven by <code>interrupt_valid</code>) blocked its
+      <code>IDLE → AMO_READ</code> transition.</li>
+  <li><code>amo_active</code> stayed 0 the entire time.
+      <code>amo_unit</code> exposes <code>active_o</code> = (state ==
+      AMO_READ || state == AMO_WRITE), so a squashed-before-start AMO
+      looks the same as no AMO at all.</li>
+  <li>The IWB stage still retired the AMO instruction one cycle later,
+      writing <code>amo_unit.result_q</code> (= 0, never updated by a
+      memory read) into <code>a5</code>.</li>
+</ol>
+
+<div class="card warn">
+  <p class="label">why the &quot;skip&quot; path picked the wrong PC</p>
+  <p>
+    <code>interrupt_ctrl</code> picks <code>sepc</code> using:
+  </p>
+<pre><code>async_use_ie = amo_active | mmu_d_stall;
+pc_for_async = async_use_branch ? brcvr
+             : async_use_ie     ? pc_ie       // re-execute
+             : pc_id != 0       ? pc_id        // skip past
+             : ...</code></pre>
+  <p>
+    With <code>amo_active = 0</code> and <code>mmu_d_stall = 0</code>,
+    <code>async_use_ie = 0</code>, so the chooser fell through to
+    <code>pc_id</code> (= the instruction right after the AMO). The
+    kernel's <code>sret</code> resumed at <code>c00ae66e</code> with
+    <code>a5 = 0</code> &mdash; the spurious value the AMO had already
+    written to the regfile. The next instruction is
+    <code>beqz a5, …</code>, so the BUG fired.
+  </p>
+</div>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>The plain-language version</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Imagine a clerk (the AMO unit) about to start an atomic
+  read-modify-write on a counter. As they raise their pen to begin,
+  the fire alarm rings (timer interrupt). They drop the work. But the
+  desk's outbox still has a paper labelled "I did the work, here is
+  what I read" &mdash; and that paper has zero on it because no work
+  actually happened. The supervisor (the IWB stage) takes the paper at
+  face value, files it (writes <code>a5 = 0</code>), and the kernel's
+  next step (<code>beqz a5</code>) interprets that as
+  "object was freed" and panics.
+</p>
+
+<p>
+  The correct response in this situation is &quot;hold on, the AMO
+  didn't actually run; resume back at the AMO after the alarm so the
+  clerk can try again.&quot; That's what the fix does.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>The fix</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  <code>amo_unit</code> exposes a new output that captures &quot;an AMO
+  is at IE waiting to start, but hasn't activated yet&quot;:
+</p>
+
+<pre><code>// amo_unit.sv
+output logic pending_o;
+assign pending_o = (amo_op_i != NO_AMO_OP) &amp;&amp; (state == IDLE);</code></pre>
+
+<p>
+  This is high <em>before</em> the AMO transitions out of IDLE, and
+  goes back low in the DONE state (memory write already committed).
+  <code>interrupt_ctrl</code> ORs it into the &quot;re-execute on async
+  trap&quot; gate:
+</p>
+
+<pre><code>// interrupt_ctrl.sv
+wire async_use_ie = amo_active_i | mmu_d_stall_i | amo_pending_i;</code></pre>
+
+<p>
+  Now when the timer fires the same cycle as a fresh AMO at IE,
+  <code>async_use_ie = 1</code>, <code>sepc = pc_ie</code>, and
+  <code>sret</code> resumes <em>at</em> the AMO &mdash; the kernel
+  re-runs the increment cleanly, with the correct OLD value, and
+  <code>beqz</code> doesn't trigger.
+</p>
+
+<p>
+  The DONE-state exclusion is essential: an AMO that already wrote to
+  memory must <em>not</em> re-execute, or the increment doubles. An
+  earlier attempt at this fix gated on
+  <code>ie_amo_op != NO_AMO_OP</code> and double-decremented an rwsem
+  counter in <code>chr_dev_init</code>. Restricting <code>pending_o</code>
+  to the IDLE state is what makes this safe.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>Verification</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  After the fix, Linux 7.0 boot reaches <code>Run /init as init
+  process</code> + busybox <code>crond</code>. Linux 6.6 reaches the
+  buildroot <code>login:</code> prompt with the boot self-test reporting
+  19 PASS / 0 FAIL. The fix is not kernel-version-specific.
+</p>
+
+<p>
+  See also: <a href="async-trap-ie-branch.html">async-trap collides
+  with taken branch at IE</a> &mdash; the related bug that surfaced
+  the same async-trap-vs-IE-stage race for branches.
+</p>
+
+<footer>
+  <p><a href="index.html">← back to catalog</a></p>
+</footer>
+
+</div>
+</body>
+</html>

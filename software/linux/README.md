@@ -1,20 +1,57 @@
 # ntiny Linux
 
-Linux v6.6 boots on ntiny RV32IMAC (Sv32 MMU, single hart).
-Chain: OpenSBI v1.8 → Linux 6.6 → busybox initramfs → Verilator sim.
+Linux **6.6** boots on ntiny RV32IMACBSU (Sv32 MMU, Sstc, single hart)
+all the way to a buildroot login prompt. Linux **7.0** boots through
+to busybox `/init`. Chain: OpenSBI v1.8 → kernel → busybox initramfs
+→ Verilator sim.
 
 ## Quick start
 
 ```bash
 make prepare      # one-time: clones Linux + OpenSBI into ./external/, applies patches
 make build        # rebuild kernel + opensbi + ram.hex (force-fresh, see below)
-make run          # launch sim; tail flows/simulation/uart.log
+make run          # launch sim; tail logs/uart.log
 ```
 
 `make build` always force-removes the kernel `Image` and OpenSBI `fw_payload.bin`
 before rebuilding. This is intentional — kbuild's own dependency tracking does
 **not** see `initramfs.cpio` as a kernel input, so without the force-rm a
 changed cpio won't be re-embedded. Costs ~30 s on incremental rebuilds.
+
+## Switching kernel versions
+
+The Makefile defaults to `LINUX_TAG=v6.6` and clones into
+`./external/linux`. To boot a different version, point at a separate
+tree:
+
+```bash
+# Build with an existing 7.0 tree (no fresh clone)
+make build LINUX_DIR=~/Downloads/linux-v7.0
+
+# Or clone a fresh v7.0 alongside
+make prepare LINUX_TAG=v7.0 LINUX_DIR=external/linux-v7.0
+make build   LINUX_TAG=v7.0 LINUX_DIR=external/linux-v7.0
+```
+
+The `INITRAMFS` variable (default `initramfs.cpio` in this dir) lets
+you swap rootfs in:
+
+```bash
+make build INITRAMFS=/path/to/custom-rootfs.cpio
+```
+
+## Building an ntiny release image
+
+`make release VERSION=...` packages a tagged ntiny Linux image
+(kernel + OpenSBI + dtb + cpio) into `releases/ntiny-linux-VERSION/`
+for archival or sharing. The version label appears in the boot
+banner.
+
+```bash
+make release VERSION=1.0
+ls releases/ntiny-linux-1.0/
+# fw_payload.bin  Image  ntiny.dtb  initramfs.cpio  README.txt
+```
 
 ## Layout
 
@@ -135,10 +172,9 @@ The build picked up a few foot-guns over time. If something's off, try in order:
 6. **Stale config after pulling new ntiny commits.** If `ntiny_defconfig`
    changed, `make apply-patches && make build` re-installs it.
 
-## Known userspace issue (not a HW bug)
+## See also
 
-`busybox-1.37.0` ash hits "/init: line 14: bad for loop variable" when
-parsing the buildroot stock `/init` script. Diagnosed to a parser-state
-corruption inside ash (lasttoken=TFOR set spuriously) — see
-`memory/project_busybox_ash_parse_error.md` in the auto-memory store.
-Workaround: write a C-binary `/init` and pack a custom cpio.
+- [docs/bugs/index.html](../../docs/bugs/index.html) — recent boot
+  bugs and fixes (async-trap collisions, BPU/IE-flush race,
+  Sstc pipeline race, etc.). The bugs that prevented earlier kernels
+  from reaching userspace are now all closed.

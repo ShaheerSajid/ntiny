@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>async-trap epc when ID is empty — ntiny bug E</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="title">async-trap epc when ID stage is empty</p>
+  <p class="crumb"><a href="index.html">← bug catalog</a> · Bug E · <span class="pill fixed">fixed</span> · commit <code>a9b6e72</code></p>
+</header>
+
+<dl class="kv">
+  <dt>Symptom</dt>
+  <dd>Linux 7.0 with Sstc enabled crashed in <code>terminate_walk</code>
+      with <code>ra = 0xfffff000</code> &mdash; the high half of
+      PAGE_MASK, not a real return address.</dd>
+
+  <dt>Files touched</dt>
+  <dd><code>design/core/interrupt/src/interrupt_ctrl.sv</code></dd>
+</dl>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>What the kernel saw</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  At a function epilogue, the kernel did <code>lw ra, 28(sp)</code> to
+  restore the saved return address. The value loaded was
+  <code>0xfffff000</code> &mdash; the kernel
+  <code>PAGE_MASK</code> constant for RV32 &mdash; which is not a
+  valid code address. The next instruction <code>ret</code> jumped
+  there, instantly faulted, and the kernel oopsed.
+</p>
+
+<p>
+  Probing the prologue side of the same function showed the
+  <code>sw ra, 28(sp)</code> store had successfully committed a real
+  return address. Something between prologue and epilogue zapped the
+  saved <code>ra</code> in the stack frame.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>What actually happened</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  The bug fires in a narrow window: an async timer interrupt arrives
+  at the same cycle a function-prologue instruction reaches IE,
+  immediately after a context switch where the ID stage is empty.
+  In ntiny the ID stage shows up as <code>pc_id = 0</code> when no
+  instruction is buffered.
+</p>
+
+<p>
+  The trap controller's <code>pc_for_async</code> chooser (= what to
+  put into <code>sepc</code>) was:
+</p>
+
+<pre><code>pc_for_async = async_use_branch ? brcvr
+             : async_use_ie     ? pc_ie
+             : pc_id != 0       ? pc_id     // skip past
+             : pc_ie             // fallback when ID empty
+             : pc_out;</code></pre>
+
+<p>
+  When an async-trap fires with ID empty, the chooser hit the
+  <code>pc_id == 0</code> condition and fell through to
+  <code>pc_ie</code> &mdash; which is the IE-stage PC, the instruction
+  we're currently executing. The kernel then resumed at that PC
+  after <code>sret</code> and re-executed it. The IE op had already
+  retired; re-running doubled its effect. For a function prologue
+  that was <code>addi sp, sp, -16</code>, the second execution
+  decremented <code>sp</code> a second time, putting
+  <code>sp + 28</code> off the actual saved <code>ra</code> slot
+  and into adjacent memory that happened to hold <code>0xfffff000</code>.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>The plain-language version</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Imagine the kernel parks its bicycle in slot 4 of a rack. The fire
+  alarm rings. When it comes back, the kernel parks the bike in
+  slot 4 a second time &mdash; but slot 4 is occupied, so it ends up
+  in slot 0. Later when the kernel reaches for the bike at slot 4,
+  it grabs whatever someone else left there &mdash; in this case a
+  road sign that reads <code>0xfffff000</code>. It tries to ride the
+  road sign and crashes.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>The fix</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  When the ID stage is empty, the IE op has already retired (its
+  writeback is in flight to IMEM/IWB). The right resume PC is
+  &quot;the instruction <em>after</em> the IE op&quot; &mdash; i.e.
+  <code>pc_ie + insn_len</code>. Insn-length-aware via
+  <code>c_valid_ie_i</code> so RVC and RV32 both work:
+</p>
+
+<pre><code>// interrupt_ctrl.sv
+wire [31:0] pc_ie_next   = pc_ie_i + (c_valid_ie_i ? 32'd2 : 32'd4);
+wire [31:0] pc_for_async = async_use_branch ? brcvr
+                         : async_use_ie     ? pc_ie
+                         : (pc_id_i != 0)   ? pc_id
+                         : (pc_ie_i != 0)   ? pc_ie_next  // skip Z
+                         :                    pc_out;</code></pre>
+
+<p>
+  Now the chooser correctly skips past the just-retired IE op when
+  the ID stage is freshly empty, instead of accidentally landing on
+  the IE op's PC and re-executing it.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>Verification</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Linux 6.6 boot with Sstc enabled now reaches the buildroot login
+  prompt cleanly. v7.0 with Sstc reaches <code>/init</code> after the
+  related fixes (<a href="async-trap-ie-amo.html">A</a>,
+  <a href="async-trap-ie-branch.html">B</a>) land.
+</p>
+
+<footer>
+  <p><a href="index.html">← back to catalog</a></p>
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ntiny — Bug Catalog</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="title">ntiny bug catalog</p>
+  <p class="crumb">Pre-Linux bring-up · Linux boot · Fetch revamp · ITLB / trap · Recent</p>
+</header>
+
+<p class="lede">
+  Forty-plus bugs found and fixed during ntiny core development, MMU bring-up,
+  Linux boot, and post-fetch-revamp Sv32 work. Detail pages are linked for
+  the most recent fixes; older bugs are summarised in the tables.
+</p>
+
+<!-- ════════════════════════════════════════════════════════════════ -->
+<h2>Recent (post-fetch-revamp)</h2>
+<!-- ════════════════════════════════════════════════════════════════ -->
+
+<p>
+  These are fully-written-up. Each has a dedicated page that explains what
+  the kernel saw, the smoking-gun hardware signal, the root cause in plain
+  language, and the fix.
+</p>
+
+<table>
+<thead><tr><th>#</th><th>Title</th><th>Symptom</th><th>Status</th><th>Commit</th></tr></thead>
+<tbody>
+<tr>
+  <td class="id">A</td>
+  <td><a href="async-trap-ie-amo.html">async-trap collides with AMO at IE</a></td>
+  <td>refcount=0 WARN in <code>event_create_dir</code> on Linux 7.0 boot</td>
+  <td><span class="pill fixed">fixed</span></td>
+  <td class="commit">9766f90</td>
+</tr>
+<tr>
+  <td class="id">B</td>
+  <td><a href="async-trap-ie-branch.html">async-trap collides with taken branch at IE</a></td>
+  <td>store/AMO misalign in <code>next_uptodate_folio</code> (xas_load Layer 3)</td>
+  <td><span class="pill fixed">fixed</span></td>
+  <td class="commit">9766f90</td>
+</tr>
+<tr>
+  <td class="id">C</td>
+  <td><a href="bpu-ie-flush-race.html">BPU vs IE-flush race</a></td>
+  <td>kernfs corruption in <code>pty_init</code></td>
+  <td><span class="pill fixed">fixed</span></td>
+  <td class="commit">54cd2f7</td>
+</tr>
+<tr>
+  <td class="id">D</td>
+  <td><a href="sstc-pipeline-race.html">Sstc IE→IMEM pipeline race</a></td>
+  <td>S-mode timer trap re-executes IE-stage instruction (sepc + commit collision)</td>
+  <td><span class="pill fixed">fixed</span></td>
+  <td class="commit">2e803a1</td>
+</tr>
+<tr>
+  <td class="id">E</td>
+  <td><a href="async-trap-pcid-zero.html">async-trap epc when ID stage is empty</a></td>
+  <td>v7.0 Sstc <code>ra=0xfffff000</code> crash after context switch</td>
+  <td><span class="pill fixed">fixed</span></td>
+  <td class="commit">a9b6e72</td>
+</tr>
+</tbody>
+</table>
+
+<!-- ════════════════════════════════════════════════════════════════ -->
+<h2>Pre-Linux (MMU, FPU, core refactor)</h2>
+<!-- ════════════════════════════════════════════════════════════════ -->
+
+<table>
+<thead><tr><th>#</th><th>Bug</th><th>Where</th><th>Fix</th></tr></thead>
+<tbody>
+<tr><td class="id">0a</td><td>FPU flag leak during multi-cycle ops</td><td class="area">csr_unit</td><td>Gate <code>float_valid</code> by <code>!alu_stall</code></td></tr>
+<tr><td class="id">0b</td><td>f2i conversion clamping + inexact flag</td><td class="area">fp_f2i</td><td>Fix clamping logic</td></tr>
+<tr><td class="id">0c</td><td>rs2 forwarding loss during DTLB stall</td><td class="area">core_top IE wall</td><td>Capture forwarded value during stall</td></tr>
+<tr><td class="id">0d</td><td>SUM applied to insn fetch (spec: data only)</td><td class="area">mmu_sv32</td><td>Remove SUM check from i-side</td></tr>
+<tr><td class="id">0e</td><td>PTW address width bug</td><td class="area">mmu_sv32</td><td>Fix bit-width</td></tr>
+<tr><td class="id">0f</td><td>Spurious page faults in bare mode</td><td class="area">mmu_sv32</td><td>Gate fault by translate enable</td></tr>
+<tr><td class="id">0g</td><td>PTW L1→L0 stale rvalid corrupts PTE</td><td class="area">mmu_sv32</td><td>Add L0_WAIT state</td></tr>
+<tr><td class="id">0h</td><td>SRET uses MEPC instead of SEPC</td><td class="area">c_controller</td><td>Fix mux select</td></tr>
+<tr><td class="id">0i</td><td>mtvec cleared to zero on boot</td><td class="area">init.c</td><td>Set mtvec in startup</td></tr>
+</tbody>
+</table>
+
+<!-- ════════════════════════════════════════════════════════════════ -->
+<h2>Linux Boot (1–18, pre-fetch-revamp)</h2>
+<!-- ════════════════════════════════════════════════════════════════ -->
+
+<table>
+<thead><tr><th>#</th><th>Bug</th><th>Where</th><th>Fix</th></tr></thead>
+<tbody>
+<tr><td class="id">1</td><td>AMO flush combinational loop</td><td class="area">core_top</td><td>Break loop with insert_bubble gate</td></tr>
+<tr><td class="id">2</td><td>CSR invalid false positive for SYSTEM insns</td><td class="area">csr_unit</td><td>Narrow condition</td></tr>
+<tr><td class="id">3</td><td>Missing CSRs (mhartid, mstatush, etc.)</td><td class="area">csr_unit</td><td>Implement</td></tr>
+<tr><td class="id">4</td><td>Post-trap stale NOP injection</td><td class="area">hazard_unit</td><td>Fix stall timing</td></tr>
+<tr><td class="id">5</td><td>PLIC 10+ critical bugs</td><td class="area">plic.v</td><td>Rewrite</td></tr>
+<tr><td class="id">6</td><td>CLINT/PLIC read data returns zero</td><td class="area">clint, plic</td><td>Fix bus timing</td></tr>
+<tr><td class="id">7</td><td>TIME/TIMEH CSRs return zero</td><td class="area">csr_unit</td><td>Wire to CLINT</td></tr>
+<tr><td class="id">8</td><td>No hardware misaligned load/store</td><td class="area">core2avl</td><td>Implement split FSM</td></tr>
+<tr><td class="id">9</td><td>Kernel stuck in unaligned access check</td><td class="area">kernel</td><td>Disable initcall</td></tr>
+<tr><td class="id">10</td><td>UART TX busy-wait stalls sim</td><td class="area">platform.c</td><td>Remove polling</td></tr>
+<tr><td class="id">11</td><td>UART DPI vs TB fast console conflict</td><td class="area">uartdpi, tb</td><td>Remove stderr mirror</td></tr>
+<tr><td class="id">12</td><td>No SBI console output from kernel</td><td class="area">.config</td><td>Enable HVC_RISCV_SBI + RISCV_SBI_V01</td></tr>
+<tr><td class="id">13</td><td>SRET drops priv mid-DTLB walk</td><td class="area">privilege_unit</td><td>Latch priv at walk start</td></tr>
+<tr><td class="id">14</td><td>Trap-entry handler[0] skipped</td><td class="area">hazard_unit</td><td>Fix refetch_after_trap gating</td></tr>
+<tr><td class="id">15</td><td>c_controller apc not latching sepc on SRET</td><td class="area">c_controller</td><td>Add stall bypass for xRET</td></tr>
+<tr><td class="id">16</td><td>trap_seq SRET_WAIT suppresses real i-fault</td><td class="area">trap_sequencer</td><td>Fix FSM exit condition</td></tr>
+<tr><td class="id">17</td><td>privilege_unit ie_stall_i unwired</td><td class="area">core_top</td><td>Connect port</td></tr>
+<tr><td class="id">18</td><td>IE wall latches stale decode at trap entry</td><td class="area">core_top</td><td>NOP injection on bubble</td></tr>
+</tbody>
+</table>
+
+<!-- ════════════════════════════════════════════════════════════════ -->
+<h2>Fetch Revamp (Phase 4.13 series, 19–26)</h2>
+<!-- ════════════════════════════════════════════════════════════════ -->
+
+<table>
+<thead><tr><th>#</th><th>Bug</th><th>Where</th><th>Fix</th><th>Commit</th></tr></thead>
+<tbody>
+<tr><td class="id">19</td><td>Duplicate fb_push → sp drift in setup_arch</td><td class="area">core_top fetch</td><td>vaddr-based fb_push dedup</td><td class="commit">3d8c004</td></tr>
+<tr><td class="id">20</td><td>Straddled-insn deadlock at half-aligned target</td><td class="area">core_top pending</td><td>Release pc_out after first push for half-aligned</td><td class="commit">3d8c004</td></tr>
+<tr><td class="id">21</td><td>Post-xret async interrupt mepc=0</td><td class="area">interrupt_ctrl</td><td>pc_for_async fallback to pc_out</td><td class="commit">0816f0f</td></tr>
+<tr><td class="id">22</td><td>head.S missing early kernel_sp init</td><td class="area">kernel patch</td><td><code>REG_S sp, TASK_TI_KERNEL_SP(tp)</code></td><td class="commit">kernel</td></tr>
+<tr><td class="id">23</td><td>check_unaligned_access busy-loops on jiffies</td><td class="area">kernel patch</td><td>Disable initcall</td><td class="commit">kernel</td></tr>
+<tr><td class="id">24</td><td>cpio missing /dev/console</td><td class="area">initramfs</td><td>Rebuild with gen_init_cpio</td><td class="commit">3792693</td></tr>
+<tr><td class="id">25</td><td>INITRAMFS_COMPRESSION re-gzips uncompressed cpio</td><td class="area">defconfig</td><td>CONFIG_INITRAMFS_COMPRESSION_NONE=y</td><td class="commit">daaf7b7</td></tr>
+<tr><td class="id">26</td><td>uartdpi stderr mirror garbles terminal</td><td class="area">uartdpi.c</td><td>Remove fputc(stderr)</td><td class="commit">d227741</td></tr>
+</tbody>
+</table>
+
+<!-- ════════════════════════════════════════════════════════════════ -->
+<h2>ITLB / Trap (27–30, busybox dynamic linker)</h2>
+<!-- ════════════════════════════════════════════════════════════════ -->
+
+<table>
+<thead><tr><th>#</th><th>Bug</th><th>Where</th><th>Fix</th><th>Commit</th></tr></thead>
+<tbody>
+<tr><td class="id">27</td><td>refetch_after_trap sends req with garbage PA on ITLB miss</td><td class="area">core_top</td><td>Gate <code>refetch_after_trap &amp; ~mmu_i_stall</code></td><td class="commit">a71b35f</td></tr>
+<tr><td class="id">28</td><td>Refetch pulse consumed during PTW → csrrw skipped</td><td class="area">core_top</td><td><code>refetch_pending_q</code> extends until first req</td><td class="commit">9ca7811</td></tr>
+<tr><td class="id">29b</td><td>Sync data fault epc=0 (pc_ie cleared on flush)</td><td class="area">interrupt_ctrl</td><td><code>pc_ie_saved_q</code> registered fallback</td><td class="commit">6670820</td></tr>
+<tr><td class="id">30</td><td>Store fault reported as cause=13 (load) → infinite loop</td><td class="area">trap_sequencer</td><td>Registered <code>d_fault_is_store_r</code></td><td class="commit">7aef77b</td></tr>
+<tr><td class="id">—</td><td>PTW not aborted on sfence.vma (defense-in-depth)</td><td class="area">mmu_sv32</td><td>Add <code>sfence_i</code> to PTW abort</td><td class="commit">fff07dc</td></tr>
+</tbody>
+</table>
+
+<footer>
+  <p>ntiny RV32IMACBSU SoC · TSMC 65nm tape-out · NUST microprocessor project</p>
+</footer>
+
+</div>
+</body>
+</html>

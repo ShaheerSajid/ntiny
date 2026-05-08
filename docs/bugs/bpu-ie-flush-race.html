@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BPU vs IE-flush race — ntiny bug C</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="title">BPU vs IE-flush race</p>
+  <p class="crumb"><a href="index.html">← bug catalog</a> · Bug C (pty_init kernfs corruption) · <span class="pill fixed">fixed</span> · commit <code>54cd2f7</code></p>
+</header>
+
+<dl class="kv">
+  <dt>Symptom</dt>
+  <dd>Linux 7.0 panics in <code>pty_init</code> with kernfs node
+      corruption: a <code>delete_node</code> call dereferences a NULL
+      child pointer.</dd>
+
+  <dt>Files touched</dt>
+  <dd><code>design/core/core_top/src/core_top.sv</code> (BPU consumer / IE-wall arbitration)</dd>
+</dl>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>What the kernel saw</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  <code>pty_init</code> populates kernfs entries for the pseudo-tty
+  subsystem. One of the loops walks an in-progress kernfs tree and
+  expected each parent to have a populated child list before it ran
+  <code>delete_node</code>. The kernel saw a node where the child
+  list pointer had been overwritten with garbage at some earlier
+  cycle &mdash; and so when it dereferenced the &quot;child&quot; it
+  hit a NULL or wild address and panicked.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>What actually happened</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  The Branch Prediction Unit (BPU) speculates which way a branch will
+  go, redirecting fetch ahead of the actual branch resolution. Sometimes
+  the BPU and the IE-stage flush logic try to redirect fetch in the
+  same cycle. ntiny has an arbiter that chooses between them.
+</p>
+
+<p>
+  In the failing run, a self-induced <code>ie_flush</code> killed an
+  IE-stage <code>bltu</code>. The BPU's redirect (which had fired one
+  cycle earlier on the predicted-T target) was sitting in the
+  arbiter, waiting to be consumed. The arbiter granted the BPU. But
+  the BPU's <em>consumer</em> (the &quot;can I take this redirect?&quot;
+  signal) was reading a stale, registered version of
+  <code>mmu_i_stall</code>, while the IF/ID stall signal was using
+  the live (unregistered) version. They disagreed for one cycle.
+  Result: the BPU thought it had been consumed, dropped the
+  redirect, but the predicted target's first instruction had already
+  been fetched and pushed into IMEM &mdash; and committed an
+  unguarded store.
+</p>
+
+<div class="card bad">
+  <p class="label">the leaked store</p>
+  <p>
+    The speculative store wrote to a kernfs internal pointer field.
+    No-one updated that field again before <code>pty_init</code>
+    walked the tree, so it stayed corrupted until the loop tried to
+    follow it.
+  </p>
+</div>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>The plain-language version</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Two air-traffic controllers (the BPU's redirect and the
+  branch-flush logic) both want to clear a runway in the same
+  second. They disagree by one tick of the clock about whether
+  weather is OK to land. One controller releases a plane onto the
+  runway thinking it's clear. The other thinks the plane bounced
+  off and went back to the holding pattern. The plane lands and
+  unloads its cargo (a memory write), but the manifest says the
+  plane never landed. Hours later the warehouse is filled with
+  cargo no-one expected and the inventory manager
+  (<code>delete_node</code>) walks into a wrecked stack.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>The fix</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  When the IE-wall arbiter resolves a redirect-kind to <code>RDR_BPU</code>
+  (the BPU got the win), capture the branch <em>at the IE wall</em>
+  in the same cycle. The override clause in <code>core_top.sv</code>
+  ensures the IE-stage <code>bltu</code> is still resolved into a
+  taken-target redirect, even when the BPU and IE flush both agree
+  the branch should be killed. That removes the one-cycle skew
+  between &quot;I'm consumed&quot; and &quot;I'm dropped&quot;.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>Verification</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  After the fix, Linux 7.0 boots through pty_init cleanly and reaches
+  userspace + busybox. The same fix unblocked the rest of v7.0 boot
+  (it had been the cliff that earlier work could not get past).
+</p>
+
+<p>
+  See also: <a href="async-trap-ie-amo.html">async-trap collides with
+  AMO at IE</a> &mdash; same general bug class (squashed-but-still-
+  retiring), different trigger.
+</p>
+
+<footer>
+  <p><a href="index.html">← back to catalog</a></p>
+</footer>
+
+</div>
+</body>
+</html>

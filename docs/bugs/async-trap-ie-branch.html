@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>async-trap collides with taken branch at IE — ntiny bug B</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="title">async-trap collides with taken branch at IE</p>
+  <p class="crumb"><a href="index.html">← bug catalog</a> · Bug B (xas_load &quot;Layer 3&quot;) · <span class="pill fixed">fixed</span> · commit <code>9766f90</code></p>
+</header>
+
+<dl class="kv">
+  <dt>Symptom</dt>
+  <dd>Linux 7.0 boot reaches <code>/init</code> (with bug A also fixed),
+      then crashes with <code>Oops - store (or AMO) address misaligned</code>
+      inside <code>next_uptodate_folio</code> on the first
+      <code>start-stop-daemon</code> page-fault.</dd>
+
+  <dt>Found at</dt>
+  <dd>sim cycle ~193.1M on Linux 7.0; FST window
+      <code>[193.08M, 193.12M]</code></dd>
+
+  <dt>Files touched</dt>
+  <dd><code>design/core/interrupt/src/interrupt_ctrl.sv</code>,
+      <code>design/core/core_top/src/core_top.sv</code></dd>
+</dl>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>What the kernel saw</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  An <code>lr.w</code> (load-reserved) inside
+  <code>next_uptodate_folio</code> faulted with
+  <code>badaddr=c200e4de</code> &mdash; an address whose low two bits
+  are <code>10</code>, i.e. word-misaligned. <code>lr.w</code> requires
+  4-byte alignment, so the trap is correct in spirit. The interesting
+  question is <em>how</em> a misaligned address ended up there.
+</p>
+
+<p>
+  The faulting code looks something like this:
+</p>
+
+<pre><code>c00c00d8: addi s8, a0, 28        # s8 = folio + 28 (= refcount addr)
+c00c00dc: lr.w s9, (s8)          # &lt;&lt;&lt; trap fires here</code></pre>
+
+<p>
+  At the trap, <code>a0 = 0xc200e4c2</code>, which decodes as a
+  <em>sibling-encoded</em> XArray entry (a special pointer with low
+  bits set to indicate the slot is a redirect, not a real folio).
+  XArray library code earlier in the call chain (<code>xas_load</code>)
+  is supposed to <em>canonicalise</em> sibling pointers &mdash; turn
+  them into real folio pointers &mdash; before they leak out. So
+  <code>a0</code> arriving as a sibling pointer means
+  <code>xas_load</code> didn't run its canonicalisation step.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>What actually happened</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Inside <code>xas_load</code>, the canonicalisation runs only if a
+  certain branch is taken:
+</p>
+
+<pre><code>c0282e62: andi x15, x10, 3       # low 2 bits of a0
+c0282e66: addi x15, x15, -2
+c0282e6a: bnez x15, c0282e70      # if low2bits != 2 → fall through
+c0282e6c: bltu x14, x10, c0282e7a # &lt;&lt;&lt; the branch in question
+c0282e70: ... fall-through path ...
+c0282e7a: ... canonicalisation path ...</code></pre>
+
+<p>
+  At the cycle of the trap-fire (FST sim_time 386 199 156), the
+  <code>bltu</code> at <code>c0282e6c</code> was at IE, with the timer
+  interrupt firing in the <em>same cycle</em>. The pipeline state:
+</p>
+
+<pre><code>opA_forwarded_data  = 0x00001000     (= a4, from preceding lui correct)
+opB_forwarded_data  = 0xc200e4c2     (= a0, the slot value, correct)
+branch_taken        = 1              (a4 &lt; a0, so bltu takes)
+branch_taken_valid  = 0              (BPU correctly predicted T)
+branch_target_addr  = 0xc0282e7a     (correct taken target)
+
+interrupt_valid     = 1              (timer fires this cycle)
+ecause              = 0x80000005     (S-mode timer)
+epc captured        = 0xc0282e70     (!!!)</code></pre>
+
+<p>
+  The branch was taken, the recovery target was correct, the BPU was
+  on the same page &mdash; everything in the pipeline did the right
+  thing. But the captured <code>sepc</code> was the <em>fall-through</em>
+  PC of a branch that took. After <code>sret</code>, the kernel
+  resumed at <code>c0282e70</code>, executed the
+  &quot;non-canonical&quot; fall-through path, and returned the raw
+  sibling pointer to <code>xas_load</code>'s caller. That pointer
+  flowed all the way to the <code>lr.w</code> &mdash; the sibling's
+  low bits made the address misaligned and the alignment check
+  faulted.
+</p>
+
+<div class="card warn">
+  <p class="label">why the &quot;use the recovery target&quot; path missed</p>
+  <p>
+    <code>interrupt_ctrl</code> had:
+  </p>
+<pre><code>async_use_branch = branch_taken_i;   // = bpu_mispredict
+pc_for_async     = async_use_branch ? brcvr
+                 : ...</code></pre>
+  <p>
+    <code>branch_taken_i</code> in interrupt_ctrl was wired to
+    <code>bpu_mispredict</code>. When the BPU predicts correctly,
+    mispredict = 0, so the chooser skipped <code>brcvr</code> and
+    fell through. Mispredicted branches always ended up using
+    <code>brcvr</code>, but correctly-predicted-TAKEN branches
+    didn't &mdash; so the bug only fires when the BPU happens to be
+    right.
+  </p>
+</div>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>The plain-language version</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Picture a road with a fork. The pipeline reaches the fork
+  (<code>bltu</code>), the branch evaluator says &quot;take the right
+  exit&quot;, the BPU agrees, and traffic redirects right &mdash;
+  exactly as expected. Then a fire alarm rings (timer interrupt). The
+  kernel writes down the address to come back to (<code>sepc</code>).
+  By mistake it writes down the address &quot;just past the fork sign on
+  the straight road&quot; (the fall-through PC) instead of &quot;the
+  start of the right-fork road&quot; (the recovery target). When the
+  alarm clears and the kernel returns, traffic resumes on the wrong
+  road.
+</p>
+
+<p>
+  In all the <em>other</em> branch outcomes the address book had a
+  special &quot;branch detour&quot; entry pointing at the right place.
+  But for the &quot;everyone agreed and it just took normally&quot;
+  case, no one had thought to fill that entry in.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>The fix</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  Pass the architectural direction (output of <code>branch_comp</code>)
+  into <code>interrupt_ctrl</code> as a separate signal, and OR it
+  into the gate:
+</p>
+
+<pre><code>// core_top.sv
+.branch_taken_h_i (branch_taken == TRUE),
+
+// interrupt_ctrl.sv
+wire async_use_branch = branch_taken_i      // mispredict
+                      | branch_taken_h_i;   // architecturally taken</code></pre>
+
+<p>
+  Now <code>brcvr</code> is the sepc source for any IE-stage branch
+  that's committing &mdash; whether mispredicted or not.
+  <code>brcvr</code> already collapses all four predict×direction
+  combinations into the architecturally-correct next-PC, so a single
+  OR is sufficient.
+</p>
+
+<!-- ───────────────────────────────────────────────────────────────── -->
+<h2>Why this fix had to come bundled with bug A</h2>
+<!-- ───────────────────────────────────────────────────────────────── -->
+
+<p>
+  When this fix was applied alone, the kernel got past the
+  <code>xas_load</code> trap but trapped a few million cycles later
+  inside <code>event_create_dir</code> with a refcount=0 WARN.
+  <a href="async-trap-ie-amo.html">Bug A</a> turned out to be the
+  same async-trap-vs-IE-stage race, just for AMOs instead of branches:
+  the OLD bug here was masking it by truncating loop iterations on
+  taken backward branches. With this fix in place, the loop runs to
+  completion and reaches the buggy AMO. Both fixes ship together in
+  commit <code>9766f90</code>.
+</p>
+
+<footer>
+  <p><a href="index.html">← back to catalog</a></p>
+</footer>
+
+</div>
+</body>
+</html>

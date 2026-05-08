@@ -1,0 +1,3 @@
+# Captured FST waveforms — large debug artifacts, do not commit.
+*.fst
+*.vcd

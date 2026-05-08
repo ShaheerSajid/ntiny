@@ -234,4 +234,36 @@ Each phase 2 step is its own commit + memory update. Use commit prefix
 `peripherals: <name>: standardise to <upstream>`.
 
 This plan supersedes the "Phase 2 — write custom kernel drivers" branch
-of `docs/post_linux_roadmap.md`.
+of `docs/roadmap.md`.
+
+## Phase 5 — peripherals ntiny doesn't yet have
+
+Phases 1–3 standardised everything that was already on the SoC. The
+next round adds peripherals ntiny doesn't have today, picking only
+those with a stable upstream Linux DT binding so we keep the
+"ntiny is just another RISC-V SoC" posture.
+
+| Peripheral       | Upstream binding                                | Why |
+|------------------|-------------------------------------------------|-----|
+| Watchdog         | `sifive,fu540-c000-wdt` or `riscv,sbi-srst`     | Protect against runaway init; `wdtctl` works |
+| RTC              | `dallas,ds1307` (i2c) or `sifive,clic-rtc`      | Wall-clock across reboots; `hwclock` works |
+| DMA              | `snps,axi-dma-1.01a` or `xilinx,axi-dma-1.00.a` | Offload memcpy / slave-IO; Linux dmaengine |
+| Ethernet MAC     | `cdns,gem` (Cadence GEM) or `litex,liteeth`     | Networking; iproute2 works out of the box |
+| USB device       | `dwc2,gadget` or `chipidea,usb2`                | USB serial / gadget; Linux gadget framework |
+| TRNG             | `timeriomem-rng` or `sifive,fu740-c000-rng`     | Replace jitterentropy fallback |
+| SD / eMMC        | `sdhci-cadence` or `microchip,sdhci-mvebu`      | Block storage |
+| PMU              | `sifive,fu540-c000-pmu`                         | Hardware perf counters → `perf` |
+
+Sequencing matches the Phase 2 cadence (one commit per peripheral):
+RTL refactor + bare-metal driver + Linux DT enable land in lockstep,
+verified by both a bare-metal test and a Linux self-test entry.
+
+Out of this round but worth flagging:
+
+- **AXI / AXI-Lite interconnect** — current bus is custom. Switching
+  to AXI gets us free interop with vendor IP (DMA, Ethernet, USB)
+  without per-peripheral plumbing, and is a precondition for any
+  significant peripheral expansion. Tracked in
+  [bus_revamp_plan.md](bus_revamp_plan.md).
+- **PCIe root complex** — too heavy for ntiny's footprint; revisit
+  for a successor SoC.
