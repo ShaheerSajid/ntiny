@@ -177,6 +177,24 @@ verilator_build_bench_trace:
 	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
 	mv obj_dir/Vtb_soc_top ./
 
+# Build with JTAG DPI (SimJTAG + remote_bitbang) wired in. The
+# generated Vtb_soc_top opens a TCP listener on localhost:5555 on
+# the first jtag_tick (~50 cycles after reset). Pair with OpenOCD
+# using software/flash/jtag_rbb.cfg. Without this target the
+# Verilator build leaves tms/tck/tdi as 0 — the JTAG TAP stays
+# parked. No DV_TRACER here (debug runs are short, trace overhead
+# would dominate).
+verilator_build_jtag:
+	verilator $(VERILATOR_COMMON) \
+	+define+JTAG_DPI \
+	$(VERILATOR_INCDIRS) \
+	$(VERILATOR_SRCS) \
+	testbench/SimJTAG.v \
+	testbench/SimJTAG.cc \
+	testbench/remote_bitbang.cc
+	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
+	mv obj_dir/Vtb_soc_top ./
+
 # Run simulation (no waveform by default)
 verilator_run:
 	./Vtb_soc_top
