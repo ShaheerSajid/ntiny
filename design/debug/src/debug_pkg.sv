@@ -39,10 +39,11 @@ typedef enum logic [6:0]{
     DATA9        = 7'h0d,
     DATA10       = 7'h0e,
     DATA11       = 7'h0f,
+    // Spec 1.0 Table 3.8 layout — HARTINFO sits at 0x12, HALTSUM1 at 0x13.
     DMCONTROL    = 7'h10,
     DMSTATUS     = 7'h11,
-    HALTSUM1     = 7'h12,
-    HARTINFO     = 7'h13,
+    HARTINFO     = 7'h12,
+    HALTSUM1     = 7'h13,
     HAWINDOWSEL  = 7'h14,
     HAWINDOW     = 7'h15,
     ABSTRACTCS   = 7'h16,

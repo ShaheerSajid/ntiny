@@ -146,7 +146,11 @@ always_ff@(posedge clk_i or posedge rst_i)
 begin : command_reg
   if(rst_i)
     command <= 0;
-  else if(!abstractcs[12] && dmi_wr_i && dmi_ad_i == COMMAND)
+  // Spec 1.0 §3.15.7: writes to command are ignored if cmderr is non-zero.
+  // The busy gate is also still required so a write during command
+  // execution doesn't clobber the in-flight command.
+  else if(!abstractcs[12] && abstractcs[10:8] == 3'd0 &&
+          dmi_wr_i && dmi_ad_i == COMMAND)
     command <= dmi_di_i;
   else if(pstate == POST && aapostincrement && cmdtype == 8'd0)
     if(aasize == 3'd2)
@@ -270,9 +274,48 @@ begin : dm_readlogic
     case(dmi_ad_i)
       DATA0:        dmi_do_o <= data0;
       DATA1:        dmi_do_o <= data1;
-      DMCONTROL:    dmi_do_o <= {dmcontrol[31:30], 1'b0, dmcontrol[28], 26'd0, dmcontrol[1:0]};
-      DMSTATUS:     dmi_do_o <= {12'd0,dmstatus[19:16],4'd0,dmstatus[11:8],1'b1,3'd0,4'd2};
-      ABSTRACTCS:   dmi_do_o <= {3'd0, 5'd0, 11'd0, abstractcs[12], 1'b0, abstractcs[10:8], 4'd0, 4'd1};
+      // dmcontrol per RISC-V Debug Spec 1.0 §3.15.2.
+      //   [31] haltreq        — WARZ, read 0
+      //   [30] resumereq      — W1, read 0
+      //   [29] hartreset      — WARL, not implemented (read 0)
+      //   [28] ackhavereset   — W1, read 0
+      //   [27] ackunavail     — W1, read 0
+      //   [26] hasel          — WARL, single hart (read 0)
+      //   [25:6] hartsel{lo,hi} — WARL, single hart (read 0)
+      //   [5:2] keepalive/resethaltreq controls — W1, read 0
+      //   [1] ndmreset        — R/W
+      //   [0] dmactive        — R/W
+      DMCONTROL:    dmi_do_o <= {30'd0, dmcontrol[1:0]};
+      // dmstatus per RISC-V Debug Spec 1.0 §3.15.1.
+      //   [31:25] reserved 0
+      //   [24] ndmresetpending = 0 (synchronous ndmreset, never pending)
+      //   [23] stickyunavail   = 0
+      //   [22] impebreak       = 0 (progbufsize=0)
+      //   [21:20] reserved 0
+      //   [19:18] all/anyhavereset
+      //   [17:16] all/anyresumeack
+      //   [15:14] all/anynonexistent = 0 (hart 0 exists)
+      //   [13:12] all/anyunavail     = 0
+      //   [11:8]  all/anyrunning, all/anyhalted
+      //   [7] authenticated = 1 (no auth)
+      //   [6] authbusy      = 0
+      //   [5] hasresethaltreq = 0
+      //   [4] confstrptrvalid = 0
+      //   [3:0] version = 3 (= 1.0)
+      DMSTATUS:     dmi_do_o <= {7'd0, 1'b0, 1'b0, 1'b0, 2'd0,
+                                 dmstatus[19:16],
+                                 4'd0,
+                                 dmstatus[11:8],
+                                 1'b1, 1'b0, 1'b0, 1'b0,
+                                 4'd3};
+      // hartinfo (0x12) — optional, read all-zero is spec-legal for
+      // implementations that don't expose data CSR shadows or dscratch.
+      HARTINFO:     dmi_do_o <= 32'd0;
+      // {progbufsize[28:24]=0, reserved[23:13]=0, busy[12], reserved[11],
+      //  cmderr[10:8], reserved[7:4]=0, datacount[3:0]=2}.
+      // datacount=2 advertises both data0 and data1; OpenOCD uses
+      // data1 as the address register for cmdtype=2 memaccess.
+      ABSTRACTCS:   dmi_do_o <= {3'd0, 5'd0, 11'd0, abstractcs[12], 1'b0, abstractcs[10:8], 4'd0, 4'd2};
       COMMAND:      dmi_do_o <= command;
       ABSTRACTAUTO: dmi_do_o <= {30'd0, abstractauto[1:0]};
       default:      dmi_do_o <= 0;
