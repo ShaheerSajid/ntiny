@@ -73,6 +73,17 @@ typedef enum logic [6:0]{
     AUTODATA     = 7'h30,
     HALTSUM2     = 7'h34,
     HALTSUM3     = 7'h35,
+    // System Bus Access (Spec 1.0 §3.15.22-30). sbaddress3 lives at
+    // 0x37 (out-of-order in spec table, before sbcs at 0x38).
+    SBADDRESS3   = 7'h37,
+    SBCS         = 7'h38,
+    SBADDRESS0   = 7'h39,
+    SBADDRESS1   = 7'h3a,
+    SBADDRESS2   = 7'h3b,
+    SBDATA0      = 7'h3c,
+    SBDATA1      = 7'h3d,
+    SBDATA2      = 7'h3e,
+    SBDATA3      = 7'h3f,
     HALTSUM0     = 7'h40
 } dm_addresses_e;
 

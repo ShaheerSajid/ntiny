@@ -59,6 +59,31 @@ logic [2:0]aasize;
 enum logic [1:0] {IDLE, DECODE, POST} pstate, nstate;
 logic autoexeccmd;
 
+// ── System Bus Access (Spec 1.0 §3.11) ────────────────────────────
+// SBA gives the debugger memory access "without involving a hart".
+// On this implementation the bus master is shared with the
+// abstract memaccess (cmdtype=2) path: SBA drives the same
+// am_*_o outputs the abstract command FSM uses, and only one of
+// them is active at a time. Practical consequence: SBA operations
+// only complete while the hart is halted (the am_* path requires
+// dbg_mem_override in core_top). The OpenOCD-visible register
+// interface is fully spec-compliant; SBA-while-running needs a
+// dedicated bus master + arbiter in soc_top, deferred for now.
+logic [31:0] sbaddress0;
+logic [31:0] sbdata0;
+logic [2:0]  sbcs_sbaccess;       // 0=8b, 1=16b, 2=32b
+logic        sbcs_sbautoincrement;
+logic        sbcs_sbreadonaddr;
+logic        sbcs_sbreadondata;
+logic [2:0]  sbcs_sberror;        // R/W1C
+logic        sbcs_sbbusyerror;    // R/W1C
+logic        sbbusy;
+logic        sba_wr;              // direction of in-flight access
+logic        sba_complete;        // SBA op finished this cycle
+logic        sba_trigger_read;
+logic        sba_trigger_write;
+enum logic [0:0] {SBA_IDLE, SBA_REQ} sba_state, sba_nstate;
+
 
 always_ff@(posedge clk_i)
 begin : dmstatus_reg
@@ -224,6 +249,17 @@ begin
               busy = 1'b0;
             end
   endcase
+
+  // SBA override: when the SBA bus master has an in-flight access,
+  // drive the am_* interface from the SBA state. Last-assignment-
+  // wins in always_comb cleanly preempts the abstract-command path.
+  if (sba_state == SBA_REQ) begin
+    am_en_o = onebit_sig_e'(!am_done_i);
+    am_wr_o = onebit_sig_e'(sba_wr);
+    am_st_o = {1'b0, sbcs_sbaccess};
+    am_ad_o = sbaddress0;
+    am_do_o = sbdata0;
+  end
 end
 
 //data0
@@ -235,7 +271,10 @@ begin : data0_reg
     data0 <= dmi_di_i;
   else if(ar_done_i)
     data0 <= ar_di_i;
-  else if(am_done_i)
+  // Only capture am_di_i into data0 when the abstract-command FSM
+  // owns the bus master (cmdtype=2). When SBA owns it (sba_state ==
+  // SBA_REQ), the read result lands in sbdata0 instead.
+  else if(am_done_i && pstate == DECODE)
     data0 <= am_di_i;
 end : data0_reg
 
@@ -264,6 +303,165 @@ end : abstarctauto_reg
 
 assign autoexeccmd = (dmi_wr_i || dmi_rd_i) &&  ((abstractauto[0] && dmi_ad_i == DATA0) ||
                                                  (abstractauto[1] && dmi_ad_i == DATA1));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// System Bus Access (SBA) — Spec 1.0 §3.11, §3.15.22-30
+// ═══════════════════════════════════════════════════════════════════════════
+// Triggers per spec:
+//   - Write to sbdata0 with sberror==0, sbbusyerror==0, sbbusy==0 → SBA write
+//   - Write to sbaddress0 with sbreadonaddr=1 (and same idle conds) → SBA read
+//   - Read of sbdata0 with sbreadondata=1 (and same idle conds)   → SBA read
+//                                                                   (after current read returns)
+// access size: 0=8b, 1=16b, 2=32b. Larger values set sberror=4 (size).
+// Aligned-only here (sberror=3 on misalign).
+
+// Implementation limitation: am_* is shared with the abstract memaccess
+// path which only routes to dmem_bus when dbg_mem_override is high
+// (= HALTED). So SBA also requires halted_i. A full SBA-while-running
+// implementation needs a dedicated bus master + arbiter in soc_top.
+wire sba_can_start = (sbcs_sberror == 3'd0) && !sbcs_sbbusyerror &&
+                     !sbbusy && (halted_i == TRUE);
+
+assign sba_trigger_write = sba_can_start && dmi_wr_i && dmi_ad_i == SBDATA0;
+assign sba_trigger_read  = sba_can_start &&
+                           ((dmi_wr_i && dmi_ad_i == SBADDRESS0 && sbcs_sbreadonaddr) ||
+                            (dmi_rd_i && dmi_ad_i == SBDATA0   && sbcs_sbreadondata));
+
+// Access size legality + alignment legality (compute at trigger time).
+wire sba_size_ok = (sbcs_sbaccess <= 3'd2);
+wire sba_align_ok = (sbcs_sbaccess == 3'd0) ? 1'b1 :
+                    (sbcs_sbaccess == 3'd1) ? (sbaddress0[0] == 1'b0) :
+                    (sbcs_sbaccess == 3'd2) ? (sbaddress0[1:0] == 2'd0) : 1'b0;
+
+// SBA state machine.
+always_ff @(posedge clk_i or posedge rst_i) begin
+    if (rst_i)
+        sba_state <= SBA_IDLE;
+    else
+        sba_state <= sba_nstate;
+end
+
+always_comb begin
+    sba_nstate = sba_state;
+    case (sba_state)
+        SBA_IDLE: begin
+            if ((sba_trigger_read || sba_trigger_write) && sba_size_ok && sba_align_ok)
+                sba_nstate = SBA_REQ;
+        end
+        SBA_REQ: begin
+            // Hold am_en high until am_done_i fires (matches the
+            // DECODE-state convention for cmdtype=2 abstract memaccess).
+            if (am_done_i)
+                sba_nstate = SBA_IDLE;
+        end
+        default: sba_nstate = SBA_IDLE;
+    endcase
+end
+
+// sba_complete pulses for one cycle when the bus access actually
+// finishes — captured while still in SBA_REQ so am_di_i / readdata_i
+// reflect the read result before core2avl's mode_iwb gets clobbered
+// by the next cycle's idle inputs.
+assign sba_complete = (sba_state == SBA_REQ) && am_done_i;
+
+// sbbusy reflects the SBA bus-master busy state (spec §3.15.22). Goes
+// high immediately on a triggered access, low after the access fully
+// completes.
+always_ff @(posedge clk_i or posedge rst_i) begin
+    if (rst_i)
+        sbbusy <= 1'b0;
+    else if (sba_complete)
+        sbbusy <= 1'b0;
+    else if (sba_state == SBA_IDLE && (sba_trigger_read || sba_trigger_write))
+        sbbusy <= sba_size_ok && sba_align_ok;
+end
+
+// sba_wr captures direction at start of access so am_wr_o stays
+// stable across the multi-cycle access.
+always_ff @(posedge clk_i or posedge rst_i) begin
+    if (rst_i)
+        sba_wr <= 1'b0;
+    else if (sba_state == SBA_IDLE && (sba_trigger_read || sba_trigger_write))
+        sba_wr <= sba_trigger_write;
+end
+
+// sbaddress0: writable from DMI (when not busy); auto-incremented on
+// SBA_DONE if sbautoincrement is set.
+always_ff @(posedge clk_i or posedge rst_i) begin
+    if (rst_i)
+        sbaddress0 <= 32'd0;
+    else if (!sbbusy && dmi_wr_i && dmi_ad_i == SBADDRESS0)
+        sbaddress0 <= dmi_di_i;
+    else if (sba_complete && sbcs_sbautoincrement) begin
+        case (sbcs_sbaccess)
+            3'd0: sbaddress0 <= sbaddress0 + 32'd1;
+            3'd1: sbaddress0 <= sbaddress0 + 32'd2;
+            3'd2: sbaddress0 <= sbaddress0 + 32'd4;
+            default: ;
+        endcase
+    end
+end
+
+// sbdata0: writable from DMI (when not busy, triggers a write); on
+// SBA read completion captured from am_di_i. Width-narrowing for
+// 8/16-bit accesses zero-extends (spec leaves upper bits unspecified).
+always_ff @(posedge clk_i or posedge rst_i) begin
+    if (rst_i)
+        sbdata0 <= 32'd0;
+    else if (!sbbusy && dmi_wr_i && dmi_ad_i == SBDATA0)
+        sbdata0 <= dmi_di_i;
+    else if (sba_complete && !sba_wr) begin
+        case (sbcs_sbaccess)
+            3'd0:    sbdata0 <= {24'd0, am_di_i[7:0]};
+            3'd1:    sbdata0 <= {16'd0, am_di_i[15:0]};
+            default: sbdata0 <= am_di_i;
+        endcase
+    end
+end
+
+// sbcs control bits — sbreadonaddr/sbreadondata/sbautoincrement/sbaccess.
+// Errors (sberror, sbbusyerror) are R/W1C: writing 1 to a bit clears
+// it. They cannot be cleared while busy (spec is explicit only for
+// sbbusyerror in the data write path; we apply the same rule to
+// avoid races).
+always_ff @(posedge clk_i or posedge rst_i) begin
+    if (rst_i) begin
+        sbcs_sbreadonaddr    <= 1'b0;
+        sbcs_sbreadondata    <= 1'b0;
+        sbcs_sbautoincrement <= 1'b0;
+        sbcs_sbaccess        <= 3'd2;  // default 32-bit
+        sbcs_sberror         <= 3'd0;
+        sbcs_sbbusyerror     <= 1'b0;
+    end else begin
+        // Trigger-time error capture
+        if (sba_state == SBA_IDLE && (sba_trigger_read || sba_trigger_write)) begin
+            if (!sba_size_ok)
+                sbcs_sberror <= 3'd4;     // size
+            else if (!sba_align_ok)
+                sbcs_sberror <= 3'd3;     // alignment
+        end
+        // Busy-error: a write to sbcs / sbaddress / sbdata while busy.
+        // Detect any DMI access targeting an SBA register while sbbusy.
+        if (sbbusy && (dmi_wr_i || dmi_rd_i) &&
+            (dmi_ad_i == SBCS || dmi_ad_i == SBADDRESS0 ||
+             dmi_ad_i == SBDATA0))
+            sbcs_sbbusyerror <= 1'b1;
+
+        // DMI write to sbcs: control bits are R/W; error bits are
+        // W1C. Don't apply control writes while busy (spec: "writes
+        // to sbcs while sbbusy is high result in undefined behavior").
+        if (!sbbusy && dmi_wr_i && dmi_ad_i == SBCS) begin
+            sbcs_sbreadonaddr    <= dmi_di_i[20];
+            sbcs_sbreadondata    <= dmi_di_i[15];
+            sbcs_sbautoincrement <= dmi_di_i[16];
+            sbcs_sbaccess        <= dmi_di_i[19:17];
+            sbcs_sberror         <= sbcs_sberror     & ~dmi_di_i[14:12];
+            sbcs_sbbusyerror     <= sbcs_sbbusyerror & ~dmi_di_i[22];
+        end
+    end
+end
+
+// ═══════════════════════════════════════════════════════════════════════════
 
 //readlogic
 always_ff@(posedge clk_i or posedge rst_i)
@@ -318,6 +516,42 @@ begin : dm_readlogic
       ABSTRACTCS:   dmi_do_o <= {3'd0, 5'd0, 11'd0, abstractcs[12], 1'b0, abstractcs[10:8], 4'd0, 4'd2};
       COMMAND:      dmi_do_o <= command;
       ABSTRACTAUTO: dmi_do_o <= {30'd0, abstractauto[1:0]};
+      // sbcs per Spec 1.0 §3.15.22.
+      //   [31:29] sbversion   = 1 (1.0)
+      //   [28:23] reserved 0
+      //   [22] sbbusyerror   (R/W1C)
+      //   [21] sbbusy        (R)
+      //   [20] sbreadonaddr  (R/W)
+      //   [19:17] sbaccess    (R/W) — 0=8b, 1=16b, 2=32b
+      //   [16] sbautoincrement (R/W)
+      //   [15] sbreadondata  (R/W)
+      //   [14:12] sberror    (R/W1C)
+      //   [11:5] sbasize     = 32 (system address bus is 32 bits)
+      //   [4] sbaccess128    = 0
+      //   [3] sbaccess64     = 0
+      //   [2] sbaccess32     = 1
+      //   [1] sbaccess16     = 1
+      //   [0] sbaccess8      = 1
+      SBCS:         dmi_do_o <= {3'd1, 6'd0,
+                                 sbcs_sbbusyerror,
+                                 sbbusy,
+                                 sbcs_sbreadonaddr,
+                                 sbcs_sbaccess,
+                                 sbcs_sbautoincrement,
+                                 sbcs_sbreadondata,
+                                 sbcs_sberror,
+                                 7'd32,
+                                 5'b00111};
+      SBADDRESS0:   dmi_do_o <= sbaddress0;
+      // sbaddress1/2/3 not present (sbasize=32).
+      SBADDRESS1:   dmi_do_o <= 32'd0;
+      SBADDRESS2:   dmi_do_o <= 32'd0;
+      SBADDRESS3:   dmi_do_o <= 32'd0;
+      SBDATA0:      dmi_do_o <= sbdata0;
+      // sbdata1/2/3 not present (no 64/128-bit access).
+      SBDATA1:      dmi_do_o <= 32'd0;
+      SBDATA2:      dmi_do_o <= 32'd0;
+      SBDATA3:      dmi_do_o <= 32'd0;
       default:      dmi_do_o <= 0;
     endcase
 end : dm_readlogic
