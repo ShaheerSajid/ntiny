@@ -252,6 +252,14 @@ typedef enum logic[11:0] {
 	PMPADDR15		= 12'h3BF,
 	DCSR			= 12'h7b0,
 	DPC 			= 12'h7b1,
+	// Trigger Module (Spec 1.0 §5.5). Single mcontrol6 (type=6) trigger;
+	// other tdata* values read 0 / WARL-clamp.
+	TSELECT			= 12'h7a0,
+	TDATA1			= 12'h7a1,
+	TDATA2			= 12'h7a2,
+	TDATA3			= 12'h7a3,
+	TINFO			= 12'h7a4,
+	TCONTROL		= 12'h7a5,
 	//Supervisor Mode
 	SSTATUS     	= 12'h100,
    	SIE         	= 12'h104,

@@ -108,6 +108,19 @@ module csr_unit (
 	// Sstc — S-mode timer compare register (split LO/HI for RV32)
 	logic [31:0] _STIMECMP;
 	logic [31:0] _STIMECMPH;
+	// Trigger Module CSRs (Spec 1.0 §5.5). One implementation slot
+	// (tselect=0). Storage allows writes to round-trip; no match logic
+	// is wired into the pipeline yet, so triggers configured here do
+	// not actually fire — tinfo therefore advertises type=0 (no real
+	// trigger) and OpenOCD/GDB fall back to software breakpoints. The
+	// register interface satisfies the spec's "read/write CSR" contract
+	// and stops abstract regaccess from raising csr_invalid for these
+	// addresses, which OpenOCD reads during examination.
+	logic [31:0] _TSELECT;
+	logic [31:0] _TDATA1;
+	logic [31:0] _TDATA2;
+	logic [31:0] _TDATA3;
+	logic [31:0] _TCONTROL;
 	// PMP CSRs
 	logic [31:0] _PMPCFG  [4];
 	logic [31:0] _PMPADDR [16];
@@ -131,6 +144,7 @@ module csr_unit (
 	logic MCOUNTEREN_sel, SCOUNTEREN_sel;
 	logic MENVCFG_sel, MENVCFGH_sel, SENVCFG_sel;
 	logic STIMECMP_sel, STIMECMPH_sel;
+	logic TSELECT_sel, TDATA1_sel, TDATA2_sel, TDATA3_sel, TINFO_sel, TCONTROL_sel;
 
 	assign MSTATUS_sel      = csr_addr_i == MSTATUS;
 	assign SSTATUS_sel      = csr_addr_i == SSTATUS;
@@ -166,6 +180,12 @@ module csr_unit (
 	assign SENVCFG_sel      = csr_addr_i == SENVCFG;
 	assign STIMECMP_sel     = csr_addr_i == STIMECMP;
 	assign STIMECMPH_sel    = csr_addr_i == STIMECMPH;
+	assign TSELECT_sel      = csr_addr_i == TSELECT;
+	assign TDATA1_sel       = csr_addr_i == TDATA1;
+	assign TDATA2_sel       = csr_addr_i == TDATA2;
+	assign TDATA3_sel       = csr_addr_i == TDATA3;
+	assign TINFO_sel        = csr_addr_i == TINFO;
+	assign TCONTROL_sel     = csr_addr_i == TCONTROL;
 
 
 	// ── CSR write data ───────────────────────────────────────────
@@ -384,6 +404,21 @@ module csr_unit (
 	csr_register_32 #(32'hFFFFFFFF) csr_stimecmph (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(STIMECMPH_sel),
 	                                                .wdata(csr_data),.update(_STIMECMPH), .csr(_STIMECMPH));
 
+	// ── Trigger Module (Spec 1.0 §5.5) ───────────────────────────
+	// tselect: WARL-clamped to 0 (single trigger slot). Writes round-
+	// trip via standard CSR cell; reads return _TSELECT which is held
+	// at 0 until match logic is added.
+	csr_register_32 #(32'h0) csr_tselect  (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(TSELECT_sel),
+	                                        .wdata(32'h0),.update(_TSELECT), .csr(_TSELECT));
+	csr_register_32 #(32'h0) csr_tdata1   (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(TDATA1_sel),
+	                                        .wdata(csr_data),.update(_TDATA1), .csr(_TDATA1));
+	csr_register_32 #(32'h0) csr_tdata2   (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(TDATA2_sel),
+	                                        .wdata(csr_data),.update(_TDATA2), .csr(_TDATA2));
+	csr_register_32 #(32'h0) csr_tdata3   (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(TDATA3_sel),
+	                                        .wdata(csr_data),.update(_TDATA3), .csr(_TDATA3));
+	csr_register_32 #(32'h0) csr_tcontrol (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(TCONTROL_sel),
+	                                        .wdata(csr_data),.update(_TCONTROL), .csr(_TCONTROL));
+
 	// ── SATP (Sv32 MMU) ──────────────────────────────────────────
 	csr_register_32 #(32'h0) csr_satp       (.clk_i(clk_i),.reset_i(reset_i),.csr_cmd_i(csr_cmd_i),.enable(SATP_sel),
 	                                          .wdata(csr_data),.update(_SATP), .csr(_SATP));
@@ -583,6 +618,18 @@ module csr_unit (
 			SBADADDR:       csr_value_o = _STVAL;
 			SIP:            csr_value_o = (_MIP | (ext_irq_s_hw_i ? 32'h0000_0200 : 32'h0) | stip_hw_inj) & S_INT_MASK;
 			SATP:           csr_value_o = _SATP;
+			// ── Trigger Module CSRs (Spec 1.0 §5.5) ───────────────
+			// One implementation slot at tselect=0; tinfo advertises
+			// type=0 (no real trigger configured) so OpenOCD reports
+			// "Found 0 triggers" and falls back to software breakpoints.
+			// Storage of tdata1/tdata2/tdata3 is plumbed so future match
+			// logic can hook in without re-touching the read mux.
+			TSELECT:        csr_value_o = _TSELECT;
+			TDATA1:         csr_value_o = _TDATA1;
+			TDATA2:         csr_value_o = _TDATA2;
+			TDATA3:         csr_value_o = _TDATA3;
+			TINFO:          csr_value_o = 32'h00000001;  // bit 0: type 0 (no trigger)
+			TCONTROL:       csr_value_o = _TCONTROL;
 			// PMP CSRs
 			PMPCFG0:        csr_value_o = _PMPCFG[0];
 			PMPCFG1:        csr_value_o = _PMPCFG[1];
