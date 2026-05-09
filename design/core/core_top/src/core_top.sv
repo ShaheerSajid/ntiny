@@ -374,6 +374,20 @@ logic        dbg_rf_override, dbg_mem_override;
 onebit_sig_e c_busy;
 logic [31:0] next_instruction_addr;
 
+// Abstract-command write classification (RISC-V Debug Spec 0.13 §3.13.4).
+// ar_ad_i encodes the destination of an abstract regaccess:
+//   0x0000-0x0fff: CSR address
+//   0x1000-0x101f: GPR x0..x31
+//   0x1020-0x103f: FPR f0..f31
+// Pulses are 1 cycle wide (driven by the DM FSM in DECODE state) so a
+// write injects exactly once per ar_en | ar_wr handshake.
+wire dbg_ar_wr_pulse = halted_o && (ar_en_i == TRUE) && (ar_wr_i == TRUE);
+wire dbg_csr_wr      = dbg_ar_wr_pulse && (ar_ad_i <  16'h1000);
+wire dbg_gpr_wr      = dbg_ar_wr_pulse && (ar_ad_i >= 16'h1000) && (ar_ad_i <= 16'h101f);
+`ifdef FPU
+wire dbg_fpr_wr      = dbg_ar_wr_pulse && (ar_ad_i >= 16'h1020) && (ar_ad_i <= 16'h103f);
+`endif
+
 debug_ctrl debug_ctrl_inst (
     .clk_i            (clk_i),
     .reset_i          (reset_i),
@@ -1566,9 +1580,9 @@ reg_file regfile_inst
 	.clk_i		  (clk_i) ,
 	.reset_i	  (reset_i),
 	.stall_i	  (1'b0),
-	.write_i	  (rf_wr_en),
-	.wraddr_i	  (rf_wr_addr),
-	.wrdata_i	  (rf_wr_data),
+	.write_i	  (dbg_gpr_wr ? 1'b1        : rf_wr_en),
+	.wraddr_i	  (dbg_gpr_wr ? ar_ad_i[4:0] : rf_wr_addr),
+	.wrdata_i	  (dbg_gpr_wr ? ar_di_i      : rf_wr_data),
 	.rdaddra_i	(dbg_rf_override? ar_ad_i[4:0] : ctrl_bus_if_id.rs1_int[4:0]),
 	.rddataa_o	(rs1_int),
 	.rdaddrb_i	(ctrl_bus_if_id.rs2_int[4:0]),
@@ -1582,9 +1596,9 @@ reg_file regfile_inst
 		.clk_i		  (clk_i) ,	
 		.reset_i	  (reset_i),
 		.stall_i	  (1'b0),
-		.write_i	  (ctrl_bus_iwb.rd_float != NO_REG),
-		.wraddr_i	  (ctrl_bus_iwb.rd_float[4:0]),	
-		.wrdata_i	  (write_back_data),
+		.write_i	  (dbg_fpr_wr ? 1'b1                 : (ctrl_bus_iwb.rd_float != NO_REG)),
+		.wraddr_i	  (dbg_fpr_wr ? ar_ad_i[4:0]         : ctrl_bus_iwb.rd_float[4:0]),
+		.wrdata_i	  (dbg_fpr_wr ? ar_di_i              : write_back_data),
 		.rdaddra_i	(dbg_rf_override? ar_ad_i[4:0] : ctrl_bus_if_id.rs1_float[4:0]),
 		.rddataa_o	(rs1_float),
 		.rdaddrb_i	(ctrl_bus_if_id.rs2_float[4:0]),
@@ -2347,11 +2361,15 @@ csr_unit csr_unit_inst
   .csr_instret_trigger_i(onebit_sig_e'(ctrl_bus_ie.inst_type != NO_INS)),
 	// Let CSR writes complete — interrupts fire after instruction commits.
 	// (Ibex: "interrupts taken as soon as whatever instruction in ID finishes")
-	.csr_cmd_i				    (ctrl_bus_ie.csr_op),
-	.csr_use_immediate_i	(ctrl_bus_ie.csr_use_immediate),
+	// Debug abstract CSR write injects WRITE_CSR with reg-source data.
+	// On dbg_csr_wr the pipeline is halted so ctrl_bus_ie.csr_op should
+	// already be NO_CSR_OP, but the explicit override is what makes the
+	// write actually happen.
+	.csr_cmd_i				    (dbg_csr_wr ? WRITE_CSR : ctrl_bus_ie.csr_op),
+	.csr_use_immediate_i	(dbg_csr_wr ? FALSE     : ctrl_bus_ie.csr_use_immediate),
 	.csr_addr_i				    (dbg_rf_override? csr_reg_e'(ar_ad_i[11:0]) : ctrl_bus_ie.csr_addr),
 	.imm_i					      (imm_ie),
-	.reg_i					      (opA_forwarded_data),
+	.reg_i					      (dbg_csr_wr ? ar_di_i   : opA_forwarded_data),
 	.csr_value_o			    (csr_result),
 	.csr_invalid_o        (csr_invalid),
 

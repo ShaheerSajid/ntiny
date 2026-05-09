@@ -14,8 +14,10 @@ import debug_pkg::*;
 //   - DCSR is at 0x7B0, DPC at 0x7B1 (debug CSR space, accessible only via
 //     abstract register access when halted)
 //   - DSCRATCH0/1 (0x7B2/0x7B3) not implemented
-//   - Abstract register writes to integer/FP registers not implemented
-//     (reads only — sufficient for OpenOCD register inspection)
+//   - Abstract register writes (GPR/FPR/CSR) are routed by core_top:
+//     dbg_gpr_wr / dbg_csr_wr / dbg_fpr_wr mux into the regfile and
+//     csr_unit write ports while halted. DCSR/DPC writes are still
+//     handled here so they don't disturb csr_unit's CSR file.
 //
 module debug_ctrl (
     input  logic        clk_i,
