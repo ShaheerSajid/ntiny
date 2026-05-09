@@ -94,6 +94,9 @@ void remote_bitbang_t::accept()
       }
     } else {
       fcntl(client_fd, F_SETFL, O_NONBLOCK);
+      // Reset session state so a stale `quit` from the previous
+      // client doesn't immediately tear down this new connection.
+      quit = 0;
       fprintf(stderr, "Accepted successfully.");
       again = 0;
     }
