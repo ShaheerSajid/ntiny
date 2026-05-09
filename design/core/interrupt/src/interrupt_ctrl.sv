@@ -43,31 +43,19 @@ module interrupt_ctrl (
     input        illegal_insn_i,       // from privilege_unit (already computed)
     input        insn_valid_id_i,      // from hazard_unit
     input        debug_ebreak_i,       // dcsr[15] — ebreak enters debug, not trap
-    input        branch_taken_i,       // IE-stage branch MISPREDICT (= bpu_mispredict, flush incoming)
-    // Architectural direction from branch_comp at the IE stage:
-    //   1 = the IE-stage instruction is a branch/jump that IS taking
-    //       this cycle (BRANCH+condition-met, or JUMP/JUMP_R always).
-    //   0 = not a taken branch.
-    // Used to fix Layer 3 (project_v7_layer3_xarray_slot.md): when async-
-    // trap fires the same cycle as a CORRECTLY-PREDICTED-TAKEN branch,
-    // branch_taken_i (=mispredict) is 0, but the branch IS architecturally
-    // committing. The legacy logic fell through to pc_ie+insn_len = the
-    // FALL-THROUGH PC of a branch that took, so sret resumed at the wrong
-    // place. Gating async_use_branch on (mispredict | architecturally-
-    // taken) makes brcvr the sepc source whenever a branch is committing.
+    input        branch_taken_i,       // IE-stage branch MISPREDICT (= bpu_mispredict)
+    // Architectural direction from branch_comp at IE: 1 = the IE
+    // instruction is a branch/jump that IS taking this cycle
+    // (BRANCH+condition-met, or JUMP/JUMP_R unconditionally).
+    // Async-trap epc must use the recovery target whenever a branch
+    // commits, mispredicted or not. See docs/bugs/.
     input        branch_taken_h_i,
-    // Where the branch should resume on async-trap epc capture. This is
-    // the SAME signal core_top uses to redirect fetch on mispredict —
-    //   pred=T, actual=NT  -> fall-through (predicted_pc_ie)
-    //   pred=T, actual=T (wrong target) -> actual taken target
-    //   pred=NT, actual=T  -> actual taken target
-    //   pred=T, actual=T (correct) -> branch_target_address (taken target)
-    // Using the raw "branch_target_address" (always the would-be taken
-    // target) here was wrong for the pred=T,actual=NT case: a timer
-    // interrupt firing on the same cycle as the loop-exit bne would
-    // capture epc = taken target = loop top, then sret resumed inside
-    // the loop instead of the fall-through, looping forever (run #2 of
-    // Phase 2a, kernfs_name_hash on "cpu_slabs").
+    // Architecturally correct sepc target across all four
+    // predict×direction combinations:
+    //   pred=T, actual=NT          -> fall-through (predicted_pc_ie)
+    //   pred=T, actual=T (wrong)   -> taken target
+    //   pred=NT, actual=T          -> taken target
+    //   pred=T, actual=T (correct) -> taken target (branch_target_address)
     input [31:0] branch_recovery_target_i,
 
     // ── IE-stage CSR invalid (unimplemented CSR accessed) ────────────────
@@ -80,31 +68,19 @@ module interrupt_ctrl (
     input [1:0]          ie_addr_lsb_i,    // alu_result[1:0]
     input [31:0]         ie_fault_addr_i,  // alu_result (full address for mtval)
     input                amo_in_progress_i,
-    // amo_unit.active_o (AMO_READ || AMO_WRITE) — true ONLY when AMO
-    // is mid-bus-FSM and uncommitted. Excludes IDLE (no AMO) and DONE
-    // (memory write already committed). Used to gate sepc=pc_ie for
-    // re-execute on async trap so the AMO restart from scratch works
-    // (amo_unit aborts to IDLE on flush_i = interrupt_valid).
+    // amo_unit.active_o — high in AMO_READ/AMO_WRITE (mid-bus, uncommitted).
+    // Low in IDLE and DONE.
     input                amo_active_i,
-    // amo_unit.pending_o — high while an AMO is at IE waiting to start
-    // (state == IDLE but amo_op != NO_AMO_OP). Async-trap fires same
-    // cycle as the AMO reaches IE → flush_i blocks IDLE → READ
-    // transition → amo_active stays 0. Without this gate, async_use_ie
-    // misses the squashed-AMO case and sepc captures pc_id, leaving
-    // a5 holding amo_unit.result_q's stale/zero value → kernel sees
-    // a5=0 on resume → beqz fires refcount_warn_saturate. Symptom:
-    // project_v7_layer3_fix_event_create_dir_regression. pending_i
-    // stays 0 in DONE state so already-committed AMOs correctly skip
-    // via pc_id (no double-execute).
+    // amo_unit.pending_o — high in IDLE while an AMO at IE is waiting
+    // to start. flush_i blocks the IDLE→READ transition on async-trap,
+    // and without this signal async_use_ie misses the squashed-AMO
+    // case. Goes 0 in DONE so already-committed AMOs are skipped, not
+    // re-executed. See docs/bugs/.
     input                amo_pending_i,
-    // mmu_d_stall — true while a PTW walk is in flight for the IE-stage
-    // load/store. dmem_port.we is suppressed by d_xlat_pending = mmu_d_stall
-    // so a store stalled mid-PTW has NOT committed to the bus yet. Async
-    // trap during PTW kills imem propagation and the store is permanently
-    // lost unless we re-execute. Symptom (Linux v7.0 terminate_walk):
-    // sw ra,28(sp) of a function prologue silently dropped → ra slot kept
-    // prior tenant's data (e.g. PAGE_MASK=0xfffff000) → ret jumped to
-    // 0xfffff000 → instruction page fault.
+    // mmu_d_stall — PTW walk in flight for an IE-stage load/store.
+    // d_xlat_pending suppresses dmem_port.we so the store has not
+    // committed yet; sepc must point at the load/store so it
+    // re-executes after sret.
     input                mmu_d_stall_i,
 
     // ── IE-stage uncommitted indicator ──────────────────────────────────
@@ -114,14 +90,10 @@ module interrupt_ctrl (
     input                ie_stall_i,
 
     // ── IE-stage instruction length ─────────────────────────────────────
-    // c_valid (compressed-instruction-valid) at IE stage. 1 = 16-bit
-    // compressed insn, 0 = 32-bit. Used by pc_for_async fallback so
-    // the "skip Z" sepc points to pc_ie + insn_len (not pc_ie raw)
-    // when pc_id is 0 (= ID stage empty post-redirect/context-switch).
-    // Without this, async traps that fire while ID is freshly empty
-    // would set sepc=pc_ie even though Z has already retired through
-    // IMEM/IWB → kernel re-executes Z → double-decrement of sp etc.
-    // (mntput's `addi sp,-16` was hitting this exact case.)
+    // 1 = 16-bit compressed insn at IE, 0 = 32-bit. Used by
+    // pc_for_async's pc_id=0 fallback to compute pc_ie + insn_len so
+    // a "skip" sepc lands on the right next-PC for both RVC and
+    // RV32 instructions.
     input                c_valid_ie_i,
 
     // ── MMU page faults ─────────────────────────────────────────────────
@@ -174,13 +146,10 @@ assign exception_from_ie_o = misalign_amo | ie_csr_illegal;
 // ═══════════════════════════════════════════════════════════════════════════
 // ID-stage exception gating (only fire on valid, non-illegal instructions)
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 4.10c: suppress ID-stage sync exceptions when the IE instruction
-// is a mispredicted branch. The ID instruction is on the speculative
-// fall-through path and will be flushed by the branch redirect. Without
-// this, ebreak/ecall/illegal in the shadow of a taken branch fires a
-// trap before the branch redirect can flush it (trap > branch priority
-// in the redirect arbiter). Linux BUG_ON() ebreak after c.beqz was
-// firing because the ebreak was consumed before the branch resolved.
+// Suppress ID-stage sync exceptions when an IE-stage branch is
+// mispredicting (~branch_taken_i): the ID insn is on the wrong-path
+// fall-through and will be flushed by the redirect, so its
+// ebreak/ecall/illegal must not fire a trap.
 wire ecall_valid   = ecall_raw_i  & ~illegal_insn_i & insn_valid_id_i & ~branch_taken_i;
 wire ebreak_valid  = ebreak_raw_i & ~debug_ebreak_i & ~illegal_insn_i & insn_valid_id_i & ~branch_taken_i;
 wire illegal_valid = illegal_insn_i & insn_valid_id_i & ~branch_taken_i;
@@ -201,129 +170,52 @@ wire store_access_fault = data_access_fault_i &  data_access_fault_is_store_i;
 wire [31:0] pc_for_id = insn_page_fault_i  ? insn_fault_addr_i :
                         insn_access_fault_i ? insn_access_fault_addr_i : pc_id_i;
 
-// PC for async interrupts: when the fetch buffer is between entries
-// (aligner gap cycle), pc_id_i drops to 0 while the previous
-// instruction has already moved to IE. If the interrupt fires on
-// that exact gap cycle, mepc must be the IE-stage PC (the oldest
-// in-flight instruction that the flush will kill) so it gets
-// re-executed after mret. When pc_id IS valid, it's the ID-stage
-// instruction about to enter IE — that's the standard mepc.
+// ═══════════════════════════════════════════════════════════════════════════
+// PC capture for async-trap epc (sepc/mepc)
+// ═══════════════════════════════════════════════════════════════════════════
+// Picking the right epc on an async interrupt is delicate because
+// the pipeline has multiple in-flight instructions and we must
+// resume in a way that:
+//   - doesn't double-execute anything that already retired
+//   - doesn't skip anything that was squashed before commit
+//   - lands on the architecturally-correct PC, not a wrong-path PC
 //
-// Phase 4.13c: when BOTH pc_id_i and pc_ie_i are 0 (the cycle
-// right after a wb_xret_fire — pipeline is freshly starting to
-// fetch the post-xret target, no instruction has reached IE yet),
-// fall back to pc_out_i which holds the xret target latched into
-// program_counter on the xret commit cycle. Without this, an
-// async interrupt firing one cycle after sret/mret saved mepc=0
-// and the M-mode handler returned to PC=0 — causing a NULL fetch
-// page fault later in S-mode.
+// The four conditions and their epc choice (priority order):
 //
-// Phase 4.15: wrong-path async epc fix. When a mispredicted
-// branch/jump is in IE this cycle (branch_taken_i asserted),
-// pc_id_i holds the WRONG-PATH sequential next-fetch — IF hasn't
-// seen the redirect yet. Using pc_id as epc would resume the
-// kernel on the wrong path after sret. Smoking gun (Linux boot,
-// 2026-04-28): c.j @ c0151e3c in crng_make_state was in EX with
-// branch_v=1 btgt=c0151dae, but trap captured epc=c0151e3e
-// (sequential past c.j) → kernel re-ran wrong path → corrupted
-// callee-saved regs → BUG_ON in random.c, ra=0xffff0a00 etc.
+//   1. async_use_branch — IE-stage branch/jump is committing this
+//      cycle. Use brcvr (branch_recovery_target_i) which collapses
+//      all four predict×direction combinations into the architecturally
+//      correct next-PC.
+//        branch_taken_i    = mispredict (pred≠actual)
+//        branch_taken_h_i  = correctly-predicted TAKEN (no mispredict
+//                            but branch IS taking)
+//      OR'd together to catch any branch that's committing.
 //
-// Fix v2 (2026-04-28): for IE-stage mispredicting branch/jump
-// (branch_taken_i), use branch_recovery_target_i — same signal core_top
-// feeds to fetch on mispredict. Was branch_target_address_i which was
-// always the taken target; broken for pred=T/actual=NT. Rationale:
+//   2. async_use_ie — IE-stage op is uncommitted (memory not yet
+//      written, regfile not yet updated). Use pc_ie so the op
+//      re-executes after sret. Three contributors:
+//        amo_active_i    = AMO in READ/WRITE phase (mid-bus FSM)
+//        mmu_d_stall_i   = PTW walking for an IE load/store (d_xlat_pending
+//                          suppresses dmem_port.we → store uncommitted)
+//        amo_pending_i   = AMO at IE in IDLE waiting to start (flush_i
+//                          blocked the IDLE→READ transition; amo_active
+//                          stays 0 across the squash but the AMO never
+//                          ran, so re-execute is required)
+//      Notably DONE-state AMOs are NOT in this list — their memory
+//      write already committed; re-executing would double-decrement.
 //
-//   - The IE-stage branch's writeback (rd ← PC+4 for jal/jalr)
-//     propagates through IMEM→IWB and fires normally a couple
-//     cycles after the trap captures epc. So rd is already
-//     written by the time the kernel reads pt_regs.
-//   - If we set epc = pc_ie and re-execute the branch after
-//     sret, jalr-with-rs1==rd reads a corrupted rs1 (the
-//     just-written link value) and computes the wrong target.
-//   - Setting epc = branch_target_address makes the kernel resume
-//     AT the branch destination, exactly as if the branch had
-//     executed completely. PC = target, rd = link. Effectively
-//     "the branch executed once, then trapped".
+//   3. pc_id_i if non-zero — the ID-stage instruction is about to
+//      enter IE; resuming there skips the just-retired IE op exactly
+//      once.
 //
-// For non-branch IE-stage instructions, use pc_id (legacy):
-// their writeback fires through IWB normally, so the kernel
-// resumes past them. CSR-write commits across trap entry are
-// handled by combining csr_cmd with trap entry effects in
-// csr_unit (see _MSTATUS update logic).
+//   4. pc_ie_i + insn_len if non-zero — ID is empty (post-redirect /
+//      post-context-switch); fall back to "next PC after the IE op".
+//      Insn-length-aware via c_valid_ie_i so RVC + RV32 both work.
 //
-// Phase 4.16 (2026-04-28): in-flight AMO must re-execute after sret.
-// AMO instructions are multi-cycle in IE (FSM: IDLE→READ→WRITE→DONE).
-// During those cycles, ie_stall is asserted and the AMO ctrl_bus
-// holds at the IE register. If an async interrupt fires before the
-// AMO reaches DONE, amo_unit gets flush_i=interrupt_valid and aborts
-// (state→IDLE), so the memory write never happens. With the legacy
-// epc=pc_id, sret resumes at the instruction AFTER the AMO and the
-// atomic op is silently skipped. Smoking gun (Linux boot, chr_dev_init
-// hang): up_write's amoadd.w at c002d600 was aborted by an M-timer
-// interrupt; rwsem.count was never decremented; init then blocked
-// in __down_write forever waiting for a release that already
-// "happened" but had no effect.
-//
-// Fix: when ie_stall is asserted, the IE-stage instruction has
-// NOT yet committed (AMO mid-FSM, MUL/DIV in flight, PTW pending,
-// etc). On async trap, capture epc=pc_ie so it re-executes after
-// sret. When ie_stall is low, the IE-stage op IS completing this
-// cycle (its writeback already in flight to IMEM/IWB) — use pc_id
-// so we don't double-execute. Originally tried gating on
-// ie_amo_op != NO_AMO_OP, but that stayed asserted in the AMO's
-// DONE cycle (memory write already committed) and caused
-// double-decrement of rwsem.count, leading to a second hang
-// downstream. ie_stall is exactly true while the IE op is
-// uncommitted, false once it's retiring. amo_unit's reservation
-// register is invalidated on flush so LR/SC pairs restart cleanly.
-// async_use_branch fires when an IE-stage branch is committing this
-// cycle. Two flavours:
-//   - branch_taken_i (=mispredict) covers the cases where fetch needs
-//     redirecting (pred=T,actual=NT and pred=NT,actual=T and wrong-target).
-//   - branch_taken_h_i covers the correctly-predicted-TAKEN case
-//     (no mispredict, but branch IS architecturally taking — sepc must
-//     point at the taken target, not pc_ie+insn_len). Layer-3 fix.
-// brcvr_recovery_target_i collapses all four direction/predict
-// combinations into the architecturally-correct sepc target, so a
-// single OR gate is sufficient here.
+//   5. pc_out_i — last resort right after wb_xret_fire when the whole
+//      pipeline is empty; pc_out_i holds the xret target latched on
+//      the xret commit cycle.
 wire async_use_branch = branch_taken_i | branch_taken_h_i;
-// async_use_ie originally was `ie_stall_i` (covers AMO+MUL/DIV+PTW+
-// dmem_busy stalls). That gate was over-broad: when ie_stall=1 from
-// dmem_busy on a normal load/store/ALU op, the IMEM-stage register-
-// wall has ALREADY captured Z's exec_result via the imem_stall=0
-// quirk. Setting sepc=pc_ie there made Z re-execute after sret,
-// doubling its effects (e.g. mntput's `addi sp,-16` decremented sp
-// by 32 → terminate_walk's `lw ra, 28(sp)` loaded ra=0xfffff000
-// → crash; preempt_disable in worker boot doubled → preempt_count=2
-// → "scheduling while atomic" BUG).
-//
-// Narrow the gate to `amo_active_i` only — `(state == AMO_READ ||
-// state == AMO_WRITE)` from amo_unit. AMO is the one IE-stage op
-// where amo_unit explicitly aborts to IDLE on flush, leaving the
-// memory operation uncommitted; for all other ie_stall sources, Z
-// has either already retired through IMEM/IWB or its rd writeback
-// will not happen (so sepc=pc_id correctly skips Z one-time).
-//
-// Excluding DONE state matters: amo_unit's memory write is already
-// committed in DONE, so re-executing would double-decrement (the
-// chr_dev_init rwsem.count regression the author warned about when
-// they tried the broader `ie_amo_op != NO_AMO_OP` gate).
-//
-// Also include mmu_d_stall_i — a PTW walk in flight on a load/store
-// suppresses dmem_port.we via d_xlat_pending, so the store has not
-// committed yet. Without re-execute, async trap during PTW silently
-// drops the store (Linux v7.0 terminate_walk's `sw ra, 28(sp)` lost
-// → ra slot kept stale data → ret to 0xfffff000 instruction page fault).
-//
-// Also include amo_pending_i — AMO at IE in IDLE (waiting to start).
-// flush_i = interrupt_valid blocks the IDLE→READ transition so
-// amo_active stays 0; without this gate, async_use_ie misses the
-// case and pc_for_async falls back to pc_id (= AMO+4), skipping the
-// AMO. amo_unit.result_q (= 0 or stale) is the rd writeback that
-// retires anyway, so sret resumes with a5=0 → kernel's beqz fires
-// refcount_warn_saturate. amo_pending_i goes 0 in DONE so already-
-// committed AMOs still take the pc_id (skip) path. Symptom of
-// missing this gate: project_v7_layer3_fix_event_create_dir_regression.
 wire async_use_ie     = amo_active_i | mmu_d_stall_i | amo_pending_i;
 // Insn-length-aware "next-PC of Z" for the pc_id=0 fallback.
 // When the ID stage is empty (post-redirect / post-context-switch),
