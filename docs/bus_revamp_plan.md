@@ -251,37 +251,82 @@ The arbiter:
   mark dirty. Atomic from the core's perspective because nothing else
   touches the cache.
 
-## Phase 3 — DRAM + memory hierarchy
+## Phase 3 — DRAM + memory hierarchy *[HIGH PRIORITY]*
 
-### Target: AXI-to-DRAM bridge
+This is what unlocks ntiny as a real platform: multi-megabyte
+userspace, full Linux distros, realistic benchmarks past the on-die
+SRAM cliff. It's a precondition for SMP (sharing one memory port
+across harts is much easier than sharing 32 KB SRAM).
 
-- Behind L1I + L1D (and optionally L2), use an AXI4 master interface
-  to a DRAM controller.
-- For simulation: use a behavioral DRAM model (e.g., DRAMsim3 via DPI)
-  to validate timing.
-- For tapeout: the DRAM controller is vendor-specific. For TSMC 65nm
-  + LPDDR2, MIG (Xilinx) doesn't apply; we'd write a minimal DDR2/3
-  controller or license one.
+### Target architecture
 
-### Optional L2
+```
+Core ──┬── L1I ──┐
+       │         ├── (optional L2) ──── AXI4 master ──── DDR controller ──── DDR3/LPDDR
+       └── L1D ──┘                                       │
+                                                         └── DRAMsim3 (sim only)
+```
 
-- 64 KB or 128 KB unified, 8-way. Inclusive of L1s.
-- Single L2 → easy single-port. Read miss / write-back to DRAM.
-- Skip L2 for v1, add later if profiling shows DRAM latency dominates.
+### Phase 3a — AXI4 master interface (~1 session)
 
-### Address map cleanup
+- New module `design/interconnect/axi4_master.sv` exposing the
+  standard 5-channel AXI4 (AW/W/B/AR/R) interface.
+- Connects above the L1 caches' miss/eviction path so cache fills
+  and write-backs become AXI burst transactions.
+- Burst length matches L1 line size (32 B = 8 × 4-byte beats).
+- AXI4-Lite variant for control/MMIO (peripherals migrate over time).
 
-- mem_map.json already centralizes addresses. Need to add:
-  - DRAM region (e.g., 0x80000000 – 0x9FFFFFFF for 512 MB)
-  - L2 SRAM region (if any)
-  - Cache control / flush MMIO (sfence-like for cache mgmt)
-- PMP rules need updating to reflect new regions.
+### Phase 3b — Sim DRAM model (~1 session)
+
+- Wrap [DRAMsim3](https://github.com/umd-memsys/DRAMsim3) via DPI.
+- Pick a realistic config (DDR3-1600 or LPDDR3-1066) for cycle-
+  accurate latency in Verilator.
+- Profile actual hit/miss + average memory access time on Linux boot
+  + CoreMark + Dhrystone — confirm cache geometry choices from
+  Phase 2 are sound before committing to silicon.
+
+### Phase 3c — Hardware DDR controller (~3-4 sessions)
+
+Decision point. Three candidates:
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **Roll own minimal DDR3 controller** | Full control, MIT-licenced, fits 65nm | ~3000 lines, weeks of bringup |
+| **LiteDRAM** (open, BSD)              | Production-quality, configurable | Tied to LiteX ecosystem; needs adapter |
+| **Vendor IP** (Cadence, Synopsys)     | Battle-tested for tape-out | License, ECO complications, not OSS |
+
+LiteDRAM is the leading candidate — it's the only fully-open option
+with vendor-grade timing closure and has been taped out at multiple
+PDKs. Adapt its Wishbone front-end to AXI4 via a thin shim.
+
+For 65nm tape-out target: DDR3-800 or LPDDR2-400 are the realistic
+ceilings without exotic PHY work.
+
+### Phase 3d — Optional L2 (~2 sessions, deferred)
+
+- 64-128 KB unified, 8-way set-associative, inclusive of L1s.
+- Single port (single-bank) — easy to add later if profiling shows
+  DRAM latency dominates after Phase 3a-c.
+- Skip for v1.
+
+### Address map
+
+- `mem_map.json` adds:
+  - `DRAM`: `0x80000000 – 0x9FFFFFFF` (512 MB; trims as needed)
+  - `L2`: optional, e.g. `0x70000000 – 0x70020000`
+  - `CACHECTL`: cache-flush MMIO (sfence-like) for explicit invalidation
+- PMP rules updated to cover DRAM region.
+- `LINUX` profile RAM_SIZE_BYTES becomes a no-op once DRAM is the
+  backing store.
 
 ### Bootstrap
 
-- BootROM still at low address, copies firmware to DRAM, jumps to it.
-- Must be careful: caches must be init'd (invalidated) before first
-  fetch from DRAM.
+- BootROM stays at low address.
+- BootROM/OpenSBI invalidates L1s, copies firmware from ROM (or a
+  stub flash) to DRAM, jumps. Same as today's flow but the target is
+  DRAM not on-die SRAM.
+- DDR PHY training must complete before the first fetch from DRAM —
+  add a small `wait_for_phy_ready` in BootROM.
 
 ## Phase 4 — coherence / multicore (LONG TERM)
 
