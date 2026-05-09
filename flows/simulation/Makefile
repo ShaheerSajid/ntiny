@@ -41,7 +41,7 @@ VERILATOR_COMMON = \
 	--timescale-override 1ns/10ps \
 	-O3 \
 	-DVERILATOR_SIM \
-	--trace \
+	--trace-fst \
 	-sv --top-module tb_soc_top \
 	--cc
 
@@ -183,10 +183,12 @@ verilator_build_bench_trace:
 # using software/flash/jtag_rbb.cfg. Without this target the
 # Verilator build leaves tms/tck/tdi as 0 — the JTAG TAP stays
 # parked. No DV_TRACER here (debug runs are short, trace overhead
-# would dominate).
+# would dominate). 128 KB RAM matches verilator_build_bench so
+# baremetal.bin (66 KB) fits.
 verilator_build_jtag:
 	verilator $(VERILATOR_COMMON) \
 	+define+JTAG_DPI \
+	+define+RAM_SIZE_BYTES=131072 \
 	$(VERILATOR_INCDIRS) \
 	$(VERILATOR_SRCS) \
 	testbench/SimJTAG.v \
