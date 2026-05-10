@@ -344,8 +344,11 @@ function [LFSR_WIDTH+DATA_WIDTH-1:0] lfsr_mask(input [31:0] index);
 endfunction
 
 
-// "AUTO" style is "LOOP" for better synthesis result
-parameter STYLE_INT = (STYLE == "AUTO") ? "LOOP" : STYLE;
+// "AUTO" style is "LOOP" for better synthesis result.
+// Body-scope `parameter` becomes implicitly local when the module
+// has a formal parameter list (Synth 8-2507) — so spell it
+// localparam to silence the warning.
+localparam STYLE_INT = (STYLE == "AUTO") ? "LOOP" : STYLE;
 
 genvar n;
 
