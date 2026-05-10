@@ -399,7 +399,10 @@ module soc_top
     uart_top uart_inst (
         .clk_i          (clk_i),
         .rst_i          (reset_i | ndmreset),
-        .address_i      (dmem_bus.addr),
+        // uart_top.address_i is 5-bit (covers 0..0x1F sifive,uart0 regs);
+        // slice the byte address explicitly so synth doesn't warn about
+        // the 32 → 5 truncation.
+        .address_i      (dmem_bus.addr[4:0]),
         .writedata_i    (dmem_bus.wdata),
         .write_i        (periph_write & uart_chipsel),
         .readdata_o     (uart_readdata),

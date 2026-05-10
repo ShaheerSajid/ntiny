@@ -68,6 +68,12 @@ always_comb begin
 		apc_in = apc_sel ? apc_out + 2 : apc_out + 4;
 end
 
+// ── Alignment FSM state (forward-declared so program_counter's
+// stall input below can reference p_state without Vivado falling
+// back to an implicit 1-bit net) ──────────────────────────────────
+typedef enum int unsigned {ALIGN = 0, MISALIGN = 1, BRANCH = 2} c_state_e;
+c_state_e p_state, n_state;
+
 `ifdef BOOT
 program_counter #(.DEFAULT(32'h00001000)) c_program_counter_inst
 `else
@@ -92,7 +98,6 @@ c_dec c_dec_inst (
 );
 
 // ── Alignment FSM ───────────────────────────────────────────────────────────
-enum int unsigned {ALIGN = 0, MISALIGN = 1, BRANCH = 2} p_state, n_state;
 
 always_ff @(posedge clk_i or posedge reset_i) begin
 	if (reset_i)

@@ -203,6 +203,43 @@ logic [63:0] stimecmp_csr;       // S-mode timer compare register value
 logic [31:0] pmpcfg_csr  [4];
 logic [31:0] pmpaddr_csr [16];
 
+// ── Forward declarations for module-scope wires used before their
+// later definition. SystemVerilog elaborates these fine, but
+// Vivado synth otherwise creates implicit 1-bit nets at the first
+// use site (Synth 8-992 / Synth 8-6901). Predeclaring them with
+// the correct width keeps synth quiet and avoids the silent
+// width-truncation hazard. The actual driver / `assign` for each
+// signal lives later in the file at the natural locality.
+wire        branch_taken_valid;
+wire        ret_valid_valid;
+wire        xret_at_decode;
+wire        xret_draining;
+logic       arb_redirect_valid;
+redirect_kind_e arb_redirect_kind;
+logic       refetch_pending_q;
+wire        fetch_flush;
+wire        fetch_stall;
+wire        fb_push;
+logic       fb_overflow;
+logic [31:0] aligner_pc_id;
+logic       aligner_valid;
+logic       aligner_fault;
+logic [4:0] aligner_cause;
+logic       aligner_pred_taken;
+logic [31:0] aligner_pred_target;
+wire        aligner_pred_is_branch;
+wire        bpu_if_redirect_fire;
+wire [31:0] bpu_if_redirect_target;
+wire        bpu_redirect_fire;
+wire [31:0] bpu_redirect_target;
+wire        bpu_bht_train_en;
+wire        bpu_btb_alloc_en;
+logic       inflight_pred_lo_taken_q, inflight_pred_hi_taken_q;
+logic [31:0] inflight_pred_lo_target_q, inflight_pred_hi_target_q;
+wire [31:0] d_vaddr_pre;
+wire        d_req_for_mmu;
+wire        d_req_raw;
+
 // MMU signals
 logic [31:0] i_paddr, d_paddr;
 logic        mmu_i_stall, mmu_d_stall;
@@ -576,8 +613,8 @@ xret_fsm_e xret_state, xret_next;
 logic [31:0] xret_target_q;
 
 // Detect mret/sret at aligner output (decode time, forward ref to ctrl_bus_if_id)
-wire xret_at_decode = aligner_valid && !ie_stall &&
-                      (ctrl_bus_if_id.mret == TRUE || ctrl_bus_if_id.sret == TRUE);
+assign xret_at_decode = aligner_valid && !ie_stall &&
+                        (ctrl_bus_if_id.mret == TRUE || ctrl_bus_if_id.sret == TRUE);
 
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
@@ -629,7 +666,7 @@ end
 // DRAIN: flush buffer, suppress faults, NOP IE captures, hold PC
 // WAIT:  suppress fetch (priv settling), drop wrong-priv rvalid
 // FETCH: drive target VA, wait for fb_push
-wire xret_draining = (xret_state == XRET_DRAIN);
+assign xret_draining = (xret_state == XRET_DRAIN);
 wire xret_fetching = (xret_state == XRET_FETCH);
 wire xret_hold_pc  = xret_draining || (xret_state == XRET_WAIT) || xret_fetching;
 wire xret_drive_va = (xret_state == XRET_FETCH);
@@ -685,7 +722,7 @@ wire bpu_tgt_mismatch = (branch_taken == TRUE)
                      && (branch_target_address != predicted_target_ie);
 assign bpu_mispredict = onebit_sig_e'(bpu_dir_mismatch || bpu_tgt_mismatch);
 
-wire branch_taken_valid = bpu_mispredict;
+assign branch_taken_valid = bpu_mispredict;
 
 // Recovery target:
 //   pred=T, actual=NT  -> predicted_pc_ie (fall-through)
@@ -700,7 +737,7 @@ wire [31:0] branch_recovery_target =
 // trigger — wb_xret_fire from IWB is the new source. ret_valid_valid stays
 // as the wire name to minimise diff in the redirect_arbiter / pc_sel mux
 // instantiation; only the source changes.
-wire ret_valid_valid    = wb_xret_fire;
+assign ret_valid_valid  = wb_xret_fire;
 
 always_comb
 begin
@@ -735,9 +772,8 @@ end
 // the same redirect decision as the legacy mux on every cycle. Once
 // validated by RISCOF + Linux, Phase 4 will switch the program counter to
 // consume these signals and delete the legacy pc_sel logic.
-logic            arb_redirect_valid;
+// (arb_redirect_valid + arb_redirect_kind forward-declared earlier.)
 logic [31:0]     arb_redirect_target;
-redirect_kind_e  arb_redirect_kind;
 
 redirect_arbiter redirect_arbiter_inst (
     .debug_resume_i  (debug_valid),
@@ -1052,7 +1088,7 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 // pc_out+4 and the first fetch after PTW skips the handler's first
 // instruction (csrrw tp,sscratch,tp at c0002de4) → tp never swaps →
 // _save_context writes to user VA → crash.
-logic refetch_pending_q;
+// (refetch_pending_q forward-declared earlier in the module.)
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i)
         refetch_pending_q <= 1'b0;
@@ -1166,7 +1202,7 @@ assign imem_port.wdata = 32'b0;
 // IE for resolution. Higher-priority redirects (trap/branch/xret/RAS) still
 // flush.
 wire arb_redirect_flushing = arb_redirect_valid && (arb_redirect_kind != RDR_BPU_IF);
-wire fetch_flush = arb_redirect_flushing | xret_at_decode | xret_draining;
+assign fetch_flush = arb_redirect_flushing | xret_at_decode | xret_draining;
 
 // inflight_vaddr_q latches i_vaddr on every cycle imem_port.req is
 // high. The vaddr register itself has NO reset (so a request issued in
@@ -1372,20 +1408,17 @@ end
 
 wire fb_push_dup = last_pushed_valid_q
                 && (fb_push_entry.vaddr == last_pushed_vaddr_q);
-wire fb_push     = fb_push_raw && !fb_push_dup;
+assign fb_push   = fb_push_raw && !fb_push_dup;
 
-// Aligner output wires (forward declared so the producer back-pressure
-// computed below can reference fb_full / fb_count from the buffer).
+// Aligner output wires. aligner_pc_id / valid / fault / cause are
+// forward-declared at module top (used in i_buf_fault_squash earlier);
+// aligner_pop / aligner_inst / aligner_is_compressed are local to the
+// fetch-buffer block here.
 logic        aligner_pop;
 logic [31:0] aligner_inst;
-logic [31:0] aligner_pc_id;
-logic        aligner_valid;
-logic        aligner_fault;
-logic [4:0]  aligner_cause;
 logic        aligner_is_compressed;
 
 logic                              fb_full;
-logic                              fb_overflow;
 fetch_pkg::fetch_buffer_entry_t    fb_head;
 fetch_pkg::fetch_buffer_entry_t    fb_next;
 logic                              fb_head_valid;
@@ -1438,8 +1471,7 @@ compressed_aligner compressed_aligner_inst (
     .pred_taken_o        (aligner_pred_taken),
     .pred_target_o       (aligner_pred_target)
 );
-logic        aligner_pred_taken;
-logic [31:0] aligner_pred_target;
+// (aligner_pred_taken / aligner_pred_target forward-declared earlier.)
 
 // Producer back-pressure: hold pc_out and gate imem_port.req when the
 // buffer would overflow on the next rvalid.
@@ -1453,7 +1485,7 @@ logic [31:0] aligner_pred_target;
 // the rest of this file (replaces the role of c_stall on the fetch path).
 // DEPTH=4 wider gate: stall when count==DEPTH-1 + inflight. Max buffer
 // throughput. Overflow on BPU IF target handled by refetch-on-overflow.
-wire fetch_stall = fb_full | ((fb_count == 3'd3) && inflight_q);
+assign fetch_stall = fb_full | ((fb_count == 3'd3) && inflight_q);
 
 // ── Phase 3: legacy c_controller is disconnected from functional paths ─
 // The decoder, IE wall, and predicted_pc_id are now driven by the
@@ -1541,9 +1573,9 @@ decoder decoder_inst
 // after a trap/mret redirects back through overlapping code).  Setting
 // predicted_taken on a non-branch would cause a spurious mispredict
 // redirect at IE (branch_comp returns FALSE for non-branches).
-wire aligner_pred_is_branch = aligner_pred_taken
-                           && (ctrl_bus_if_id_raw.inst_type == BRANCH
-                            || ctrl_bus_if_id_raw.inst_type == JUMP);
+assign aligner_pred_is_branch = aligner_pred_taken
+                             && (ctrl_bus_if_id_raw.inst_type == BRANCH
+                              || ctrl_bus_if_id_raw.inst_type == JUMP);
 always_comb begin
 	ctrl_bus_if_id = ctrl_bus_if_id_raw;
 	ctrl_bus_if_id.predicted_taken = onebit_sig_e'(aligner_pred_is_branch | bpu_redirect_fire);
@@ -2192,8 +2224,8 @@ end
 // kept enabled below) does most of the work.
 //
 // Pair with the aligner's pred_taken_o tie-off (see compressed_aligner.sv).
-wire        bpu_if_redirect_fire   = 1'b0;
-wire [31:0] bpu_if_redirect_target = bpu_if_target_q;
+assign      bpu_if_redirect_fire   = 1'b0;
+assign      bpu_if_redirect_target = bpu_if_target_q;
 
 // ID-stage prediction: gated on decoded inst_type (BRANCH only).
 // Suppress when the aligner is already firing this instruction's IF-stage
@@ -2268,12 +2300,12 @@ ras ras_inst (
 // redirect somehow pollutes ITLB/PTW state and breaks the kernel's first
 // csrw satp transition (instruction page fault at c0001058). RAS push/pop
 // logic still runs (no harm), it just doesn't drive the pipeline redirect.
-wire        bpu_redirect_fire   = bpu_bht_btb_fire;
-wire [31:0] bpu_redirect_target = bpu_if_pred_target;
+assign      bpu_redirect_fire   = bpu_bht_btb_fire;
+assign      bpu_redirect_target = bpu_if_pred_target;
 
 // Training at IE
-wire        bpu_bht_train_en  = (ctrl_bus_ie.inst_type == BRANCH) && !stale_ie && !ie_stall;
-wire        bpu_btb_alloc_en  = ((ctrl_bus_ie.inst_type == BRANCH && branch_taken == TRUE)
+assign      bpu_bht_train_en  = (ctrl_bus_ie.inst_type == BRANCH) && !stale_ie && !ie_stall;
+assign      bpu_btb_alloc_en  = ((ctrl_bus_ie.inst_type == BRANCH && branch_taken == TRUE)
                               || (ctrl_bus_ie.inst_type == JUMP))
                               && !stale_ie && !ie_stall;
 // Per-half inflight latches: capture IF-stage predictions at imem.req so
@@ -2287,8 +2319,7 @@ wire bpu_if_latch_en = (bpu_if_state_q == BPU_IF_IDLE)
                      && !arb_redirect_valid && !bpu_if_pending_q
                      && fb_head_valid;
 
-logic        inflight_pred_lo_taken_q, inflight_pred_hi_taken_q;
-logic [31:0] inflight_pred_lo_target_q, inflight_pred_hi_target_q;
+// (inflight_pred_*_q forward-declared at module top.)
 always_ff @(posedge clk_i) begin
     if (imem_port.req) begin
         inflight_pred_lo_taken_q  <= bpu_if_latch_en ? pick_lo : 1'b0;
@@ -2654,13 +2685,13 @@ amo_unit amo_unit_inst
 
 // D-port mux: PTW > AMO > core data access
 // Virtual address before translation (for MMU input)
-wire [31:0] d_vaddr_pre = amo_active ? amo_dbus_addr : c2a_address;
+assign d_vaddr_pre = amo_active ? amo_dbus_addr : c2a_address;
 assign d_store_for_mmu = amo_active ? amo_dbus_write : c2a_write;
-wire d_req_for_mmu = amo_active ? (amo_dbus_read | amo_dbus_write) : (c2a_read | c2a_write);
+assign d_req_for_mmu = amo_active ? (amo_dbus_read | amo_dbus_write) : (c2a_read | c2a_write);
 // Raw data request from pipeline — not gated by exception_from_ie or PMP faults.
 // Used by MMU PMP checker to avoid combinational loop through d_req → PMP → trap → suppression → d_req.
-wire d_req_raw = amo_active ? (amo_dbus_read | amo_dbus_write) :
-                 (ctrl_bus_ie.mem_op != NO_MEM_OP);
+assign d_req_raw = amo_active ? (amo_dbus_read | amo_dbus_write) :
+                  (ctrl_bus_ie.mem_op != NO_MEM_OP);
 
 // PTW takes over D-port when walking page table; otherwise use translated address
 assign dmem_port.addr  = ptw_active ? ptw_addr : d_paddr;

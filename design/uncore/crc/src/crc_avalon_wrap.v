@@ -31,8 +31,14 @@ reg       [31:0]     crc_16_ccit;
 
 // Driven by lfsr_crc module instances below — must be wires.
 // (Vivado synth rejects 'reg' on a port-driven net with Synth 8-685.)
-wire      [31:0]     crc_16_ibm_out;
-wire      [31:0]     crc_16_ccit_out;
+// 16-bit CRCs zero-extend their 16-bit raw output to the 32-bit
+// readback bus. 32-bit CRC connects directly. Splitting raw vs
+// extended keeps the lfsr_crc port widths matched (silences
+// Synth 8-689) without changing CSR readback semantics.
+wire      [15:0]     crc_16_ibm_raw;
+wire      [15:0]     crc_16_ccit_raw;
+wire      [31:0]     crc_16_ibm_out  = {16'd0, crc_16_ibm_raw};
+wire      [31:0]     crc_16_ccit_out = {16'd0, crc_16_ccit_raw};
 wire      [31:0]     crc_32_out;
 
 always@(posedge clk_i or posedge reset_i)
@@ -102,10 +108,10 @@ lfsr_crc_16_ibm_true
   .clk            (clk_i),
   .rst            (reset_i),
   .set_state      (control[0]),
-  .init_state_val (crc_init),
+  .init_state_val (crc_init[15:0]),
   .data_in        (crc_16_ibm),
   .data_in_valid  (control[1]),
-  .crc_out        (crc_16_ibm_out)
+  .crc_out        (crc_16_ibm_raw)
 );
 
 lfsr_crc #(
@@ -123,10 +129,10 @@ lfsr_crc_16_ccit_false
   .clk            (clk_i),
   .rst            (reset_i),
   .set_state      (control[0]),
-  .init_state_val (crc_init),
+  .init_state_val (crc_init[15:0]),
   .data_in        (crc_16_ccit),
   .data_in_valid  (control[2]),
-  .crc_out        (crc_16_ccit_out)
+  .crc_out        (crc_16_ccit_raw)
 );
 
 lfsr_crc #(
