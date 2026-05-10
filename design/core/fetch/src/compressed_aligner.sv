@@ -121,6 +121,11 @@ module compressed_aligner
     // Straddle case (32-bit branch at head[31:16]+next[15:0]) also fires
     // on half_index=1 and naturally consumes pred_hi_*.
     logic lo_consumed_q, hi_consumed_q;
+    // squash_head_is_target is computed further down (in the squash-
+    // gating block) but is referenced here in eff_half_idx. Forward-
+    // declare so Vivado doesn't fall back to an implicit 1-bit net
+    // (Synth 8-6901). The actual driver lives at the natural locality.
+    wire        squash_head_is_target;
     // Effective half index: on the cycle when squash is exiting (head is
     // the predicted target's word), override the registered half_index_q
     // with squash_target_q[1]. This lets the aligner emit the target's
@@ -223,7 +228,7 @@ module compressed_aligner
     // exiting squash and want to emit target's first instruction on the
     // same cycle (see eff_half_idx override above).
     wire [31:0] squash_target_word     = {squash_target_q[31:2], 2'b00};
-    wire        squash_head_is_target  = head_valid_i
+    assign      squash_head_is_target  = head_valid_i
                                       && (head_i.vaddr == squash_target_word);
     // "Really squashed" = squash_q is set AND head is NOT yet the target.
     // On the exit cycle (squash_q=1, head=target), eff_squash=0 so emit

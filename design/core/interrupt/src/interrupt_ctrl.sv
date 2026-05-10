@@ -141,6 +141,11 @@ wire misalign_load  = 1'b0;  // handled in HW (core2avl)
 wire misalign_store = 1'b0;  // handled in HW (core2avl)
 wire misalign_amo = (ie_amo_op_i != NO_AMO_OP) && |ie_addr_lsb_i && !amo_in_progress_i;
 
+// Forward declaration of ie_csr_illegal — its driver is later in the
+// file at its natural point (with the rest of the IE-stage exception
+// aggregation) so this only suppresses Synth 8-6901.
+wire ie_csr_illegal;
+
 assign exception_from_ie_o = misalign_amo | ie_csr_illegal;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -302,7 +307,7 @@ wire async_valid   = (m_async_valid | s_async_valid) & pipeline_has_target;
 // IE-stage CSR invalid: unimplemented CSR accessed → illegal instruction from IE
 // Safe without stale_ie guard: stale instructions have csr_cmd=NOP, so CSR unit
 // won't flag invalid for them.
-wire ie_csr_illegal = ie_csr_invalid_i;
+assign ie_csr_illegal = ie_csr_invalid_i;
 
 // Sync exception aggregate
 wire sync_exception = misalign_load | misalign_store | misalign_amo |

@@ -45,6 +45,11 @@ logic [NUM_SOURCES:0]     pending;                                // [0] unused
 logic [NUM_SOURCES:0]     enable     [0:NUM_CONTEXTS-1];          // per context
 logic [PRIORITY_BITS-1:0] threshold  [0:NUM_CONTEXTS-1];
 logic [NUM_SOURCES:0]     gateway_ready;                          // shared (PLIC spec)
+// Per-context arbitration outputs — driven later in the file but
+// referenced inside the bus-side claim block above. Forward declare
+// to keep Vivado from creating an implicit 1-bit net (Synth 8-6901).
+logic [$clog2(NUM_SOURCES+1)-1:0] claim_id       [0:NUM_CONTEXTS-1];
+logic [PRIORITY_BITS-1:0]         claim_priority [0:NUM_CONTEXTS-1];
 
 // ── Address decode ───────────────────────────────────────────────
 wire in_priority   = (address_i[21:12] == 10'h000);
@@ -94,8 +99,8 @@ always_ff @(posedge clk_i or posedge reset_i) begin
 end
 
 // ── Per-context priority arbitration ─────────────────────────────
-logic [$clog2(NUM_SOURCES+1)-1:0] claim_id       [0:NUM_CONTEXTS-1];
-logic [PRIORITY_BITS-1:0]         claim_priority [0:NUM_CONTEXTS-1];
+// (claim_id / claim_priority forward-declared above with the rest
+// of the storage so the read-side block can reference them.)
 
 integer ai, ci;
 always_comb begin

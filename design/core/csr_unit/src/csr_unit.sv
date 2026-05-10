@@ -187,6 +187,12 @@ module csr_unit (
 	assign TINFO_sel        = csr_addr_i == TINFO;
 	assign TCONTROL_sel     = csr_addr_i == TCONTROL;
 
+	// True when the IE-stage opcode is one of the CSR ops. Forward
+	// declared so the PMP / SEED / etc blocks below don't trip
+	// Synth 8-6901 use-before-decl. The full-driver assignment lives
+	// later at its natural point.
+	wire csr_active;
+
 
 	// ── CSR write data ───────────────────────────────────────────
 	logic [31:0] csr_data;
@@ -539,9 +545,9 @@ module csr_unit (
 	// Only flag invalid for actual CSR read/write ops, not SYSTEM-type
 	// instructions (ecall, ebreak, mret, sret, wfi, sfence.vma) which
 	// share the SYSTEM opcode but are NOT CSR accesses.
-	wire csr_active = (csr_cmd_i == WRITE_CSR ||
-	                   csr_cmd_i == SET_CSR ||
-	                   csr_cmd_i == CLEAR_CSR);
+	assign csr_active = (csr_cmd_i == WRITE_CSR ||
+	                     csr_cmd_i == SET_CSR ||
+	                     csr_cmd_i == CLEAR_CSR);
 
 	// ── Zihpm: HPM counter address detection ─────────────────────
 	// mhpmcounter3..31    = 0xB03..0xB1F

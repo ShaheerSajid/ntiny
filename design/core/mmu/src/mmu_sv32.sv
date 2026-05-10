@@ -265,6 +265,12 @@ module mmu_sv32 (
             ptw_priv_fault = 1'b0;
     end
 
+    // ptw_pmp_denied is computed below (line ~549) but referenced
+    // inside the PTW FSM and ptw_active_o assign earlier in the file.
+    // Forward declare so Vivado doesn't fall back to an implicit net
+    // (Synth 8-6901). Driver stays at the natural locality.
+    wire ptw_pmp_denied;
+
     // PTW address computation — full 34-bit Sv32 physical addresses
     // satp_ppn is 22 bits → addr[33:12], plus VPN index gives 34-bit PTE address
     wire [33:0] ptw_l1_addr_34 = {satp_ppn, 12'b0} + {22'b0, ptw_vaddr[31:22], 2'b00};
@@ -546,7 +552,7 @@ module mmu_sv32 (
     // PTW PMP denial — use COMBINATIONAL d_pmp_fault_comb for immediate blocking.
     // This doesn't create a loop: ptw_pmp_denied → ptw_active_o → d_stall_o/bus_mux
     // are all downstream and don't feed back to PMP checker inputs.
-    wire ptw_pmp_denied = d_pmp_fault_comb && ptw_in_read;
+    assign ptw_pmp_denied = d_pmp_fault_comb && ptw_in_read;
 
     // Track if PTW fault was caused by PMP (for access fault vs page fault distinction)
     // Track if PTW fault was caused by PMP (uses combinational ptw_pmp_denied)

@@ -47,6 +47,10 @@ module soc_top
 );
 
 
+    // Forward declaration so core_top's .mtime_i(clint_mtime) below
+    // doesn't fall back to an implicit 1-bit net (Synth 8-992).
+    logic [63:0] clint_mtime;
+
     // ── Internal bus instances ───────────────────────────────
     mem_bus imem_bus();   // instruction port: core → RAM port A
     mem_bus dmem_bus();   // data port: core → address decoder → RAM/periph
@@ -478,7 +482,7 @@ module soc_top
     // Drives timer_interrupt (MTIP) and soft_intr (MSIP).
     // Replaces the old software interrupt register.
     logic clint_timer_irq, clint_soft_irq;
-    logic [63:0] clint_mtime;
+    // (clint_mtime forward-declared at top of soc_top.)
 
     clint clint_inst (
         .clk_i        (clk_i),
