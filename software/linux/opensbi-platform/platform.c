@@ -104,8 +104,12 @@ static struct aclint_mtimer_data mtimer = {
 };
 
 /* ── PLIC ─────────────────────────────────────────────────────── */
+/* unique_id was removed from struct plic_data in OpenSBI v1.8;
+ * the field used to live before .addr but is gone now (the irqchip
+ * device struct embeds its own identity). Keep this initializer
+ * matching the current upstream layout so the build stays clean
+ * across re-clones. */
 static struct plic_data plic = {
-    .unique_id   = 0,
     .addr        = NTINY_PLIC_ADDR,
     .size        = NTINY_PLIC_SIZE,
     .num_src     = NTINY_PLIC_NUM_SRC,

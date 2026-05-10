@@ -68,7 +68,14 @@ OPENSBI_BIN := $(OPENSBI_DIR)/build/platform/opensbi-platform/firmware/fw_payloa
 KERNEL_IMG  := $(LINUX_DIR)/arch/riscv/boot/Image
 DTB         := $(CURDIR)/ntiny.dtb
 
-KERNEL_PATCH := $(CURDIR)/patches/0001-ntiny-kernel-required.patch
+# Per-tag kernel patch. The base patch (0001-ntiny-kernel-required.patch)
+# was authored against v6.6; lines have shifted in newer kernels so
+# the patch needs a tag-specific variant. apply-patches looks for a
+# `<base>.<LINUX_TAG>.patch` first and falls back to the base name.
+KERNEL_PATCH_BASE := $(CURDIR)/patches/0001-ntiny-kernel-required
+KERNEL_PATCH      := $(if $(wildcard $(KERNEL_PATCH_BASE).$(LINUX_TAG).patch),\
+                          $(KERNEL_PATCH_BASE).$(LINUX_TAG).patch,\
+                          $(KERNEL_PATCH_BASE).patch)
 DTS_MAKEFILE := $(CURDIR)/patches/ntiny-dts-Makefile
 
 # Release packaging
@@ -83,12 +90,17 @@ VERSION     ?= dev
 
 all: build
 
+# Default goal puts you on the standalone path: `make run` clones if
+# needed, applies all patches, rebuilds kernel + OpenSBI, and launches
+# the sim. Re-running is idempotent.
+
 help:
 	@echo "Targets:"
+	@echo "  make run [LINUX_TAG=vX.Y]"
+	@echo "    Standalone — clones (if needed), patches, rebuilds, runs sim."
 	@echo "  make prepare           - clone Linux + OpenSBI into ./external/, apply ntiny patches"
 	@echo "  make build             - rebuild kernel + opensbi + ram.hex (force-fresh image)"
 	@echo "  make rebuild           - alias for build"
-	@echo "  make run               - launch the verilator sim and stream uart.log"
 	@echo "  make release VERSION=x - package fw_payload+Image+dtb+cpio into releases/ntiny-linux-x/"
 	@echo "  make cpio-unpack DEST=d - extract initramfs.cpio into d/ (preserves /dev nodes)"
 	@echo "  make cpio-pack   SRC=d  - rebuild initramfs.cpio from d/ via gen_init_cpio"
@@ -159,9 +171,15 @@ apply-patches:
 	@cp $(DTS_MAKEFILE)     $(LINUX_DIR)/arch/riscv/boot/dts/ntiny/Makefile
 	@echo "==> Applying $(notdir $(KERNEL_PATCH)) (idempotent)"
 	@cd $(LINUX_DIR) && \
-		git apply --check $(KERNEL_PATCH) 2>/dev/null && \
-		git apply $(KERNEL_PATCH) || \
-		echo "    (already applied or no-op)"
+		if git apply --reverse --check $(KERNEL_PATCH) 2>/dev/null; then \
+			echo "    (already applied — skipping)"; \
+		elif git apply --check $(KERNEL_PATCH) 2>/dev/null; then \
+			git apply $(KERNEL_PATCH) && echo "    applied"; \
+		else \
+			echo "    ERROR: patch will neither apply forward nor is already applied."; \
+			echo "    Manual intervention needed; run 'cd $(LINUX_DIR) && git apply --check $(KERNEL_PATCH)'"; \
+			exit 1; \
+		fi
 	@# Some kbuild rules clean usr/initramfs_data.S, but the .o build
 	@# rule still expects it. If missing, restore from git.
 	@if [ ! -f $(LINUX_DIR)/usr/initramfs_data.S ]; then \
@@ -181,7 +199,7 @@ apply-patches:
 # re-link picks up the current initramfs.cpio bytes (kbuild's own
 # dependency tracking does NOT depend on the cpio file). This is the
 # fix for "I changed initramfs.cpio but the kernel didn't pick it up".
-build: force-rm dtb kernel opensbi ram-hex
+build: prepare force-rm dtb kernel opensbi ram-hex
 	@echo "==> Build complete."
 	@echo "    kernel:  $(KERNEL_IMG)"
 	@echo "    opensbi: $(OPENSBI_BIN)"
@@ -262,18 +280,14 @@ $(SIM_DIR)/ram.hex: $(OPENSBI_BIN)
 	@echo "==> Generating ram.hex"
 	@cd $(SIM_DIR) && python3 $(NTINY)/software/tools/hex_text.py $(OPENSBI_BIN) ram.hex
 
-# ── run: launch the verilator sim ───────────────────────────────────
-run:
-	@if [ ! -x $(SIM_DIR)/Vtb_soc_top ]; then \
-		echo "ERROR: $(SIM_DIR)/Vtb_soc_top not found."; \
-		echo "Build the verilator model first (see flows/simulation)."; \
-		exit 1; \
-	fi
-	@echo "==> Running ntiny Linux. Watch $(SIM_DIR)/uart.log."
-	@cd $(SIM_DIR) && rm -f uart.log && \
-		./Vtb_soc_top --timeout 1000000000 &
-	@sleep 1
-	@tail -f $(SIM_DIR)/uart.log
+# ── run: end-to-end standalone — build everything, then launch sim ──
+# Depends on `build` so kernel + OpenSBI + ram.hex are guaranteed
+# fresh. run_linux.sh handles the verilator-side rebuild + sim launch
+# (and now always wipes its own obj_dir + Vtb_soc_top first so a stale
+# RTL build can't mask new changes).
+run: build
+	@echo "==> Launching ntiny Linux sim via $(SIM_DIR)/run_linux.sh"
+	@cd $(SIM_DIR) && bash run_linux.sh 1000000000
 
 # ── cpio-unpack / cpio-pack: edit-then-rebuild without buildroot ────
 # Common need: tweak a script under /etc/init.d/ in the shipped cpio.

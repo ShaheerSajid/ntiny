@@ -17,15 +17,16 @@ if [ -z "$OPENSBI_BIN" ]; then
 fi
 
 # Always rebuild from a clean slate so an RTL change since the last
-# run doesn't get masked by a stale binary or obj_dir cache. Also
-# divert verilator's verbose stderr to logs/ so the terminal stays
-# focused on Linux boot output.
+# run doesn't get masked by a stale binary or obj_dir cache. Both
+# stdout AND stderr from verilator + the C++ build go to a single
+# logs/verilator_build.log so the terminal stays clean and the full
+# build trace lives in one inspectable file.
 mkdir -p logs
 echo "Cleaning verilator collateral (Vtb_soc_top + obj_dir)..."
 rm -rf obj_dir Vtb_soc_top
 if true; then
     echo "Building Verilator model (128MB RAM, FST tracing compiled in)..."
-    echo "  stderr  -> logs/verilator_build.stderr"
+    echo "  build log -> logs/verilator_build.log"
     # Suppression policy (2026-05-05 update):
     #   Correctness-relevant warnings are FATAL — UNOPTFLAT (comb
     #   loops), MULTIDRIVEN, CASEINCOMPLETE, WIDTH, UNSIGNED. Any
@@ -59,9 +60,9 @@ if true; then
         ../../verification/dv/src/pkg.sv ../../verification/dv/src/tracer_pkg.sv \
         ../../verification/dv/src/tracer.sv testbench/uartdpi.c testbench/uartdpi.sv \
         testbench/tb_tracer.sv testbench/tb_soc_top.v --exe testbench/main.cpp \
-        2> logs/verilator_build.stderr
+        > logs/verilator_build.log 2>&1
     make -j$(nproc) -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top \
-        2>> logs/verilator_build.stderr
+        >> logs/verilator_build.log 2>&1
     cp obj_dir/Vtb_soc_top ./
 fi
 
