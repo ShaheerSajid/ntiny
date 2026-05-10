@@ -34,6 +34,13 @@ flows/simulation/*.hex
 # Software build outputs
 software/build/
 
+# Vivado generated artifacts (project dir + journals + logs)
+flows/synthesis/fpga/vivado/**/project_dir/
+flows/synthesis/fpga/vivado/**/vivado*.jou
+flows/synthesis/fpga/vivado/**/vivado*.log
+flows/synthesis/fpga/vivado/**/.Xil/
+flows/synthesis/fpga/vivado/**/firmware/ram.hex
+
 # Linux/OpenSBI clones (managed by software/linux/Makefile)
 software/linux/external/
 

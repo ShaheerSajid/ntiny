@@ -93,6 +93,12 @@ pwm_SRCS = $(PWM_SW)/pwm_test.c
 TESTS += clint
 clint_MAIN = tests/clint/main.c
 
+# Tiny FPGA bring-up demo: prints "Hello from ntiny" forever and
+# blinks the low 4 GPIO pins (= LD0..3 on Zybo Z7).
+# gpio.c + uart.c already pulled via SRCS_COMMON.
+TESTS += hello
+hello_MAIN = tests/hello/main.c
+
 # ─── Peripheral test flags ────────────────────────────────────────────────────
 # -DPeak_poke selects register peek/poke tests (works without external hardware)
 TEST_CFLAGS = -DPeak_poke -DVERILATOR

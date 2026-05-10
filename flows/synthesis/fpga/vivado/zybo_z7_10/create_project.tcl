@@ -71,15 +71,21 @@ add_files -norecurse -fileset constrs_1 \
 set_property top ntiny_zybo_top [current_fileset]
 update_compile_order -fileset sources_1
 
-# ── ram.hex location ─────────────────────────────────────────
-# ram_dp.sv reads its init image relative to the synth working
-# directory. Drop a baremetal ram.hex into firmware/ and Vivado
-# will pick it up via the path below.
-set hex_dir "$script_dir/firmware"
+# ── ram.hex (BRAM init image) ─────────────────────────────────
+# ram_dp.sv does $readmemh("ram.hex") at elab. Add the file to
+# sources_1 with file_type=Memory_File so Vivado puts it on the
+# synth-step search path and the relative open succeeds.
+set hex_dir  "$script_dir/firmware"
+set hex_file "$hex_dir/ram.hex"
 if { ![file exists $hex_dir] } { file mkdir $hex_dir }
-set_property -name {STEPS.SYNTH_DESIGN.ARGS.MORE OPTIONS} \
-             -value "-include_dirs \"$hex_dir\"" \
-             -objects [get_runs synth_1]
+if { [file exists $hex_file] } {
+    add_files -norecurse -fileset sources_1 $hex_file
+    set_property file_type {Memory Initialization Files} \
+        [get_files $hex_file]
+} else {
+    puts "WARNING: $hex_file not found — synth will fail. Drop a"
+    puts "         baremetal ram.hex there before launching synth."
+}
 
 puts ""
 puts "================================================================"
