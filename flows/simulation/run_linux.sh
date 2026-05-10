@@ -6,9 +6,7 @@ cd "$(dirname "$0")"
 
 TIMEOUT=${1:-2000000000}
 shift 2>/dev/null || true   # remaining $@ are extra +plusargs forwarded to Vtb_soc_top
-# Search the in-repo external/ tree first, then fall back to the legacy
-# ~/Downloads location for users who haven't migrated yet.
-OPENSBI_BIN=$(find ../../software/linux/external/opensbi/build /home/shaheer/Downloads/opensbi/build \
+OPENSBI_BIN=$(find ../../software/linux/external/opensbi/build \
     -name "fw_payload.bin" -path "*/opensbi-platform/*" 2>/dev/null | head -1)
 
 if [ -z "$OPENSBI_BIN" ]; then
