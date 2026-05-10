@@ -85,7 +85,13 @@ void remote_bitbang_t::accept()
     client_fd = ::accept(socket_fd, NULL, NULL);
     if (client_fd == -1) {
       if (errno == EAGAIN) {
-        // No client waiting to connect right now.
+        // No client waiting to connect right now. Return so the
+        // simulation can continue running while we wait — without
+        // this, accept() spins and the sim never advances clk past
+        // the first jtag_tick, freezing any boot that needs to run
+        // before OpenOCD attaches (e.g. waiting for Linux to reach
+        // a livelock).
+        again = 0;
       } else {
         fprintf(stderr, "failed to accept on socket: %s (%d)\n", strerror(errno),
                 errno);

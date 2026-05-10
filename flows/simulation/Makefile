@@ -39,7 +39,7 @@ VERILATOR_COMMON = \
 	$(VERILATOR_WARNINGS) \
 	--no-timing \
 	--timescale-override 1ns/10ps \
-	-O3 \
+	-O3 --threads 4 \
 	-DVERILATOR_SIM \
 	--trace-fst \
 	-sv --top-module tb_soc_top \
@@ -189,6 +189,22 @@ verilator_build_jtag:
 	verilator $(VERILATOR_COMMON) \
 	+define+JTAG_DPI \
 	+define+RAM_SIZE_BYTES=131072 \
+	$(VERILATOR_INCDIRS) \
+	$(VERILATOR_SRCS) \
+	testbench/SimJTAG.v \
+	testbench/SimJTAG.cc \
+	testbench/remote_bitbang.cc
+	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
+	mv obj_dir/Vtb_soc_top ./
+
+# JTAG_DPI build sized for full Linux (128 MB RAM). Use with the
+# OpenSBI fw_payload via the same flow as run_linux.sh, then attach
+# OpenOCD when boot deadlocks. DV_TRACER stays off so the binary
+# isn't bogged down by per-instruction trace output.
+verilator_build_jtag_linux:
+	verilator $(VERILATOR_COMMON) \
+	+define+JTAG_DPI \
+	+define+RAM_SIZE_BYTES=134217728 \
 	$(VERILATOR_INCDIRS) \
 	$(VERILATOR_SRCS) \
 	testbench/SimJTAG.v \
