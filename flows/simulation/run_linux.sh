@@ -73,17 +73,16 @@ echo "Timeout: $TIMEOUT cycles"
 python3 ../../software/tools/hex_text.py "$OPENSBI_BIN" ram.hex
 mkdir -p logs && rm -f logs/uart.log
 
-# Default tracer window: arm at user PC = ash readtoken keyword-conv
-# store (just before lasttoken gets set) and disarm at the parser-error
-# raise PC, so the trace captures only the ~few-thousand cycles around
-# the ash failure instead of the full ~12 GB boot trace. Override by
-# passing your own +tracer_start_pc / +tracer_stop_pc on the cmdline.
-if [ -n "$NO_TRACER" ]; then
-    TRACER_DEFAULTS="+tracer_start_pc=ffffffff +tracer_stop_pc=ffffffff"
-    echo "Tracer DISABLED (NO_TRACER set)"
+# Tracer is OFF by default — full Linux boots produce 12+ GB of
+# trace_core_*.log otherwise. Enable a window by setting TRACER env
+# var (e.g. TRACER='+tracer_start_pc=00043fd6 +tracer_stop_pc=00044362')
+# or by passing the +tracer_* plusargs as positional args.
+if [ -n "$TRACER" ]; then
+    TRACER_DEFAULTS="$TRACER"
+    echo "Tracer ENABLED: $TRACER_DEFAULTS"
 else
-    TRACER_DEFAULTS="+tracer_start_pc=00043fd6 +tracer_stop_pc=00044362"
-    echo "Tracer window: $TRACER_DEFAULTS (override via positional args)"
+    TRACER_DEFAULTS="+tracer_start_pc=ffffffff +tracer_stop_pc=ffffffff"
+    echo "Tracer disabled (set TRACER='+tracer_start_pc=... +tracer_stop_pc=...' to enable)"
 fi
 
 ./Vtb_soc_top --timeout "$TIMEOUT" $TRACER_DEFAULTS "$@" > /dev/null 2>&1 &
