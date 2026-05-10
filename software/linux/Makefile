@@ -24,8 +24,11 @@
 #   INITRAMFS     rootfs cpio to embed (default ./initramfs.cpio)
 #   VERSION       release label, e.g. `make release VERSION=1.0`
 #
-# Toolchain: expects riscv32-unknown-linux-gnu-* in PATH or at
-# /opt/riscv-linux/bin (the default location).
+# Toolchain: expects riscv64-unknown-linux-gnu-* (multilib) in PATH
+# or at /opt/riscv-linux-gnu/bin. The single multilib compiler picks
+# the rv32imac/ilp32 (lib32/ilp32) variant when the kernel passes
+# -march=$(ISA) -mabi=$(ABI), so one toolchain serves both RV32 and
+# RV64 builds.
 
 NTINY      := $(abspath $(CURDIR)/../..)
 EXTERNAL_DIR := $(CURDIR)/external
@@ -46,7 +49,7 @@ OPENSBI_DIR   ?= $(EXTERNAL_DIR)/opensbi
 BUILDROOT_DIR ?= $(EXTERNAL_DIR)/buildroot
 INITRAMFS     ?= $(CURDIR)/initramfs.cpio
 
-CROSS_COMPILE := riscv32-unknown-linux-gnu-
+CROSS_COMPILE := riscv64-unknown-linux-gnu-
 ARCH          := riscv
 ISA           := rv32imac_zicsr_zifencei_zba_zbb_zbc_zbs
 ABI           := ilp32
