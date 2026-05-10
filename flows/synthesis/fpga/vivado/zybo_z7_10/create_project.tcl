@@ -8,8 +8,13 @@
 # canonical list Verilator uses) so peripheral / core changes pick
 # up automatically.
 
-set proj_name "ntiny_zybo_z7_10"
-set part      "xc7z010clg400-1"
+set proj_name  "ntiny_zybo_z7_10"
+set part       "xc7z010clg400-1"
+# Digilent Zybo Z7-10 board file (installed under
+# /tools/xilinx/Vivado/2020.1/data/boards/board_files/zybo-z7-10/).
+# Setting BOARD_PART lets Vivado validate pinning against the
+# board's known IO map and surface any XDC mismatches at synth.
+set board_part "digilentinc.com:zybo-z7-10:part0:1.2"
 
 set script_dir [file normalize [file dirname [info script]]]
 set repo_root  [file normalize "$script_dir/../../../../.."]
@@ -18,6 +23,10 @@ set proj_dir   "$script_dir/project_dir"
 # ── Fresh project ─────────────────────────────────────────────
 if { [file exists $proj_dir] } { file delete -force $proj_dir }
 create_project $proj_name $proj_dir -part $part -force
+
+# Tag with the Digilent board so Vivado picks up its known IO map
+# and the board-aware IP catalog (DDR, USB-UART pre-config, etc).
+catch { set_property BOARD_PART $board_part [current_project] }
 
 set_property target_language Verilog [current_project]
 set_property simulator_language Mixed [current_project]

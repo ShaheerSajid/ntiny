@@ -299,11 +299,19 @@ module compressed_aligner
     end
 
     // ── Squash state register ──────────────────────────────────────────
-    // Cleared by reset, flush, or an external redirect (those already
-    // reseat the aligner). Set on the cycle a predicted-taken branch
-    // emits. Cleared once the buffer head is the predicted target's word.
+    // Cleared by async reset, flush, or an external redirect (those
+    // already reseat the aligner). Set on the cycle a predicted-taken
+    // branch emits. Cleared once the buffer head is the predicted
+    // target's word. Async reset and sync clear (flush_i /
+    // redirect_valid_i) are split into nested branches so Vivado's
+    // sync/async register inference doesn't fire CRITICAL WARNING
+    // [Synth 8-5413] (mixing async reset with synchronous control on
+    // the same condition).
     always_ff @(posedge clk_i or posedge reset_i) begin
-        if (reset_i || flush_i || redirect_valid_i) begin
+        if (reset_i) begin
+            squash_q        <= 1'b0;
+            squash_target_q <= 32'b0;
+        end else if (flush_i || redirect_valid_i) begin
             squash_q        <= 1'b0;
             squash_target_q <= 32'b0;
         end else if (enter_squash) begin

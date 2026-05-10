@@ -29,9 +29,11 @@ reg       [31:0]     crc_16_ibm;
 reg       [31:0]     crc_16_ccit;
 
 
-reg       [31:0]     crc_16_ibm_out;
-reg       [31:0]     crc_16_ccit_out;
-reg       [31:0]     crc_32_out;
+// Driven by lfsr_crc module instances below — must be wires.
+// (Vivado synth rejects 'reg' on a port-driven net with Synth 8-685.)
+wire      [31:0]     crc_16_ibm_out;
+wire      [31:0]     crc_16_ccit_out;
+wire      [31:0]     crc_32_out;
 
 always@(posedge clk_i or posedge reset_i)
 begin    
