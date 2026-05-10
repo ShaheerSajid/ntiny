@@ -30,7 +30,7 @@
 NTINY      := $(abspath $(CURDIR)/../..)
 EXTERNAL_DIR := $(CURDIR)/external
 SIM_DIR    := $(NTINY)/flows/simulation
-TOOLCHAIN_BIN ?= /opt/riscv-linux/bin
+TOOLCHAIN_BIN ?= /opt/riscv-linux-gnu/bin
 
 LINUX_TAG     ?= v6.6
 OPENSBI_TAG   ?= v1.8

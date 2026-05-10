@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 
 # ─── Toolchain ────────────────────────────────────────────────────────────────
-TOOLCHAIN = /opt/riscv/bin
+TOOLCHAIN = /opt/riscv-elf/bin
 CC      = $(TOOLCHAIN)/riscv64-unknown-elf-gcc
 OBJCOPY = $(TOOLCHAIN)/riscv64-unknown-elf-objcopy
 ELFSIZE = $(TOOLCHAIN)/riscv64-unknown-elf-size
@@ -35,7 +35,11 @@ INCLUDES = \
 	-I$(PWM_SW) \
 	-I$(PLIC_SW)
 
-ARCH     = -mabi=ilp32 -march=rv32imfc_zicsr_zba_zbb
+# Match the rv32imafc_zicsr_zaamo_zalrsc_zba_zbb_zbc_zbs/ilp32f
+# multilib in /opt/riscv-elf so newlib + libgcc come pre-tuned.
+# 'a' is split into zaamo+zalrsc by gcc-15 — both are listed
+# explicitly so the multilib selector matches verbatim.
+ARCH     = -mabi=ilp32f -march=rv32imafc_zicsr_zaamo_zalrsc_zba_zbb_zbc_zbs
 CFLAGS   = $(INCLUDES) -O2 -ffunction-sections -fdata-sections $(ARCH)
 
 LDFLAGS = \
