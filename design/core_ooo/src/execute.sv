@@ -1,11 +1,14 @@
-// OoO core v1 — execute (M0: single in-order FU)
+// OoO core v1 — execute.
 //
-// At M0 this is one ALU FU consuming a dispatched uop, plus a branch
-// comparator and a target-address adder. Produces a single-cycle
-// result + branch redirect. At M2 this file splits into the FU bank
-// wired to RS/CDB.
+// At M1 the EX stage is still a single combinational FU. It consumes
+// the issuing ROB entry (uop + operand values + idx) and produces:
+//   - alu_wb_en + alu_wb_idx + alu_wb_result for ALU/JAL/JALR (the
+//     ALU path completes in one cycle).
+//   - mem_addr + store_data for the LSU (memunit kicks separately
+//     and writes back through its own op_done pulse).
+//   - redirect to fetch when a branch/jump is taken.
 //
-// Reuses design/core/alu/src/alu.sv as a black-box.
+// M2 splits this into multiple FUs around the CDB.
 
 import common_pkg::*;
 import core_pkg::*;
@@ -18,25 +21,26 @@ module execute
     input  logic            stall_i,
     input  logic            flush_i,
 
-    // dispatched uop + read operands
-    input  uop_t            uop_i,
-    input  logic [31:0]     rs1_val_i,
-    input  logic [31:0]     rs2_val_i,
-    input  onebit_sig_e     issue_i,
+    // dispatched uop + operand values + ROB tag
+    input  uop_t                       uop_i,
+    input  logic [31:0]                rs1_val_i,
+    input  logic [31:0]                rs2_val_i,
+    input  logic [OOO_ROB_IDX_W-1:0]   issue_idx_i,
+    input  onebit_sig_e                issue_i,
 
-    // ALU result + writeback control
-    output logic [31:0]     alu_result_o,
-    output logic [4:0]      rd_o,
-    output onebit_sig_e     int_wen_o,        // arch regfile write enable (ALU producer)
-    output onebit_sig_e     alu_busy_o,
+    // writeback for ALU/JAL/JALR
+    output onebit_sig_e                alu_wb_en_o,
+    output logic [OOO_ROB_IDX_W-1:0]   alu_wb_idx_o,
+    output logic [31:0]                alu_wb_result_o,
+    output onebit_sig_e                alu_busy_o,
 
-    // address generation for LSU
-    output logic [31:0]     mem_addr_o,
-    output logic [31:0]     store_data_o,
+    // LSU address gen
+    output logic [31:0]                mem_addr_o,
+    output logic [31:0]                store_data_o,
 
-    // branch resolution → fetch
-    output logic            redirect_o,
-    output logic [31:0]     redirect_pc_o
+    // branch redirect → fetch + ROB flush + RAT flush
+    output logic                       redirect_o,
+    output logic [31:0]                redirect_pc_o
 );
 
     // ── operand muxes ─────────────────────────────────────────
@@ -44,7 +48,7 @@ module execute
     assign opA = (uop_i.uses_pc  == TRUE) ? uop_i.pc      : rs1_val_i;
     assign opB = (uop_i.uses_imm == TRUE) ? uop_i.alu_imm : rs2_val_i;
 
-    // ── ALU instance (reused) ─────────────────────────────────
+    // ── ALU ───────────────────────────────────────────────────
     onebit_sig_e   alu_stall;
     logic [31:0]   alu_result;
     float_status_e fp_status_unused;
@@ -67,23 +71,24 @@ module execute
         .float_status_o(fp_status_unused)
     );
 
-    assign alu_busy_o   = alu_stall;
-    assign alu_result_o = alu_result;
-    assign rd_o         = uop_i.rd;
-    // FU_BRANCH writes rd for JAL/JALR (rd = pc+4, computed through ALU).
-    // FU_LOAD writeback comes from memunit, not the ALU path.
-    assign int_wen_o    = onebit_sig_e'(issue_i == TRUE
-                                         && uop_i.has_rd == TRUE
-                                         && (uop_i.fu == FU_ALU || uop_i.fu == FU_BRANCH)
-                                         && uop_i.illegal == FALSE
-                                         && alu_stall == FALSE);
+    assign alu_busy_o = alu_stall;
 
-    // ── memory address (LOAD/STORE: rs1 + imm) ────────────────
+    // ALU/JAL/JALR writeback fires the cycle they issue. LOAD/STORE
+    // writeback comes from memunit's op_done.
+    wire is_alu_class = (uop_i.fu == FU_ALU) || (uop_i.fu == FU_BRANCH);
+    assign alu_wb_en_o     = onebit_sig_e'(issue_i == TRUE
+                                            && is_alu_class
+                                            && uop_i.illegal == FALSE
+                                            && alu_stall    == FALSE);
+    assign alu_wb_idx_o    = issue_idx_i;
+    assign alu_wb_result_o = alu_result;
+
+    // ── LSU address gen ───────────────────────────────────────
     assign mem_addr_o   = rs1_val_i + uop_i.alu_imm;
     assign store_data_o = rs2_val_i;
 
     // ── branch comparator + target ────────────────────────────
-    logic        cond_taken;
+    logic cond_taken;
     always_comb begin
         unique case (uop_i.br_cond)
             BEQ:  cond_taken = (rs1_val_i == rs2_val_i);

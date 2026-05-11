@@ -1,12 +1,12 @@
-// OoO core v1 — memory unit (M0: single-outstanding, in-order)
+// OoO core v1 — memory unit (M1: single-outstanding, in-order).
 //
-// M0 contract: one LOAD or STORE at a time. Asserts dmem.req on the
-// kick cycle, holds it until accepted, then waits for rvalid (LOAD
-// only). Stalls the core while busy. No store-to-load forwarding,
-// no LSQ — that lands in M4.
+// At M1 the memunit also carries the ROB index of the in-flight op
+// so that the load/store completion can be steered to the right
+// ROB entry on the writeback path. Both LOAD and STORE produce an
+// `op_done_o` pulse — STORE's result is just zero (the ROB entry
+// has no rd to write but still needs `ready` set so it can commit).
 //
-// Sign-extension of sub-word loads happens here so the writeback mux
-// in the top can take a single 32-bit value.
+// M4 will replace this with a real load-store queue.
 
 import common_pkg::*;
 import core_pkg::*;
@@ -18,34 +18,34 @@ module memunit
     input  logic              reset_i,
     input  logic              flush_i,
 
-    // dispatch — kick on the cycle a LOAD/STORE is issued
-    input  onebit_sig_e       kick_i,         // 1-cycle pulse from EX
+    // dispatch — kick on the cycle an EX-issuing LOAD/STORE fires
+    input  onebit_sig_e       kick_i,
     input  fu_type_e          fu_i,           // FU_LOAD or FU_STORE
     input  logic [31:0]       addr_i,
     input  logic [31:0]       store_data_i,
     input  load_store_width_e width_i,
     input  onebit_sig_e       mem_unsigned_i,
-    input  logic [4:0]        rd_i,
+    input  logic [OOO_ROB_IDX_W-1:0] rob_idx_i,
 
     // bus
     mem_bus.master            dmem_port,
 
-    // result (LOAD)
-    output logic [31:0]       load_data_o,
-    output logic [4:0]        load_rd_o,
-    output onebit_sig_e       load_valid_o,   // 1-cycle pulse when LOAD writeback ready
-    output onebit_sig_e       busy_o          // assert while a request is in flight
+    // completion → ROB writeback
+    output onebit_sig_e       op_done_o,
+    output logic [OOO_ROB_IDX_W-1:0] op_done_rob_idx_o,
+    output logic [31:0]       op_done_result_o,
+    output onebit_sig_e       busy_o
 );
 
     typedef enum logic [1:0] { IDLE, REQ, WAIT_RVALID } state_e;
     state_e state_q;
 
-    logic [31:0]       addr_q;
-    logic [31:0]       store_data_q;
-    load_store_width_e width_q;
-    onebit_sig_e       unsigned_q;
-    logic [4:0]        rd_q;
-    fu_type_e          fu_q;
+    logic [31:0]                addr_q;
+    logic [31:0]                store_data_q;
+    load_store_width_e          width_q;
+    onebit_sig_e                unsigned_q;
+    logic [OOO_ROB_IDX_W-1:0]   rob_idx_q;
+    fu_type_e                   fu_q;
 
     wire is_load  = (fu_q == FU_LOAD);
     wire is_store = (fu_q == FU_STORE);
@@ -58,21 +58,20 @@ module memunit
         wdata_aligned = 32'b0;
         unique case (width_q)
             BYTE: begin
-                be[addr_q[1:0]]                  = 1'b1;
-                wdata_aligned                    = {4{store_data_q[7:0]}};
+                be[addr_q[1:0]] = 1'b1;
+                wdata_aligned   = {4{store_data_q[7:0]}};
             end
             HALF: begin
-                if (addr_q[1] == 1'b0) be       = 4'b0011;
-                else                   be       = 4'b1100;
-                wdata_aligned                    = {2{store_data_q[15:0]}};
+                be              = (addr_q[1] == 1'b0) ? 4'b0011 : 4'b1100;
+                wdata_aligned   = {2{store_data_q[15:0]}};
             end
             WORD: begin
-                be                               = 4'b1111;
-                wdata_aligned                    = store_data_q;
+                be              = 4'b1111;
+                wdata_aligned   = store_data_q;
             end
             default: begin
-                be                               = 4'b0000;
-                wdata_aligned                    = 32'b0;
+                be              = 4'b0000;
+                wdata_aligned   = 32'b0;
             end
         endcase
     end
@@ -94,7 +93,7 @@ module memunit
             store_data_q <= '0;
             width_q      <= NO_WIDTH;
             unsigned_q   <= FALSE;
-            rd_q         <= '0;
+            rob_idx_q    <= '0;
             fu_q         <= FU_NONE;
         end else if (flush_i) begin
             state_q      <= IDLE;
@@ -106,7 +105,7 @@ module memunit
                     store_data_q <= store_data_i;
                     width_q      <= width_i;
                     unsigned_q   <= mem_unsigned_i;
-                    rd_q         <= rd_i;
+                    rob_idx_q    <= rob_idx_i;
                     fu_q         <= fu_i;
                 end
                 REQ: if (dmem_port.ready) begin
@@ -146,9 +145,16 @@ module memunit
         endcase
     end
 
-    assign load_data_o  = load_data;
-    assign load_rd_o    = rd_q;
-    assign load_valid_o = onebit_sig_e'(state_q == WAIT_RVALID && dmem_port.rvalid && is_load);
-    assign busy_o       = onebit_sig_e'(state_q != IDLE);
+    // ── completion pulses ────────────────────────────────────
+    // LOAD: pulse when rvalid arrives in WAIT_RVALID.
+    // STORE: pulse when ready accepts the write in REQ (transition
+    // back to IDLE).
+    wire load_done  = is_load  && state_q == WAIT_RVALID && dmem_port.rvalid;
+    wire store_done = is_store && state_q == REQ         && dmem_port.ready;
+
+    assign op_done_o         = onebit_sig_e'(load_done || store_done);
+    assign op_done_rob_idx_o = rob_idx_q;
+    assign op_done_result_o  = is_load ? load_data : 32'b0;
+    assign busy_o            = onebit_sig_e'(state_q != IDLE);
 
 endmodule
