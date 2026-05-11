@@ -145,15 +145,57 @@ working in-order RV32I core in the new directory.")
 Goal: add the rename/ROB infrastructure that OoO will need, even
 though everything is still in-order at this point.
 
-- Int RAT (32 entries).
-- ROB (16 entries, in-order alloc/retire).
-- Dispatch: rename rs1/rs2 via RAT, alloc ROB slot, write rd→ROB
-  mapping into RAT.
-- Single in-order FU still; result writes ROB entry + clears RAT entry
-  on retire.
+**Pipeline at M1 (4 logical stages):**
 
-**Gate:** RISCOF rv32i still green; ROB occupancy probe shows entries
-allocated and retired.
+```
+IF      → DISPATCH       → ISSUE+EX+WB    → COMMIT
+fetch     decode +         ROB[head]        ROB[head] writes
+imem      rat lookup +     fires; EX is     arch regfile (if
+          rob alloc        combinational;   ready) and is
+                           result → ROB     dealloc'd
+```
+
+**Structures:**
+
+- `rat.sv` — 32 × `{busy, rob_idx}`. x0 hardwired clear. 2 read ports
+  (rs1/rs2) + 1 write port (dispatch) + 1 conditional-clear port
+  (commit clears its entry iff RAT still points at the retiring slot).
+  A `flush_i` port wipes all busy bits — used on taken branches at M1
+  (M3 replaces this with RAT-snapshot restore).
+- `rob.sv` — 16 × packed slot. Each slot holds the uop + operand
+  storage (value+tag+ready for rs1/rs2) + result + ready bit.
+  At M1 the ROB doubles as the RS — operand-wakeup logic lives in the
+  ROB. M2 splits the operand state into a dedicated RS bank.
+
+**Operand handling at dispatch:**
+- If RAT[rs].busy=0 → read arch regfile, capture *value* into the ROB
+  slot's operand field, ready=1.
+- If RAT[rs].busy=1 → capture the *tag* (producer's rob_idx), ready=0.
+
+**Wakeup at writeback (CDB-style):** when EX writes ROB[i].result and
+sets ready=1, scan all busy ROB entries; any waiting source whose tag
+equals i captures the result. M1 is polling (single producer per
+cycle); M2 introduces an actual broadcast CDB.
+
+**Issue:** only ROB[head]. `issue_valid = head.busy & ~head.issued
+& head.rs1_ready & head.rs2_ready`. In-order — younger entries wait
+even if their operands are ready (M2 relaxes this).
+
+**Branch handling (M1 — pre-recovery):** branches resolve at EX
+(from head). On taken branch the same cycle:
+- `rob.flush_younger` — invalidate all entries except head.
+- `rat.flush` — clear all busy bits.
+- `fetch.redirect` — redirect to target.
+The branch head entry itself stays ready and commits the next cycle.
+This is correct at M1 because in-order issue guarantees younger ROB
+entries have *not* executed yet — they were only dispatched (renamed
++ allocated). Arch regfile is unmodified by them. Wasted dispatch
+bandwidth is the cost — M3 fixes with RAT snapshots + walk-back.
+
+**Gate:** all M0 directed tests pass on the new pipeline; ROB +
+RAT occupancy probes show entries allocated, renamed, written-back,
+and committed in the right order. (RISCOF integration remains
+deferred to its own milestone — same gate stance as M0.)
 
 ### M2 — Reservation stations + CDB → true OoO execute
 Goal: Tomasulo is alive.
