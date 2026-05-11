@@ -17,7 +17,6 @@
 
 import common_pkg::*;
 import core_pkg::*;
-import debug_pkg::*;
 import core_ooo_pkg::*;
 
 module core_ooo_top

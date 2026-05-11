@@ -1,0 +1,6 @@
+obj_dir/
+ram.hex
+sw/*.o
+sw/*.elf
+sw/*.bin
+sw/*.dis
