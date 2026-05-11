@@ -45,10 +45,31 @@ RTL_SRCS = \
     ../../design/core_ooo/src/core_ooo_top.sv \
     tb_ooo.sv
 
+# ── test battery (M0 sanity) ──────────────────────────────────
+TESTS = test_basic test_loop test_jalr test_subword test_imm_edges test_dep_chain
+
 # ── targets ───────────────────────────────────────────────────
-.PHONY: all build sw run clean
+.PHONY: all build sw run test-all clean
 
 all: run
+
+test-all: build
+	@pass=0; fail=0; \
+	for t in $(TESTS); do \
+	    printf '%-20s ' "$$t"; \
+	    rm -f ram.hex; \
+	    $(MAKE) -s sw TEST=$$t >/dev/null 2>&1 || { echo "BUILD FAIL"; fail=$$((fail+1)); continue; }; \
+	    out=$$(./obj_dir/Vtb_ooo 2>&1); \
+	    val=$$(echo "$$out" | awk -F'0x' '/halt_value/ {print $$2}'); \
+	    cyc=$$(echo "$$out" | awk '/cycles/ {print $$3}'); \
+	    if [ "$$val" = "deadbeef" ]; then \
+	        printf 'PASS  (cycles=%s)\n' "$$cyc"; pass=$$((pass+1)); \
+	    else \
+	        printf 'FAIL  (halt=0x%s)\n' "$$val"; fail=$$((fail+1)); \
+	    fi; \
+	done; \
+	echo "── $$pass passed, $$fail failed ──"; \
+	[ "$$fail" = "0" ]
 
 build: obj_dir/Vtb_ooo
 
