@@ -49,7 +49,7 @@ RTL_SRCS = \
     tb_ooo.sv
 
 # ── test battery (M0 sanity) ──────────────────────────────────
-TESTS = test_basic test_loop test_jalr test_subword test_imm_edges test_dep_chain
+TESTS = test_basic test_loop test_jalr test_subword test_imm_edges test_dep_chain test_ooo_stress
 
 # ── targets ───────────────────────────────────────────────────
 .PHONY: all build sw run test-all clean

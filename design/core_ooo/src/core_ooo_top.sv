@@ -185,6 +185,8 @@ module core_ooo_top
         .clk_i             (clk_i),
         .reset_i           (reset_i),
         .flush_i           (rat_flush),
+        .flush_after_idx_i (alu_rs_issue_rob_idx),
+        .flush_tail_i      (rob_tail),
         .rs1_addr_i        (id_uop.rs1),
         .rs2_addr_i        (id_uop.rs2),
         .rs1_busy_o        (rat_rs1_busy),

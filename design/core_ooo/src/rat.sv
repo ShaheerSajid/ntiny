@@ -14,13 +14,22 @@
 //   - 1 conditional-clear — commit clears the entry *only if* it
 //     still points at the retiring ROB index. If a younger dispatch
 //     has already overwritten the mapping, the clear is a no-op.
-//   - 1 flush — wipes all busy bits in one cycle. At M1 this is used
-//     on taken branches; M3 replaces with snapshot-restore.
+//   - 1 selective flush — on taken branches, clears only entries
+//     whose tag falls in the squashed range (flush_after_idx, tail).
+//     Entries pointing to older-than-branch in-flight producers
+//     survive. M3 replaces this with snapshot-restore.
 //
 // Same-cycle resolution: if a commit clear and a dispatch write hit
 // the same arch reg in the same cycle, dispatch wins (it's the newer
 // producer). The always_ff orders clear-before-write to make this fall
 // out naturally.
+//
+// Branch flush is *selective*: only entries whose tag falls in the
+// squashed range (flush_after_idx, tail) get cleared. Entries pointing
+// to producers older than (or equal to) the branch survive — those
+// ROB slots will commit normally and their results aren't lost.
+// (Wholesale flush would clobber the in-flight older-producer map and
+//  force dispatch to read a stale arch regfile.)
 
 import common_pkg::*;
 import core_ooo_pkg::*;
@@ -30,6 +39,11 @@ module rat
     input  logic                        clk_i,
     input  logic                        reset_i,
     input  logic                        flush_i,
+    // Squash-range bounds for selective flush. `flush_after_idx_i` is
+    // the surviving branch's ROB idx (its mapping is kept); entries
+    // pointing strictly into (flush_after_idx, tail) are cleared.
+    input  logic [OOO_ROB_IDX_W-1:0]    flush_after_idx_i,
+    input  logic [OOO_ROB_IDX_W-1:0]    flush_tail_i,
 
     // Reads (combinational)
     input  logic [4:0]                  rs1_addr_i,
@@ -66,9 +80,22 @@ module rat
                 busy_q[i] <= 1'b0;
                 tag_q[i]  <= '0;
             end
-        end else if (flush_i) begin
-            for (int i = 0; i < 32; i++) busy_q[i] <= 1'b0;
         end else begin
+            // Selective flush — clear entries whose tag falls in the
+            // squashed range (flush_after_idx, flush_tail). Runs in
+            // parallel with commit-clear: they touch disjoint entries
+            // (flush targets younger-than-branch; commit drains head),
+            // so combining them in one cycle is safe.
+            if (flush_i) begin
+                for (int i = 0; i < 32; i++) begin
+                    automatic logic [OOO_ROB_IDX_W-1:0] d_tag;
+                    automatic logic [OOO_ROB_IDX_W-1:0] d_tail;
+                    d_tag  = tag_q[i]     - flush_after_idx_i - 1'b1;
+                    d_tail = flush_tail_i - flush_after_idx_i - 1'b1;
+                    if (busy_q[i] && (d_tag < d_tail)) busy_q[i] <= 1'b0;
+                end
+            end
+
             // Commit conditional-clear (only if entry still points
             // at the retiring slot; a younger dispatch may have moved
             // the mapping in the meantime).
@@ -79,7 +106,8 @@ module rat
             end
 
             // Dispatch write — newer producer; overrides clear in
-            // the same cycle if both hit the same addr.
+            // the same cycle if both hit the same addr. (Dispatch is
+            // gated off on flush at the top, so no conflict there.)
             if (write_en_i && write_addr_i != 5'd0) begin
                 busy_q[write_addr_i] <= 1'b1;
                 tag_q[write_addr_i]  <= write_rob_idx_i;
