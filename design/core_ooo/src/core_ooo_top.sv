@@ -1,21 +1,21 @@
-// OoO core v1 — top (M1 pipeline)
+// OoO core v1 — top (M2 phase A pipeline)
 //
-// 4 logical stages:
+// 5 logical stages:
 //
 //   IF       fetch.sv → {pc, instr, valid}
-//   DISPATCH decode.sv + RAT lookup + arch-regfile read + ROB peek
-//            → ROB.alloc; RAT updated at posedge
-//   ISSUE+EX+WB  ROB.issue_ptr drives execute.sv / memunit.sv;
-//                ALU/branch wb fires this cycle, memunit wb fires
-//                multiple cycles later via op_done
+//   DISPATCH decode + RAT lookup + arch-regfile read + ROB peek
+//            → ROB.alloc + RS.alloc into the right bank
+//   ISSUE    each RS bank picks its lowest-index ready slot
+//            independently
+//   EX       ALU FU (ALU/branch ops) + memunit (LOAD/STORE)
+//   WB       CDB-style (2-wide); both ROB and both RS banks see
+//            the broadcast
 //   COMMIT   ROB head when ready → arch regfile write
 //
-// Branch handling (M1, pre-recovery): on taken branch at EX, redirect
-// fetch AND flush all non-head ROB entries AND clear RAT busy bits.
-// Same cycle, dispatch_en is suppressed so the in-flight rvalid is
-// not allocated (it's on the mispredicted path).
-//
-// M3 replaces the wholesale RAT flush with snapshot-restore.
+// Phase A: two RS banks
+//   alu_rs (handles FU_ALU + FU_BRANCH) → execute.sv (ALU FU)
+//   lsu_rs (handles FU_LOAD + FU_STORE) → memunit.sv
+// Phase B (next): add MUL/DIV RS + FU.
 
 import common_pkg::*;
 import core_pkg::*;
@@ -60,7 +60,7 @@ module core_ooo_top
     output logic            fence_i_o
 );
 
-    // ── debug / abstract / fence: tied off at M1 ───────────────
+    // ── debug / abstract / fence: tied off ───────────────────
     assign resumeack_o = FALSE;
     assign running_o   = TRUE;
     assign halted_o    = FALSE;
@@ -71,8 +71,10 @@ module core_ooo_top
     assign fence_i_o   = 1'b0;
 
     localparam logic [31:0] RESET_PC = 32'h0000_0000;
+    localparam int ALU_RS_DEPTH = OOO_ALU_RS_DEPTH;     // 4
+    localparam int LSU_RS_DEPTH = 2;                    // small for M2-A
 
-    // ── nets ──────────────────────────────────────────────────
+    // ── nets ─────────────────────────────────────────────────
     // IF
     logic [31:0]   if_instr;
     logic [31:0]   if_pc;
@@ -88,27 +90,42 @@ module core_ooo_top
     // Arch regfile
     logic [31:0]                rf_rdataA, rf_rdataB;
 
-    // Dispatch source resolution
-    logic                       alloc_rs1_busy_to_rob;
-    logic                       alloc_rs2_busy_to_rob;
-    logic [31:0]                alloc_rs1_value;
-    logic [31:0]                alloc_rs2_value;
-
     // ROB
     logic                       rob_full;
     logic [OOO_ROB_IDX_W-1:0]   rob_alloc_idx;
+    logic [OOO_ROB_IDX_W-1:0]   rob_tail;
+    logic [OOO_ROB_IDX_W-1:0]   rob_head;
     logic                       rob_peek1_ready, rob_peek2_ready;
     logic [31:0]                rob_peek1_result, rob_peek2_result;
-    logic                       rob_issue_valid;
-    logic [OOO_ROB_IDX_W-1:0]   rob_issue_idx;
-    uop_t                       rob_issue_uop;
-    logic [31:0]                rob_issue_rs1_val, rob_issue_rs2_val;
     logic                       rob_commit_valid;
     logic [OOO_ROB_IDX_W-1:0]   rob_commit_idx;
     uop_t                       rob_commit_uop;
     logic [31:0]                rob_commit_result;
 
-    // Issue / EX
+    // ALU RS
+    logic                                 alu_rs_full;
+    logic                                 alu_rs_issue_valid;
+    uop_t                                 alu_rs_issue_uop;
+    logic [OOO_ROB_IDX_W-1:0]             alu_rs_issue_rob_idx;
+    logic [31:0]                          alu_rs_issue_rs1_val, alu_rs_issue_rs2_val;
+    logic [ALU_RS_DEPTH-1:0]              alu_rs_busy_mask;
+    logic [OOO_ROB_IDX_W-1:0]             alu_rs_rob_idx_of [0:ALU_RS_DEPTH-1];
+    fu_type_e                             alu_rs_fu_of      [0:ALU_RS_DEPTH-1];
+    logic [ALU_RS_DEPTH-1:0]              alu_rs_squash_mask;
+
+    // LSU RS
+    logic                                 lsu_rs_full;
+    logic                                 lsu_rs_issue_valid;
+    uop_t                                 lsu_rs_issue_uop;
+    logic [OOO_ROB_IDX_W-1:0]             lsu_rs_issue_rob_idx;
+    logic [31:0]                          lsu_rs_issue_rs1_val, lsu_rs_issue_rs2_val;
+    logic [LSU_RS_DEPTH-1:0]              lsu_rs_busy_mask;
+    logic [OOO_ROB_IDX_W-1:0]             lsu_rs_rob_idx_of [0:LSU_RS_DEPTH-1];
+    fu_type_e                             lsu_rs_fu_of      [0:LSU_RS_DEPTH-1];
+    logic [LSU_RS_DEPTH-1:0]              lsu_rs_squash_mask;
+    logic [LSU_RS_DEPTH-1:0]              lsu_rs_block_mask;
+
+    // FU outputs
     onebit_sig_e                alu_wb_en;
     logic [OOO_ROB_IDX_W-1:0]   alu_wb_idx;
     logic [31:0]                alu_wb_result;
@@ -117,26 +134,31 @@ module core_ooo_top
     logic                       ex_redirect;
     logic [31:0]                ex_redirect_pc;
 
-    // Memunit
     onebit_sig_e                mem_busy;
     onebit_sig_e                mem_done;
     logic [OOO_ROB_IDX_W-1:0]   mem_done_idx;
     logic [31:0]                mem_done_result;
 
-    // Commit → arch regfile
+    // Commit
     onebit_sig_e                commit_wb_wen;
     logic [4:0]                 commit_wb_rd;
     logic [31:0]                commit_wb_data;
+    logic                       commit_consume;
+
+    // Dispatch routing
+    logic                       dispatch_en;        // any dispatch this cycle
+    logic                       dispatch_to_alu_rs;
+    logic                       dispatch_to_lsu_rs;
+    logic                       alloc_rs1_busy_to_rs;
+    logic                       alloc_rs2_busy_to_rs;
+    logic [31:0]                alloc_rs1_value, alloc_rs2_value;
 
     // Pipeline-wide control
-    logic                       dispatch_en;
-    logic                       issue_fire;
-    logic                       commit_consume;
     logic                       fetch_stall;
     logic                       flush_younger;
     logic                       rat_flush;
 
-    // ── IF ────────────────────────────────────────────────────
+    // ── IF ───────────────────────────────────────────────────
     fetch fetch_inst (
         .clk_i         (clk_i),
         .reset_i       (reset_i),
@@ -150,7 +172,7 @@ module core_ooo_top
         .valid_o       (if_valid)
     );
 
-    // ── DECODE ────────────────────────────────────────────────
+    // ── DECODE ───────────────────────────────────────────────
     decode decode_inst (
         .instr_i (if_instr),
         .pc_i    (if_pc),
@@ -158,7 +180,7 @@ module core_ooo_top
         .uop_o   (id_uop)
     );
 
-    // ── RAT ───────────────────────────────────────────────────
+    // ── RAT ──────────────────────────────────────────────────
     rat rat_inst (
         .clk_i             (clk_i),
         .reset_i           (reset_i),
@@ -177,7 +199,7 @@ module core_ooo_top
         .clear_check_idx_i (rob_commit_idx)
     );
 
-    // ── arch regfile ──────────────────────────────────────────
+    // ── arch regfile ─────────────────────────────────────────
     reg_file #(.ZERO_REG(1)) int_rf_inst (
         .clk_i     (clk_i),
         .reset_i   (reset_i),
@@ -193,12 +215,10 @@ module core_ooo_top
         .rddatac_o ()
     );
 
-    // ── dispatch source resolution ────────────────────────────
-    // If the source is renamed, prefer (a) the value via ROB peek
-    // when the producer has already written back in a prior cycle,
-    // or (b) wb1 / wb2 result this cycle when the producer's
-    // writeback coincides with our dispatch. Otherwise capture the
-    // tag and rely on the in-ROB wakeup loop.
+    // ── dispatch source resolution ───────────────────────────
+    // Same pattern as M1: choose value via ROB peek (producer
+    // already ready) OR via this-cycle wb (same-cycle catch) OR
+    // capture tag for later wakeup. Now feeds whichever RS bank.
     wire wb1_to_rs1 = (alu_wb_en == TRUE) && (alu_wb_idx == rat_rs1_idx);
     wire wb2_to_rs1 = (mem_done  == TRUE) && (mem_done_idx == rat_rs1_idx);
     wire wb1_to_rs2 = (alu_wb_en == TRUE) && (alu_wb_idx == rat_rs2_idx);
@@ -209,8 +229,8 @@ module core_ooo_top
     wire rs2_resolved_now = rat_rs2_busy
                             && (rob_peek2_ready || wb1_to_rs2 || wb2_to_rs2);
 
-    assign alloc_rs1_busy_to_rob = rat_rs1_busy && !rs1_resolved_now;
-    assign alloc_rs2_busy_to_rob = rat_rs2_busy && !rs2_resolved_now;
+    assign alloc_rs1_busy_to_rs = rat_rs1_busy && !rs1_resolved_now;
+    assign alloc_rs2_busy_to_rs = rat_rs2_busy && !rs2_resolved_now;
 
     always_comb begin
         if (rat_rs1_busy) begin
@@ -231,28 +251,50 @@ module core_ooo_top
         end
     end
 
-    // Dispatch fires when a valid uop is present, ROB has room, and
-    // we're not redirecting (which would dispatch a mispredicted
-    // instruction).
-    assign dispatch_en = (id_uop.valid == TRUE) && !rob_full && !ex_redirect;
+    // ── dispatch routing ─────────────────────────────────────
+    // Route uop to its RS bank. FU_NONE / illegal still claim a ROB
+    // slot (so commit can drain them) but don't go to any RS — they
+    // need no execution; we'll mark them ready at dispatch via a
+    // self-wb pulse so they retire next cycle.
+    wire wants_alu_rs = (id_uop.fu == FU_ALU)  || (id_uop.fu == FU_BRANCH);
+    wire wants_lsu_rs = (id_uop.fu == FU_LOAD) || (id_uop.fu == FU_STORE);
+    wire wants_nop_path = !wants_alu_rs && !wants_lsu_rs;   // FU_NONE, illegal, etc.
 
-    // ── ROB ───────────────────────────────────────────────────
+    // Dispatch fires when: valid uop, ROB has room, target RS has
+    // room (or we're on the nop path), and we're not redirecting.
+    wire target_rs_full = (wants_alu_rs && alu_rs_full)
+                        || (wants_lsu_rs && lsu_rs_full);
+
+    assign dispatch_en = (id_uop.valid == TRUE)
+                       && !rob_full
+                       && !target_rs_full
+                       && !ex_redirect;
+    assign dispatch_to_alu_rs = dispatch_en && wants_alu_rs;
+    assign dispatch_to_lsu_rs = dispatch_en && wants_lsu_rs;
+
+    // Self-wb for nop-path entries: they become ready in the same
+    // cycle they alloc, so they can retire the next cycle.
+    wire nop_wb_en = dispatch_en && wants_nop_path;
+
+    // ── ROB ──────────────────────────────────────────────────
+    // wb1 = ALU CDB port (also carries nop-path self-wb when no
+    // ALU op completed this cycle); wb2 = LSU CDB port.
+    wire        rob_wb1_en     = (alu_wb_en == TRUE) || nop_wb_en;
+    wire [OOO_ROB_IDX_W-1:0] rob_wb1_idx
+        = (alu_wb_en == TRUE) ? alu_wb_idx : rob_alloc_idx;
+    wire [31:0] rob_wb1_result
+        = (alu_wb_en == TRUE) ? alu_wb_result : 32'b0;
+
     rob rob_inst (
         .clk_i              (clk_i),
         .reset_i            (reset_i),
         .flush_younger_i    (flush_younger),
-        .flush_after_idx_i  (rob_issue_idx),
+        .flush_after_idx_i  (alu_rs_issue_rob_idx),     // ALU FU resolves branches
 
         .alloc_en_i         (dispatch_en),
         .alloc_idx_o        (rob_alloc_idx),
         .full_o             (rob_full),
         .alloc_uop_i        (id_uop),
-        .alloc_rs1_value_i  (alloc_rs1_value),
-        .alloc_rs1_busy_i   (alloc_rs1_busy_to_rob),
-        .alloc_rs1_tag_i    (rat_rs1_idx),
-        .alloc_rs2_value_i  (alloc_rs2_value),
-        .alloc_rs2_busy_i   (alloc_rs2_busy_to_rob),
-        .alloc_rs2_tag_i    (rat_rs2_idx),
 
         .peek1_idx_i        (rat_rs1_idx),
         .peek1_ready_o      (rob_peek1_ready),
@@ -261,16 +303,9 @@ module core_ooo_top
         .peek2_ready_o      (rob_peek2_ready),
         .peek2_result_o     (rob_peek2_result),
 
-        .issue_valid_o      (rob_issue_valid),
-        .issue_idx_o        (rob_issue_idx),
-        .issue_uop_o        (rob_issue_uop),
-        .issue_rs1_value_o  (rob_issue_rs1_val),
-        .issue_rs2_value_o  (rob_issue_rs2_val),
-        .issue_consume_i    (issue_fire),
-
-        .wb1_en_i           (alu_wb_en == TRUE),
-        .wb1_idx_i          (alu_wb_idx),
-        .wb1_result_i       (alu_wb_result),
+        .wb1_en_i           (rob_wb1_en),
+        .wb1_idx_i          (rob_wb1_idx),
+        .wb1_result_i       (rob_wb1_result),
         .wb2_en_i           (mem_done == TRUE),
         .wb2_idx_i          (mem_done_idx),
         .wb2_result_i       (mem_done_result),
@@ -279,67 +314,203 @@ module core_ooo_top
         .commit_idx_o       (rob_commit_idx),
         .commit_uop_o       (rob_commit_uop),
         .commit_result_o    (rob_commit_result),
-        .commit_consume_i   (commit_consume)
+        .commit_consume_i   (commit_consume),
+
+        .tail_o             (rob_tail),
+        .head_o             (rob_head)
     );
 
-    // ── ISSUE ─────────────────────────────────────────────────
-    wire is_mem_issue  = (rob_issue_uop.fu == FU_LOAD) || (rob_issue_uop.fu == FU_STORE);
-    wire can_issue_mem = !is_mem_issue || (mem_busy == FALSE);
-    assign issue_fire  = rob_issue_valid && can_issue_mem;
-    onebit_sig_e issue_fire_e;
-    assign issue_fire_e = onebit_sig_e'(issue_fire);
+    // ── ALU RS ───────────────────────────────────────────────
+    rs #(.DEPTH(ALU_RS_DEPTH)) alu_rs_inst (
+        .clk_i              (clk_i),
+        .reset_i            (reset_i),
+        .flush_all_i        (1'b0),
+        .squash_mask_i      (alu_rs_squash_mask),
+        .block_issue_mask_i ({ALU_RS_DEPTH{1'b0}}),
 
-    // ── EX ────────────────────────────────────────────────────
+        .alloc_en_i         (dispatch_to_alu_rs),
+        .full_o             (alu_rs_full),
+        .alloc_uop_i        (id_uop),
+        .alloc_rob_idx_i    (rob_alloc_idx),
+        .alloc_rs1_value_i  (alloc_rs1_value),
+        .alloc_rs1_busy_i   (alloc_rs1_busy_to_rs),
+        .alloc_rs1_tag_i    (rat_rs1_idx),
+        .alloc_rs2_value_i  (alloc_rs2_value),
+        .alloc_rs2_busy_i   (alloc_rs2_busy_to_rs),
+        .alloc_rs2_tag_i    (rat_rs2_idx),
+
+        .wb1_en_i           (alu_wb_en == TRUE),
+        .wb1_idx_i          (alu_wb_idx),
+        .wb1_result_i       (alu_wb_result),
+        .wb2_en_i           (mem_done  == TRUE),
+        .wb2_idx_i          (mem_done_idx),
+        .wb2_result_i       (mem_done_result),
+
+        .issue_valid_o      (alu_rs_issue_valid),
+        .issue_uop_o        (alu_rs_issue_uop),
+        .issue_rob_idx_o    (alu_rs_issue_rob_idx),
+        .issue_rs1_value_o  (alu_rs_issue_rs1_val),
+        .issue_rs2_value_o  (alu_rs_issue_rs2_val),
+        .issue_consume_i    (alu_rs_issue_valid),       // 1-cycle FU, always consume
+
+        .busy_mask_o        (alu_rs_busy_mask),
+        .rob_idx_of_o       (alu_rs_rob_idx_of),
+        .fu_of_o            (alu_rs_fu_of)
+    );
+
+    // ── LSU RS ───────────────────────────────────────────────
+    // Serialize all LSU ops at the ROB head:
+    //   * STOREs must wait for head so speculation can't escape to
+    //     memory (no store buffer yet).
+    //   * LOADs must wait for head so they observe older stores in
+    //     program order (no memory disambiguation yet — proper LSQ
+    //     comes in M4).
+    // The RS still does operand wakeup; only the issue-ready gate
+    // is per-slot here.
+    always_comb begin
+        for (int i = 0; i < LSU_RS_DEPTH; i++) begin
+            lsu_rs_block_mask[i] = lsu_rs_busy_mask[i]
+                                   && (lsu_rs_rob_idx_of[i] != rob_head);
+        end
+    end
+
+    wire lsu_rs_consume = lsu_rs_issue_valid && (mem_busy == FALSE);
+
+    rs #(.DEPTH(LSU_RS_DEPTH)) lsu_rs_inst (
+        .clk_i              (clk_i),
+        .reset_i            (reset_i),
+        .flush_all_i        (1'b0),
+        .squash_mask_i      (lsu_rs_squash_mask),
+        .block_issue_mask_i (lsu_rs_block_mask),
+
+        .alloc_en_i         (dispatch_to_lsu_rs),
+        .full_o             (lsu_rs_full),
+        .alloc_uop_i        (id_uop),
+        .alloc_rob_idx_i    (rob_alloc_idx),
+        .alloc_rs1_value_i  (alloc_rs1_value),
+        .alloc_rs1_busy_i   (alloc_rs1_busy_to_rs),
+        .alloc_rs1_tag_i    (rat_rs1_idx),
+        .alloc_rs2_value_i  (alloc_rs2_value),
+        .alloc_rs2_busy_i   (alloc_rs2_busy_to_rs),
+        .alloc_rs2_tag_i    (rat_rs2_idx),
+
+        .wb1_en_i           (alu_wb_en == TRUE),
+        .wb1_idx_i          (alu_wb_idx),
+        .wb1_result_i       (alu_wb_result),
+        .wb2_en_i           (mem_done  == TRUE),
+        .wb2_idx_i          (mem_done_idx),
+        .wb2_result_i       (mem_done_result),
+
+        .issue_valid_o      (lsu_rs_issue_valid),
+        .issue_uop_o        (lsu_rs_issue_uop),
+        .issue_rob_idx_o    (lsu_rs_issue_rob_idx),
+        .issue_rs1_value_o  (lsu_rs_issue_rs1_val),
+        .issue_rs2_value_o  (lsu_rs_issue_rs2_val),
+        .issue_consume_i    (lsu_rs_consume),
+
+        .busy_mask_o        (lsu_rs_busy_mask),
+        .rob_idx_of_o       (lsu_rs_rob_idx_of),
+        .fu_of_o            (lsu_rs_fu_of)
+    );
+
+    // ── squash-mask computation ──────────────────────────────
+    // A slot is "younger than branch" if its rob_idx falls in the
+    // circular range (branch_idx, tail). Branch resolution comes
+    // from the ALU FU, so the branch's rob_idx is whatever the ALU
+    // RS is issuing this cycle.
+    function automatic logic is_younger(
+        logic [OOO_ROB_IDX_W-1:0] idx,
+        logic [OOO_ROB_IDX_W-1:0] after,
+        logic [OOO_ROB_IDX_W-1:0] upto
+    );
+        logic [OOO_ROB_IDX_W-1:0] d_idx;
+        logic [OOO_ROB_IDX_W-1:0] d_upto;
+        d_idx  = idx  - after - 1'b1;
+        d_upto = upto - after - 1'b1;
+        return (d_idx < d_upto);
+    endfunction
+
+    always_comb begin
+        for (int i = 0; i < ALU_RS_DEPTH; i++) begin
+            alu_rs_squash_mask[i] = ex_redirect
+                                    && alu_rs_busy_mask[i]
+                                    && is_younger(alu_rs_rob_idx_of[i],
+                                                  alu_rs_issue_rob_idx,
+                                                  rob_tail);
+        end
+        for (int i = 0; i < LSU_RS_DEPTH; i++) begin
+            lsu_rs_squash_mask[i] = ex_redirect
+                                    && lsu_rs_busy_mask[i]
+                                    && is_younger(lsu_rs_rob_idx_of[i],
+                                                  alu_rs_issue_rob_idx,
+                                                  rob_tail);
+        end
+    end
+
+    // ── EX (ALU FU) ──────────────────────────────────────────
+    onebit_sig_e alu_issue_e;
+    assign alu_issue_e = onebit_sig_e'(alu_rs_issue_valid);
+
+    logic [31:0] ex_mem_addr_unused;
+    logic [31:0] ex_store_data_unused;
+
     execute execute_inst (
         .clk_i          (clk_i),
         .reset_i        (reset_i),
         .stall_i        (1'b0),
         .flush_i        (1'b0),
-        .uop_i          (rob_issue_uop),
-        .rs1_val_i      (rob_issue_rs1_val),
-        .rs2_val_i      (rob_issue_rs2_val),
-        .issue_idx_i    (rob_issue_idx),
-        .issue_i        (issue_fire_e),
+        .uop_i          (alu_rs_issue_uop),
+        .rs1_val_i      (alu_rs_issue_rs1_val),
+        .rs2_val_i      (alu_rs_issue_rs2_val),
+        .issue_idx_i    (alu_rs_issue_rob_idx),
+        .issue_i        (alu_issue_e),
         .alu_wb_en_o    (alu_wb_en),
         .alu_wb_idx_o   (alu_wb_idx),
         .alu_wb_result_o(alu_wb_result),
         .alu_busy_o     (ex_alu_busy),
-        .mem_addr_o     (ex_mem_addr),
-        .store_data_o   (ex_store_data),
+        .mem_addr_o     (ex_mem_addr_unused),
+        .store_data_o   (ex_store_data_unused),
         .redirect_o     (ex_redirect),
         .redirect_pc_o  (ex_redirect_pc)
     );
 
-    // ── MEMUNIT ───────────────────────────────────────────────
-    onebit_sig_e mem_kick;
-    assign mem_kick = onebit_sig_e'(issue_fire && is_mem_issue
-                                     && rob_issue_uop.illegal == FALSE);
+    // ── LSU (memunit) ────────────────────────────────────────
+    // LSU computes its own address gen from the LSU RS-issued op
+    // (independent of the ALU FU which now only handles ALU/branch).
+    wire [31:0] lsu_addr       = lsu_rs_issue_rs1_val + lsu_rs_issue_uop.alu_imm;
+    wire [31:0] lsu_store_data = lsu_rs_issue_rs2_val;
+
+    onebit_sig_e lsu_kick_e;
+    assign lsu_kick_e = onebit_sig_e'(lsu_rs_consume
+                                       && lsu_rs_issue_uop.illegal == FALSE);
+
+    assign ex_mem_addr   = lsu_addr;
+    assign ex_store_data = lsu_store_data;
 
     memunit memunit_inst (
         .clk_i             (clk_i),
         .reset_i           (reset_i),
         .flush_i           (1'b0),
-        .kick_i            (mem_kick),
-        .fu_i              (rob_issue_uop.fu),
-        .addr_i            (ex_mem_addr),
-        .store_data_i      (ex_store_data),
-        .width_i           (rob_issue_uop.ls_width),
-        .mem_unsigned_i    (rob_issue_uop.mem_unsigned),
-        .rob_idx_i         (rob_issue_idx),
+        .kick_i            (lsu_kick_e),
+        .fu_i              (lsu_rs_issue_uop.fu),
+        .addr_i            (lsu_addr),
+        .store_data_i      (lsu_store_data),
+        .width_i           (lsu_rs_issue_uop.ls_width),
+        .mem_unsigned_i    (lsu_rs_issue_uop.mem_unsigned),
+        .rob_idx_i         (lsu_rs_issue_rob_idx),
         .dmem_port         (dmem_port),
         .op_done_o         (mem_done),
         .op_done_rob_idx_o (mem_done_idx),
         .op_done_result_o  (mem_done_result),
-        .busy_o            (mem_busy)
+        .busy_o             (mem_busy)
     );
 
-    // ── BRANCH RECOVERY ───────────────────────────────────────
+    // ── BRANCH RECOVERY ──────────────────────────────────────
     assign flush_younger = ex_redirect;
     assign rat_flush     = ex_redirect;
 
-    // ── COMMIT ────────────────────────────────────────────────
+    // ── COMMIT ───────────────────────────────────────────────
     assign commit_consume = rob_commit_valid;
-
     always_comb begin
         if (rob_commit_valid && rob_commit_uop.has_rd == TRUE
             && rob_commit_uop.illegal == FALSE) begin
@@ -353,17 +524,17 @@ module core_ooo_top
         end
     end
 
-    // ── FETCH STALL ───────────────────────────────────────────
-    // ROB acts as a buffer between fetch and EX, so fetch only needs
-    // to stall when ROB is full. Memunit-busy / ALU-busy are absorbed
-    // by issue blocking — dispatch continues filling ROB.
-    assign fetch_stall = rob_full;
+    // ── FETCH STALL ──────────────────────────────────────────
+    // Stall fetch when ROB is full or the target RS bank is full.
+    // The bank check captures FU_NONE/illegal too (those go to
+    // neither bank but still need a ROB slot).
+    assign fetch_stall = rob_full || target_rs_full;
 
-    // ── lint sink ─────────────────────────────────────────────
+    // ── lint sink ────────────────────────────────────────────
     wire _unused = &{1'b0, ext_itr_i, s_ext_itr_i, timer_itr_i, soft_itr_i,
                      |mtime_i, haltreq_i, resumereq_i,
                      ar_en_i, ar_wr_i, |ar_ad_i, |ar_di_i,
                      am_en_i, am_wr_i, |am_st_i, |am_ad_i, |am_di_i,
-                     ex_alu_busy, 1'b0};
+                     ex_alu_busy, |ex_mem_addr, |ex_store_data, 1'b0};
 
 endmodule

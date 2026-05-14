@@ -43,6 +43,7 @@ RTL_SRCS = \
     ../../design/core_ooo/src/execute.sv \
     ../../design/core_ooo/src/memunit.sv \
     ../../design/core_ooo/src/rat.sv \
+    ../../design/core_ooo/src/rs.sv \
     ../../design/core_ooo/src/rob.sv \
     ../../design/core_ooo/src/core_ooo_top.sv \
     tb_ooo.sv
