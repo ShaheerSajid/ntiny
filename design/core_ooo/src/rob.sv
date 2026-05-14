@@ -42,13 +42,19 @@ module rob
     output logic                        peek2_ready_o,
     output logic [31:0]                 peek2_result_o,
 
-    // ── writeback (2-wide CDB) ───────────────────────────────
+    // ── writeback (3-wide CDB) ───────────────────────────────
+    // wb1=ALU FU, wb2=LSU FU, wb3=MULDIV FU. Each wb writes a
+    // distinct ROB slot in any cycle (FUs are 1-issue and slot
+    // ownership is unique).
     input  logic                        wb1_en_i,
     input  logic [OOO_ROB_IDX_W-1:0]    wb1_idx_i,
     input  logic [31:0]                 wb1_result_i,
     input  logic                        wb2_en_i,
     input  logic [OOO_ROB_IDX_W-1:0]    wb2_idx_i,
     input  logic [31:0]                 wb2_result_i,
+    input  logic                        wb3_en_i,
+    input  logic [OOO_ROB_IDX_W-1:0]    wb3_idx_i,
+    input  logic [31:0]                 wb3_result_i,
 
     // ── commit (head, drain when ready) ──────────────────────
     output logic                        commit_valid_o,
@@ -110,6 +116,10 @@ module rob
             if (wb2_en_i) begin
                 entry_q[wb2_idx_i].result <= wb2_result_i;
                 entry_q[wb2_idx_i].ready  <= 1'b1;
+            end
+            if (wb3_en_i) begin
+                entry_q[wb3_idx_i].result <= wb3_result_i;
+                entry_q[wb3_idx_i].ready  <= 1'b1;
             end
 
             // Alloc — caller gates on flush.

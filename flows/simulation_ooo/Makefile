@@ -2,7 +2,8 @@ SHELL := /bin/bash
 
 # ── tools ─────────────────────────────────────────────────────
 VERILATOR ?= verilator
-RV_PREFIX ?= /opt/riscv-linux/bin/riscv32-unknown-linux-gnu
+# Multilib bare-metal elf toolchain — assembles rv32i / rv32im / ilp32.
+RV_PREFIX ?= /opt/riscv-elf/bin/riscv64-unknown-elf
 RV_AS     := $(RV_PREFIX)-as
 RV_LD     := $(RV_PREFIX)-ld
 RV_OBJCOPY:= $(RV_PREFIX)-objcopy
@@ -11,6 +12,12 @@ HEX_TEXT  := ../../software/tools/hex_text.py
 
 # ── target test (overridable: make TEST=foo) ──────────────────
 TEST ?= test_basic
+
+# ── march for the assembler ───────────────────────────────────
+# rv32im is a strict superset of rv32i; the existing tests don't
+# use M-ext mnemonics, so it's safe as the default. Per-test
+# override: `make MARCH=rv32i ...`.
+MARCH ?= rv32im
 
 # ── verilator config ──────────────────────────────────────────
 VLT_WARN = \
@@ -42,14 +49,15 @@ RTL_SRCS = \
     ../../design/core_ooo/src/decode.sv \
     ../../design/core_ooo/src/execute.sv \
     ../../design/core_ooo/src/memunit.sv \
+    ../../design/core_ooo/src/muldiv_unit.sv \
     ../../design/core_ooo/src/rat.sv \
     ../../design/core_ooo/src/rs.sv \
     ../../design/core_ooo/src/rob.sv \
     ../../design/core_ooo/src/core_ooo_top.sv \
     tb_ooo.sv
 
-# ── test battery (M0 sanity) ──────────────────────────────────
-TESTS = test_basic test_loop test_jalr test_subword test_imm_edges test_dep_chain test_ooo_stress
+# ── test battery (M0 sanity + M2 OoO/M-ext) ───────────────────
+TESTS = test_basic test_loop test_jalr test_subword test_imm_edges test_dep_chain test_ooo_stress test_muldiv
 
 # ── targets ───────────────────────────────────────────────────
 .PHONY: all build sw run test-all clean
@@ -89,7 +97,7 @@ sw/$(TEST).bin: sw/$(TEST).elf
 	$(RV_OBJCOPY) -O binary $< $@
 
 sw/$(TEST).elf: sw/$(TEST).s sw/link.ld
-	$(RV_AS) -march=rv32i -mabi=ilp32 -o sw/$(TEST).o $<
+	$(RV_AS) -march=$(MARCH) -mabi=ilp32 -o sw/$(TEST).o $<
 	$(RV_LD) -T sw/link.ld -o $@ sw/$(TEST).o
 	$(RV_OBJDUMP) -d $@ > sw/$(TEST).dis
 

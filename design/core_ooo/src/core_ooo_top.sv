@@ -1,4 +1,4 @@
-// OoO core v1 — top (M2 phase A pipeline)
+// OoO core v1 — top (M2 phase B pipeline)
 //
 // 5 logical stages:
 //
@@ -8,14 +8,16 @@
 //   ISSUE    each RS bank picks its lowest-index ready slot
 //            independently
 //   EX       ALU FU (ALU/branch ops) + memunit (LOAD/STORE)
-//   WB       CDB-style (2-wide); both ROB and both RS banks see
-//            the broadcast
+//            + muldiv_unit (MUL/MULH*/DIV/REM)
+//   WB       CDB-style (3-wide); all three RS banks + ROB see
+//            every broadcast
 //   COMMIT   ROB head when ready → arch regfile write
 //
-// Phase A: two RS banks
-//   alu_rs (handles FU_ALU + FU_BRANCH) → execute.sv (ALU FU)
-//   lsu_rs (handles FU_LOAD + FU_STORE) → memunit.sv
-// Phase B (next): add MUL/DIV RS + FU.
+// Phase B: three RS banks
+//   alu_rs    (FU_ALU + FU_BRANCH)        → execute.sv (ALU FU)
+//   lsu_rs    (FU_LOAD + FU_STORE)        → memunit.sv
+//   muldiv_rs (FU_MULDIV)                 → muldiv_unit.sv
+// Next: branch prediction + RAT snapshots (M3).
 
 import common_pkg::*;
 import core_pkg::*;
@@ -73,6 +75,7 @@ module core_ooo_top
     localparam logic [31:0] RESET_PC = 32'h0000_0000;
     localparam int ALU_RS_DEPTH = OOO_ALU_RS_DEPTH;     // 4
     localparam int LSU_RS_DEPTH = 2;                    // small for M2-A
+    localparam int MD_RS_DEPTH  = OOO_MD_RS_DEPTH;      // 2
 
     // ── nets ─────────────────────────────────────────────────
     // IF
@@ -125,6 +128,17 @@ module core_ooo_top
     logic [LSU_RS_DEPTH-1:0]              lsu_rs_squash_mask;
     logic [LSU_RS_DEPTH-1:0]              lsu_rs_block_mask;
 
+    // MULDIV RS
+    logic                                 md_rs_full;
+    logic                                 md_rs_issue_valid;
+    uop_t                                 md_rs_issue_uop;
+    logic [OOO_ROB_IDX_W-1:0]             md_rs_issue_rob_idx;
+    logic [31:0]                          md_rs_issue_rs1_val, md_rs_issue_rs2_val;
+    logic [MD_RS_DEPTH-1:0]               md_rs_busy_mask;
+    logic [OOO_ROB_IDX_W-1:0]             md_rs_rob_idx_of [0:MD_RS_DEPTH-1];
+    fu_type_e                             md_rs_fu_of      [0:MD_RS_DEPTH-1];
+    logic [MD_RS_DEPTH-1:0]               md_rs_squash_mask;
+
     // FU outputs
     onebit_sig_e                alu_wb_en;
     logic [OOO_ROB_IDX_W-1:0]   alu_wb_idx;
@@ -139,6 +153,11 @@ module core_ooo_top
     logic [OOO_ROB_IDX_W-1:0]   mem_done_idx;
     logic [31:0]                mem_done_result;
 
+    onebit_sig_e                md_busy;
+    onebit_sig_e                md_done;
+    logic [OOO_ROB_IDX_W-1:0]   md_done_idx;
+    logic [31:0]                md_done_result;
+
     // Commit
     onebit_sig_e                commit_wb_wen;
     logic [4:0]                 commit_wb_rd;
@@ -149,6 +168,7 @@ module core_ooo_top
     logic                       dispatch_en;        // any dispatch this cycle
     logic                       dispatch_to_alu_rs;
     logic                       dispatch_to_lsu_rs;
+    logic                       dispatch_to_md_rs;
     logic                       alloc_rs1_busy_to_rs;
     logic                       alloc_rs2_busy_to_rs;
     logic [31:0]                alloc_rs1_value, alloc_rs2_value;
@@ -221,15 +241,20 @@ module core_ooo_top
     // Same pattern as M1: choose value via ROB peek (producer
     // already ready) OR via this-cycle wb (same-cycle catch) OR
     // capture tag for later wakeup. Now feeds whichever RS bank.
+    // wb1=ALU, wb2=LSU, wb3=MULDIV.
     wire wb1_to_rs1 = (alu_wb_en == TRUE) && (alu_wb_idx == rat_rs1_idx);
     wire wb2_to_rs1 = (mem_done  == TRUE) && (mem_done_idx == rat_rs1_idx);
+    wire wb3_to_rs1 = (md_done   == TRUE) && (md_done_idx  == rat_rs1_idx);
     wire wb1_to_rs2 = (alu_wb_en == TRUE) && (alu_wb_idx == rat_rs2_idx);
     wire wb2_to_rs2 = (mem_done  == TRUE) && (mem_done_idx == rat_rs2_idx);
+    wire wb3_to_rs2 = (md_done   == TRUE) && (md_done_idx  == rat_rs2_idx);
 
     wire rs1_resolved_now = rat_rs1_busy
-                            && (rob_peek1_ready || wb1_to_rs1 || wb2_to_rs1);
+                            && (rob_peek1_ready
+                                || wb1_to_rs1 || wb2_to_rs1 || wb3_to_rs1);
     wire rs2_resolved_now = rat_rs2_busy
-                            && (rob_peek2_ready || wb1_to_rs2 || wb2_to_rs2);
+                            && (rob_peek2_ready
+                                || wb1_to_rs2 || wb2_to_rs2 || wb3_to_rs2);
 
     assign alloc_rs1_busy_to_rs = rat_rs1_busy && !rs1_resolved_now;
     assign alloc_rs2_busy_to_rs = rat_rs2_busy && !rs2_resolved_now;
@@ -239,6 +264,7 @@ module core_ooo_top
             if      (rob_peek1_ready) alloc_rs1_value = rob_peek1_result;
             else if (wb1_to_rs1)      alloc_rs1_value = alu_wb_result;
             else if (wb2_to_rs1)      alloc_rs1_value = mem_done_result;
+            else if (wb3_to_rs1)      alloc_rs1_value = md_done_result;
             else                       alloc_rs1_value = 32'b0;
         end else begin
             alloc_rs1_value = rf_rdataA;
@@ -247,6 +273,7 @@ module core_ooo_top
             if      (rob_peek2_ready) alloc_rs2_value = rob_peek2_result;
             else if (wb1_to_rs2)      alloc_rs2_value = alu_wb_result;
             else if (wb2_to_rs2)      alloc_rs2_value = mem_done_result;
+            else if (wb3_to_rs2)      alloc_rs2_value = md_done_result;
             else                       alloc_rs2_value = 32'b0;
         end else begin
             alloc_rs2_value = rf_rdataB;
@@ -258,14 +285,16 @@ module core_ooo_top
     // slot (so commit can drain them) but don't go to any RS — they
     // need no execution; we'll mark them ready at dispatch via a
     // self-wb pulse so they retire next cycle.
-    wire wants_alu_rs = (id_uop.fu == FU_ALU)  || (id_uop.fu == FU_BRANCH);
-    wire wants_lsu_rs = (id_uop.fu == FU_LOAD) || (id_uop.fu == FU_STORE);
-    wire wants_nop_path = !wants_alu_rs && !wants_lsu_rs;   // FU_NONE, illegal, etc.
+    wire wants_alu_rs   = (id_uop.fu == FU_ALU)  || (id_uop.fu == FU_BRANCH);
+    wire wants_lsu_rs   = (id_uop.fu == FU_LOAD) || (id_uop.fu == FU_STORE);
+    wire wants_md_rs    = (id_uop.fu == FU_MULDIV);
+    wire wants_nop_path = !wants_alu_rs && !wants_lsu_rs && !wants_md_rs;
 
     // Dispatch fires when: valid uop, ROB has room, target RS has
     // room (or we're on the nop path), and we're not redirecting.
     wire target_rs_full = (wants_alu_rs && alu_rs_full)
-                        || (wants_lsu_rs && lsu_rs_full);
+                        || (wants_lsu_rs && lsu_rs_full)
+                        || (wants_md_rs  && md_rs_full);
 
     assign dispatch_en = (id_uop.valid == TRUE)
                        && !rob_full
@@ -273,6 +302,7 @@ module core_ooo_top
                        && !ex_redirect;
     assign dispatch_to_alu_rs = dispatch_en && wants_alu_rs;
     assign dispatch_to_lsu_rs = dispatch_en && wants_lsu_rs;
+    assign dispatch_to_md_rs  = dispatch_en && wants_md_rs;
 
     // Self-wb for nop-path entries: they become ready in the same
     // cycle they alloc, so they can retire the next cycle.
@@ -311,6 +341,9 @@ module core_ooo_top
         .wb2_en_i           (mem_done == TRUE),
         .wb2_idx_i          (mem_done_idx),
         .wb2_result_i       (mem_done_result),
+        .wb3_en_i           (md_done  == TRUE),
+        .wb3_idx_i          (md_done_idx),
+        .wb3_result_i       (md_done_result),
 
         .commit_valid_o     (rob_commit_valid),
         .commit_idx_o       (rob_commit_idx),
@@ -347,6 +380,9 @@ module core_ooo_top
         .wb2_en_i           (mem_done  == TRUE),
         .wb2_idx_i          (mem_done_idx),
         .wb2_result_i       (mem_done_result),
+        .wb3_en_i           (md_done   == TRUE),
+        .wb3_idx_i          (md_done_idx),
+        .wb3_result_i       (md_done_result),
 
         .issue_valid_o      (alu_rs_issue_valid),
         .issue_uop_o        (alu_rs_issue_uop),
@@ -402,6 +438,9 @@ module core_ooo_top
         .wb2_en_i           (mem_done  == TRUE),
         .wb2_idx_i          (mem_done_idx),
         .wb2_result_i       (mem_done_result),
+        .wb3_en_i           (md_done   == TRUE),
+        .wb3_idx_i          (md_done_idx),
+        .wb3_result_i       (md_done_result),
 
         .issue_valid_o      (lsu_rs_issue_valid),
         .issue_uop_o        (lsu_rs_issue_uop),
@@ -413,6 +452,52 @@ module core_ooo_top
         .busy_mask_o        (lsu_rs_busy_mask),
         .rob_idx_of_o       (lsu_rs_rob_idx_of),
         .fu_of_o            (lsu_rs_fu_of)
+    );
+
+    // ── MULDIV RS ────────────────────────────────────────────
+    // Single-issue FU; gate consume on !md_busy so a long DIV holds
+    // its slot. Same squash semantics as ALU/LSU — entries younger
+    // than a mispredicted branch get cleared by the per-slot mask.
+    wire md_rs_consume = md_rs_issue_valid && (md_busy == FALSE);
+
+    rs #(.DEPTH(MD_RS_DEPTH)) md_rs_inst (
+        .clk_i              (clk_i),
+        .reset_i            (reset_i),
+        .flush_all_i        (1'b0),
+        .squash_mask_i      (md_rs_squash_mask),
+        .block_issue_mask_i ({MD_RS_DEPTH{1'b0}}),
+
+        .alloc_en_i         (dispatch_to_md_rs),
+        .full_o             (md_rs_full),
+        .alloc_uop_i        (id_uop),
+        .alloc_rob_idx_i    (rob_alloc_idx),
+        .alloc_rs1_value_i  (alloc_rs1_value),
+        .alloc_rs1_busy_i   (alloc_rs1_busy_to_rs),
+        .alloc_rs1_tag_i    (rat_rs1_idx),
+        .alloc_rs2_value_i  (alloc_rs2_value),
+        .alloc_rs2_busy_i   (alloc_rs2_busy_to_rs),
+        .alloc_rs2_tag_i    (rat_rs2_idx),
+
+        .wb1_en_i           (alu_wb_en == TRUE),
+        .wb1_idx_i          (alu_wb_idx),
+        .wb1_result_i       (alu_wb_result),
+        .wb2_en_i           (mem_done  == TRUE),
+        .wb2_idx_i          (mem_done_idx),
+        .wb2_result_i       (mem_done_result),
+        .wb3_en_i           (md_done   == TRUE),
+        .wb3_idx_i          (md_done_idx),
+        .wb3_result_i       (md_done_result),
+
+        .issue_valid_o      (md_rs_issue_valid),
+        .issue_uop_o        (md_rs_issue_uop),
+        .issue_rob_idx_o    (md_rs_issue_rob_idx),
+        .issue_rs1_value_o  (md_rs_issue_rs1_val),
+        .issue_rs2_value_o  (md_rs_issue_rs2_val),
+        .issue_consume_i    (md_rs_consume),
+
+        .busy_mask_o        (md_rs_busy_mask),
+        .rob_idx_of_o       (md_rs_rob_idx_of),
+        .fu_of_o            (md_rs_fu_of)
     );
 
     // ── squash-mask computation ──────────────────────────────
@@ -444,6 +529,13 @@ module core_ooo_top
             lsu_rs_squash_mask[i] = ex_redirect
                                     && lsu_rs_busy_mask[i]
                                     && is_younger(lsu_rs_rob_idx_of[i],
+                                                  alu_rs_issue_rob_idx,
+                                                  rob_tail);
+        end
+        for (int i = 0; i < MD_RS_DEPTH; i++) begin
+            md_rs_squash_mask[i]  = ex_redirect
+                                    && md_rs_busy_mask[i]
+                                    && is_younger(md_rs_rob_idx_of[i],
                                                   alu_rs_issue_rob_idx,
                                                   rob_tail);
         end
@@ -505,6 +597,29 @@ module core_ooo_top
         .op_done_rob_idx_o (mem_done_idx),
         .op_done_result_o  (mem_done_result),
         .busy_o             (mem_busy)
+    );
+
+    // ── MULDIV (muldiv_unit) ─────────────────────────────────
+    // Single-issue, multi-cycle. Kick fires on the cycle the MULDIV
+    // RS issues a ready op; the FU then holds busy until op_done
+    // pulses with the result on wb3. We don't gate kick on illegal
+    // here — the decoder never marks an FU_MULDIV op illegal at M2.
+    onebit_sig_e md_kick_e;
+    assign md_kick_e = onebit_sig_e'(md_rs_consume);
+
+    muldiv_unit muldiv_unit_inst (
+        .clk_i             (clk_i),
+        .reset_i           (reset_i),
+        .flush_i           (1'b0),
+        .kick_i            (md_kick_e),
+        .mul_op_i          (md_rs_issue_uop.mul_op),
+        .a_i               (md_rs_issue_rs1_val),
+        .b_i               (md_rs_issue_rs2_val),
+        .rob_idx_i         (md_rs_issue_rob_idx),
+        .op_done_o         (md_done),
+        .op_done_rob_idx_o (md_done_idx),
+        .op_done_result_o  (md_done_result),
+        .busy_o             (md_busy)
     );
 
     // ── BRANCH RECOVERY ──────────────────────────────────────

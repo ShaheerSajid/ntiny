@@ -50,13 +50,18 @@ module rs
     input  logic                        alloc_rs2_busy_i,
     input  logic [OOO_ROB_IDX_W-1:0]    alloc_rs2_tag_i,
 
-    // ── CDB wakeup (2 broadcast ports) ───────────────────────
+    // ── CDB wakeup (3 broadcast ports) ───────────────────────
+    // wb1=ALU FU, wb2=LSU FU, wb3=MULDIV FU. All three banks see
+    // every port; a slot's tag matches at most one in any cycle.
     input  logic                        wb1_en_i,
     input  logic [OOO_ROB_IDX_W-1:0]    wb1_idx_i,
     input  logic [31:0]                 wb1_result_i,
     input  logic                        wb2_en_i,
     input  logic [OOO_ROB_IDX_W-1:0]    wb2_idx_i,
     input  logic [31:0]                 wb2_result_i,
+    input  logic                        wb3_en_i,
+    input  logic [OOO_ROB_IDX_W-1:0]    wb3_idx_i,
+    input  logic [31:0]                 wb3_result_i,
 
     // ── issue (read combinationally; consume to free) ────────
     output logic                        issue_valid_o,
@@ -185,6 +190,22 @@ module rs
                         if (~entry_q[i].rs2_ready
                             && entry_q[i].rs2_tag == wb2_idx_i) begin
                             entry_q[i].rs2_value <= wb2_result_i;
+                            entry_q[i].rs2_ready <= 1'b1;
+                        end
+                    end
+                end
+            end
+            if (wb3_en_i) begin
+                for (int i = 0; i < DEPTH; i++) begin
+                    if (entry_q[i].busy) begin
+                        if (~entry_q[i].rs1_ready
+                            && entry_q[i].rs1_tag == wb3_idx_i) begin
+                            entry_q[i].rs1_value <= wb3_result_i;
+                            entry_q[i].rs1_ready <= 1'b1;
+                        end
+                        if (~entry_q[i].rs2_ready
+                            && entry_q[i].rs2_tag == wb3_idx_i) begin
+                            entry_q[i].rs2_value <= wb3_result_i;
                             entry_q[i].rs2_ready <= 1'b1;
                         end
                     end

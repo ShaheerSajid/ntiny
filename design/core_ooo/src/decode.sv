@@ -4,7 +4,8 @@
 // STORE×3, OP_I (incl. shifts), OP_R, MISC_MEM (FENCE as nop). SYSTEM
 // (ecall/ebreak/CSR) is flagged illegal for M0 and lands in M7.
 //
-// M extension lands in M2, F in M5, B in M6.
+// M2 phase B adds the M extension — funct7=0000001 in OP_R steers to
+// FU_MULDIV with the matching mul_op. F lands in M5, B in M6.
 
 import common_pkg::*;
 import core_pkg::*;
@@ -202,7 +203,16 @@ module decode
                         {7'b0100000, 3'b101}: uop_o.alu_op = SRA;
                         {7'b0000000, 3'b110}: uop_o.alu_op = OR;
                         {7'b0000000, 3'b111}: uop_o.alu_op = AND;
-                        default: uop_o.illegal = TRUE;       // M-extension lives at funct7=0000001 — M2.
+                        // M extension — funct7=0000001
+                        {7'b0000001, 3'b000}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = MUL;    end
+                        {7'b0000001, 3'b001}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = MULH;   end
+                        {7'b0000001, 3'b010}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = MULHSU; end
+                        {7'b0000001, 3'b011}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = MULHU;  end
+                        {7'b0000001, 3'b100}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = DIV;    end
+                        {7'b0000001, 3'b101}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = DIVU;   end
+                        {7'b0000001, 3'b110}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = REM;    end
+                        {7'b0000001, 3'b111}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = REMU;   end
+                        default: uop_o.illegal = TRUE;
                     endcase
                 end
 
