@@ -108,6 +108,20 @@ module rob
             tail_q  <= '0;
             count_q <= '0;
         end else begin
+            // Alloc first — same-cycle wb (e.g. nop_wb_en for CSR
+            // ops) targets `tail_q`, and alloc's `ready<=0` would
+            // otherwise NB-clobber wb's `ready<=1` (last write
+            // wins). Doing alloc first means wb lands AFTER and
+            // correctly leaves ready=1 / result=wb_result for the
+            // same-cycle self-wb path.
+            if (alloc_en_i) begin
+                entry_q[tail_q].busy   <= 1'b1;
+                entry_q[tail_q].ready  <= 1'b0;
+                entry_q[tail_q].uop    <= alloc_uop_i;
+                entry_q[tail_q].result <= '0;
+                tail_q <= tail_q + 1'b1;
+            end
+
             // CDB writeback — record result + mark ready.
             if (wb1_en_i) begin
                 entry_q[wb1_idx_i].result <= wb1_result_i;
@@ -120,15 +134,6 @@ module rob
             if (wb3_en_i) begin
                 entry_q[wb3_idx_i].result <= wb3_result_i;
                 entry_q[wb3_idx_i].ready  <= 1'b1;
-            end
-
-            // Alloc — caller gates on flush.
-            if (alloc_en_i) begin
-                entry_q[tail_q].busy   <= 1'b1;
-                entry_q[tail_q].ready  <= 1'b0;
-                entry_q[tail_q].uop    <= alloc_uop_i;
-                entry_q[tail_q].result <= '0;
-                tail_q <= tail_q + 1'b1;
             end
 
             // Commit — drain head when ready.

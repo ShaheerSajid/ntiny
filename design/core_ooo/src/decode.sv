@@ -70,6 +70,9 @@ module decode
         uop_o.is_jalr        = FALSE;
         uop_o.pred_taken     = onebit_sig_e'(pred_taken_i);
         uop_o.pred_target    = pred_target_i;
+        uop_o.csr_op         = OOO_CSR_NONE;
+        uop_o.csr_addr       = 12'b0;
+        uop_o.csr_uimm5      = 5'b0;
         uop_o.illegal        = FALSE;
 
         if (valid_i == TRUE) begin
@@ -287,9 +290,61 @@ module decode
                     uop_o.has_rd = FALSE;
                 end
 
-                CSR: begin                        // SYSTEM (ecall/ebreak/CSR) — M7
-                    uop_o.fu      = FU_NONE;
-                    uop_o.illegal = TRUE;
+                CSR: begin                        // SYSTEM (ecall/ebreak/CSR/mret) — M7
+                    // funct3 distinguishes:
+                    //   000     → ECALL / EBREAK / MRET (encoded in [31:20])
+                    //   001/010/011 → CSRRW / CSRRS / CSRRC
+                    //   101/110/111 → CSRRWI / CSRRSI / CSRRCI
+                    uop_o.fu       = FU_CSR;
+                    uop_o.csr_addr = instr_i[31:20];
+                    unique case (funct3)
+                        3'b000: begin
+                            // No rd, no rs1/rs2.
+                            uop_o.has_rd  = FALSE;
+                            uop_o.has_rs1 = FALSE;
+                            uop_o.has_rs2 = FALSE;
+                            unique case (instr_i[31:20])
+                                12'h000: begin uop_o.csr_op = OOO_CSR_NONE; /* ECALL — silent for now */ end
+                                12'h001: begin uop_o.csr_op = OOO_CSR_NONE; /* EBREAK — silent for now */ end
+                                12'h302: begin uop_o.csr_op = OOO_CSR_MRET; end
+                                default: uop_o.illegal = TRUE;
+                            endcase
+                        end
+                        3'b001: begin
+                            uop_o.csr_op  = OOO_CSR_RW;
+                            uop_o.has_rs1 = TRUE;
+                            uop_o.has_rd  = TRUE;
+                        end
+                        3'b010: begin
+                            uop_o.csr_op  = OOO_CSR_RS;
+                            uop_o.has_rs1 = TRUE;
+                            uop_o.has_rd  = TRUE;
+                        end
+                        3'b011: begin
+                            uop_o.csr_op  = OOO_CSR_RC;
+                            uop_o.has_rs1 = TRUE;
+                            uop_o.has_rd  = TRUE;
+                        end
+                        3'b101: begin
+                            uop_o.csr_op    = OOO_CSR_RWI;
+                            uop_o.csr_uimm5 = rs1;     // rs1 field = uimm5
+                            uop_o.has_rs1   = FALSE;
+                            uop_o.has_rd    = TRUE;
+                        end
+                        3'b110: begin
+                            uop_o.csr_op    = OOO_CSR_RSI;
+                            uop_o.csr_uimm5 = rs1;
+                            uop_o.has_rs1   = FALSE;
+                            uop_o.has_rd    = TRUE;
+                        end
+                        3'b111: begin
+                            uop_o.csr_op    = OOO_CSR_RCI;
+                            uop_o.csr_uimm5 = rs1;
+                            uop_o.has_rs1   = FALSE;
+                            uop_o.has_rd    = TRUE;
+                        end
+                        default: uop_o.illegal = TRUE;
+                    endcase
                 end
 
                 default: begin

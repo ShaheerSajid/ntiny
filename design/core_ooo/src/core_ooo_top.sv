@@ -204,6 +204,22 @@ module core_ooo_top
     logic [OOO_ROB_IDX_W-1:0]   md_done_idx;
     logic [31:0]                md_done_result;
 
+    // CSR (M7-minimal)
+    logic                       csr_op_en;
+    logic [31:0]                csr_rd_value;
+    logic [31:0]                csr_mtvec;
+    logic [31:0]                csr_mepc;
+    logic                       csr_mstatus_mie;
+    logic                       csr_mret_en;
+    logic                       csr_pending_q;        // serialisation guard
+    csr_uop_e                   csr_op_q;
+    logic [11:0]                csr_addr_q;
+    logic [31:0]                csr_rs1_q;
+    logic [4:0]                 csr_uimm5_q;
+    logic [OOO_ROB_IDX_W-1:0]   csr_rob_idx_q;
+    logic [4:0]                 csr_rd_q;
+    logic                       csr_has_rd_q;
+
     // Commit
     onebit_sig_e                commit_wb_wen;
     logic [4:0]                 commit_wb_rd;
@@ -258,13 +274,21 @@ module core_ooo_top
     logic                       md_unit_flush;
 
     // ── IF ───────────────────────────────────────────────────
+    // Fetch redirects come from EX (branch mispredict) or commit
+    // (MRET resumes at mepc). EX wins precedence — a mispredict
+    // older than a CSR commit would have happened first in program
+    // order; CSR is serialised so this race is degenerate, but
+    // OR-ing this way keeps the precedence explicit.
+    wire        fetch_redirect    = ex_redirect || mret_redirect;
+    wire [31:0] fetch_redirect_pc = ex_redirect ? ex_redirect_pc : mret_pc;
+
     fetch fetch_inst (
         .clk_i             (clk_i),
         .reset_i           (reset_i),
         .reset_pc_i        (reset_pc_i),
         .stall_i           (fetch_stall),
-        .redirect_i        (ex_redirect),
-        .redirect_pc_i     (ex_redirect_pc),
+        .redirect_i        (fetch_redirect),
+        .redirect_pc_i     (fetch_redirect_pc),
         .bpu_lookup_pc_o   (bpu_lookup_pc),
         .bpu_pred_valid_i  (bpu_pred_valid),
         .bpu_pred_taken_i  (bpu_pred_taken),
@@ -392,6 +416,10 @@ module core_ooo_top
     wire wants_alu_rs   = (id_uop.fu == FU_ALU)  || (id_uop.fu == FU_BRANCH);
     wire wants_lsu_rs   = (id_uop.fu == FU_LOAD) || (id_uop.fu == FU_STORE);
     wire wants_md_rs    = (id_uop.fu == FU_MULDIV);
+    wire wants_csr      = (id_uop.fu == FU_CSR);
+    // Nop path covers FU_NONE/illegal AND FU_CSR — both self-wb at
+    // dispatch so the ROB can drain to them. CSR ops then perform
+    // their R/M/W in the commit-time path below.
     wire wants_nop_path = !wants_alu_rs && !wants_lsu_rs && !wants_md_rs;
 
     // Dispatch fires when: valid uop, ROB has room, target RS has
@@ -407,11 +435,20 @@ module core_ooo_top
                              && (id_uop.fu == FU_BRANCH);
     wire   snap_stall      = is_branch_class && snap_full;
 
+    // CSR serialisation: a CSR op can only dispatch when the ROB is
+    // empty (all older ops committed); once it dispatches, NO younger
+    // op may dispatch until the CSR commits. With dispatch+commit
+    // 1-wide and at most one CSR in flight, a single pending bit
+    // suffices.
+    wire rob_empty = (rob_head == rob_tail) && !rob_full;
+
     assign dispatch_en = (id_uop.valid == TRUE)
                        && !rob_full
                        && !target_rs_full
                        && !snap_stall
-                       && !ex_redirect;
+                       && !ex_redirect
+                       && !csr_pending_q
+                       && (!wants_csr || rob_empty);
     assign dispatch_to_alu_rs = dispatch_en && wants_alu_rs;
     assign dispatch_to_lsu_rs = dispatch_en && wants_lsu_rs;
     assign dispatch_to_md_rs  = dispatch_en && wants_md_rs;
@@ -838,27 +875,108 @@ module core_ooo_top
         end
     end
 
+    // ── CSR (M7-minimal) ────────────────────────────────────
+    // Capture the CSR op's operand(s) at dispatch — by then the ROB
+    // is empty so RAT[rs1] is !busy and alloc_rs1_value reads from
+    // the arch regfile. The captured values flow into csr_unit at
+    // commit time. (state regs declared up top.)
+
+    wire is_csr_dispatch = dispatch_en && wants_csr;
+
+    always_ff @(posedge clk_i or posedge reset_i) begin
+        if (reset_i) begin
+            csr_pending_q <= 1'b0;
+            csr_op_q      <= OOO_CSR_NONE;
+            csr_addr_q    <= '0;
+            csr_rs1_q     <= '0;
+            csr_uimm5_q   <= '0;
+            csr_rob_idx_q <= '0;
+            csr_rd_q      <= '0;
+            csr_has_rd_q  <= 1'b0;
+        end else begin
+            if (is_csr_dispatch) begin
+                csr_pending_q <= 1'b1;
+                csr_op_q      <= id_uop.csr_op;
+                csr_addr_q    <= id_uop.csr_addr;
+                csr_rs1_q     <= alloc_rs1_value;
+                csr_uimm5_q   <= id_uop.csr_uimm5;
+                csr_rob_idx_q <= rob_alloc_idx;
+                csr_rd_q      <= id_uop.rd;
+                csr_has_rd_q  <= (id_uop.has_rd == TRUE);
+            end else if (commit_consume && rob_commit_uop.fu == FU_CSR) begin
+                csr_pending_q <= 1'b0;
+            end
+        end
+    end
+
+    // The serialisation guarantees that when the CSR op is at ROB
+    // head, no other op can be committing this cycle — so it's safe
+    // to drive csr_unit unconditionally from the held captures.
+    assign csr_op_en   = commit_consume
+                         && rob_commit_uop.fu == FU_CSR
+                         && rob_commit_uop.illegal == FALSE
+                         && csr_op_q != OOO_CSR_NONE
+                         && csr_op_q != OOO_CSR_MRET;
+    assign csr_mret_en = commit_consume
+                         && rob_commit_uop.fu == FU_CSR
+                         && rob_commit_uop.illegal == FALSE
+                         && csr_op_q == OOO_CSR_MRET;
+
+    csr_unit csr_unit_inst (
+        .clk_i          (clk_i),
+        .reset_i        (reset_i),
+        .op_en_i        (csr_op_en),
+        .op_i           (csr_op_q),
+        .csr_addr_i     (csr_addr_q),
+        .rs1_value_i    (csr_rs1_q),
+        .uimm5_i        (csr_uimm5_q),
+        .rd_value_o     (csr_rd_value),
+        // M7-full stubs (traps not implemented yet)
+        .trap_take_i    (1'b0),
+        .trap_pc_i      ('0),
+        .trap_cause_i   ('0),
+        .trap_tval_i    ('0),
+        .mret_en_i      (csr_mret_en),
+        .mtvec_o        (csr_mtvec),
+        .mepc_o         (csr_mepc),
+        .mstatus_mie_o  (csr_mstatus_mie)
+    );
+
     // ── COMMIT ───────────────────────────────────────────────
+    // MRET redirects fetch to mepc the same cycle it commits.
+    wire mret_redirect    = csr_mret_en;
+    wire [31:0] mret_pc   = csr_mepc;
+
     assign commit_consume = rob_commit_valid;
     always_comb begin
-        if (rob_commit_valid && rob_commit_uop.has_rd == TRUE
-            && rob_commit_uop.illegal == FALSE) begin
-            commit_wb_wen  = TRUE;
-            commit_wb_rd   = rob_commit_uop.rd;
-            commit_wb_data = rob_commit_result;
-        end else begin
-            commit_wb_wen  = FALSE;
-            commit_wb_rd   = 5'd0;
-            commit_wb_data = 32'b0;
+        commit_wb_wen  = FALSE;
+        commit_wb_rd   = 5'd0;
+        commit_wb_data = 32'b0;
+        if (rob_commit_valid && rob_commit_uop.illegal == FALSE) begin
+            if (rob_commit_uop.fu == FU_CSR) begin
+                // CSR R/M/W: rd ← old CSR value (only when has_rd).
+                if (csr_has_rd_q) begin
+                    commit_wb_wen  = TRUE;
+                    commit_wb_rd   = csr_rd_q;
+                    commit_wb_data = csr_rd_value;
+                end
+            end else if (rob_commit_uop.has_rd == TRUE) begin
+                commit_wb_wen  = TRUE;
+                commit_wb_rd   = rob_commit_uop.rd;
+                commit_wb_data = rob_commit_result;
+            end
         end
     end
 
     // ── FETCH STALL ──────────────────────────────────────────
-    // Stall fetch when ROB is full, the target RS bank is full, or
-    // a branch-class uop hits an exhausted snapshot ring. The bank
-    // check captures FU_NONE/illegal too (those go to neither bank
-    // but still need a ROB slot).
-    assign fetch_stall = rob_full || target_rs_full || snap_stall;
+    // Stall fetch whenever dispatch can't fire — otherwise the
+    // current in-flight rvalid instr is dropped when the next imem
+    // req advances the PC.
+    assign fetch_stall = rob_full
+                       || target_rs_full
+                       || snap_stall
+                       || csr_pending_q
+                       || (wants_csr && !rob_empty);
 
     // ── lint sink ────────────────────────────────────────────
     wire _unused = &{1'b0, ext_itr_i, s_ext_itr_i, timer_itr_i, soft_itr_i,

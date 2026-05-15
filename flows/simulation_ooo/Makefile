@@ -17,7 +17,7 @@ TEST ?= test_basic
 # rv32im is a strict superset of rv32i; the existing tests don't
 # use M-ext mnemonics, so it's safe as the default. Per-test
 # override: `make MARCH=rv32i ...`.
-MARCH ?= rv32im_zba_zbb_zbc_zbs_zicond
+MARCH ?= rv32im_zicsr_zba_zbb_zbc_zbs_zicond
 
 # ── verilator config ──────────────────────────────────────────
 VLT_WARN = \
@@ -52,6 +52,7 @@ RTL_SRCS = \
     ../../design/core_ooo/src/muldiv_unit.sv \
     ../../design/core_ooo/src/bpu_ooo.sv \
     ../../design/core_ooo/src/lsq.sv \
+    ../../design/core_ooo/src/csr_unit.sv \
     ../../design/core_ooo/src/rat.sv \
     ../../design/core_ooo/src/rs.sv \
     ../../design/core_ooo/src/rob.sv \
@@ -59,7 +60,7 @@ RTL_SRCS = \
     tb_ooo.sv
 
 # ── test battery (M0 sanity + M2 OoO/M-ext + M3 recovery) ─────
-TESTS = test_basic test_loop test_jalr test_subword test_imm_edges test_dep_chain test_ooo_stress test_muldiv test_misp_recovery test_bext
+TESTS = test_basic test_loop test_jalr test_subword test_imm_edges test_dep_chain test_ooo_stress test_muldiv test_misp_recovery test_bext test_csr
 
 # ── targets ───────────────────────────────────────────────────
 .PHONY: all build sw run test-all clean

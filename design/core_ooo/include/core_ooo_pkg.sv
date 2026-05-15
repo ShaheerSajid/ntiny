@@ -23,17 +23,31 @@ package core_ooo_pkg;
     localparam int OOO_FP_RS_DEPTH  = 4;
 
     // ── FU type tag ───────────────────────────────────────────
-    // Steers a dispatched uop to the correct RS/FU. Grows with M2/M5/M6.
+    // Steers a dispatched uop to the correct RS/FU. Grows with M2/M5/M6/M7.
     typedef enum logic [2:0] {
         FU_ALU,
         FU_BRANCH,
         FU_MULDIV,
         FU_LOAD,
         FU_STORE,
-        FU_CSR,
+        FU_CSR,        // M7 — serializing, handled at commit
         FU_FP,
         FU_NONE
     } fu_type_e;
+
+    // ── CSR op type (M7) ──────────────────────────────────────
+    // Named csr_uop_e (not csr_op_e) to avoid clashing with
+    // core_pkg::csr_op_e which the OoO uop ignores entirely.
+    typedef enum logic [2:0] {
+        OOO_CSR_NONE,
+        OOO_CSR_RW,     // CSRRW : rd ← CSR ; CSR ← rs1
+        OOO_CSR_RS,     // CSRRS : rd ← CSR ; CSR ← CSR | rs1
+        OOO_CSR_RC,     // CSRRC : rd ← CSR ; CSR ← CSR & ~rs1
+        OOO_CSR_RWI,    // CSRRWI: rd ← CSR ; CSR ← uimm5
+        OOO_CSR_RSI,    // CSRRSI: rd ← CSR ; CSR ← CSR | uimm5
+        OOO_CSR_RCI,    // CSRRCI: rd ← CSR ; CSR ← CSR & ~uimm5
+        OOO_CSR_MRET    // MRET  : PC ← mepc; mstatus.MIE ← MPIE
+    } csr_uop_e;
 
     // ── decoded micro-op ──────────────────────────────────────
     typedef struct packed {
@@ -73,6 +87,14 @@ package core_ooo_pkg;
         // the actual outcome to compute mispredict.
         onebit_sig_e       pred_taken;
         logic [31:0]       pred_target;
+
+        // CSR fields (M7). For FU_CSR uops:
+        //   csr_op    — which form (RW/RS/RC/imm-variants, or MRET)
+        //   csr_addr  — 12-bit CSR index (mstatus, mtvec, ...)
+        //   csr_uimm5 — immediate variant's uimm (rs1 field as data)
+        csr_uop_e          csr_op;
+        logic [11:0]       csr_addr;
+        logic [4:0]        csr_uimm5;
 
         onebit_sig_e       valid;
         onebit_sig_e       illegal;
