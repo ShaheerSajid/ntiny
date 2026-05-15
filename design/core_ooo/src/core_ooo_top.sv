@@ -41,6 +41,10 @@ module core_ooo_top
 (
     input  logic            clk_i,
     input  logic            reset_i,
+    // Reset PC. For the directed-test battery this stays at 0;
+    // RISCOF needs it set to wherever the suite's link.ld places
+    // .text.init (typically 0x8000_0000). Driven by the testbench.
+    input  logic [31:0]     reset_pc_i,
 
     mem_bus.master          imem_port,
     mem_bus.master          dmem_port,
@@ -86,7 +90,6 @@ module core_ooo_top
     assign am_do_o     = 32'b0;
     assign fence_i_o   = 1'b0;
 
-    localparam logic [31:0] RESET_PC = 32'h0000_0000;
     localparam int ALU_RS_DEPTH = OOO_ALU_RS_DEPTH;     // 4
     localparam int LSU_RS_DEPTH = 2;                    // small for M2-A
     localparam int MD_RS_DEPTH  = OOO_MD_RS_DEPTH;      // 2
@@ -229,7 +232,7 @@ module core_ooo_top
     fetch fetch_inst (
         .clk_i         (clk_i),
         .reset_i       (reset_i),
-        .reset_pc_i    (RESET_PC),
+        .reset_pc_i    (reset_pc_i),
         .stall_i       (fetch_stall),
         .redirect_i    (ex_redirect),
         .redirect_pc_i (ex_redirect_pc),

@@ -51,6 +51,8 @@ software/linux/ntiny.dtb
 verification/riscof/riscv-arch-test/
 verification/riscof/riscof_work/
 verification/riscof/*/__pycache__/
+verification/riscof_ooo/riscof_work/
+verification/riscof_ooo/*/__pycache__/
 
 # Claude Code
 .claude/
