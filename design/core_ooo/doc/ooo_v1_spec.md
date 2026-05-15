@@ -1,7 +1,7 @@
 # OoO core v1 — design spec
 
-Date: 2026-05-11
-Status: M0 — skeleton
+Date: 2026-05-11 (initial), 2026-05-16 (status refresh)
+Status: M0–M4, M6, M7-minimal landed. M5 (F) deferred to v2.
 
 This document is the long-running spec for the ntiny out-of-order core.
 It mirrors the role `docs/bus_revamp_plan.md` plays for the Tier-1 bus
@@ -226,13 +226,19 @@ probe confirms RAT/ROB/LSQ are restored precisely.
 **Gate:** RISCOF rv32im (memory-heavy) green; store→load forwarding
 unit test passes.
 
-### M5 — F extension
-- FP RAT + FP regfile.
-- FP RS with FP FUs (instantiate PakFPU modules).
-- FP loads/stores share LSQ.
-- May bump CDB to 2-wide if FPU contention shows up in IPC traces.
+### M5 — F extension (DEFERRED to v2)
+- Originally scoped: FP RAT + FP regfile, FP RS bank, FP FUs
+  instantiating PakFPU, F loads/stores sharing LSQ, possibly a
+  wider CDB to absorb FPU contention.
+- Status (2026-05-16): not implemented. The OoO core supports
+  RV32IM + Zicsr + Zba/Zbb/Zbc/Zbs + Zicond — a substantial subset
+  for verification and synth. F adds 30+ instructions, a second
+  regfile + RAT + RS bank, and crossover ops between int and FP
+  domains — significant scope that the v1 directed battery + RISCOF
+  rv32im suite don't depend on. Punted to v2 along with the wider
+  CDB study and double-precision (D) extension.
 
-**Gate:** RISCOF rv32imf green; a few FP kernels run.
+**Gate (when revisited):** RISCOF rv32imf green; a few FP kernels run.
 
 ### M6 — B extension
 - Decoder extensions.
