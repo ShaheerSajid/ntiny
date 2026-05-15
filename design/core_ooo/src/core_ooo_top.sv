@@ -16,7 +16,7 @@
 //
 // Three RS banks:
 //   alu_rs    (FU_ALU + FU_BRANCH)        → execute.sv (ALU FU)
-//   lsu_rs    (FU_LOAD + FU_STORE)        → memunit.sv
+//   lsq       (FU_LOAD + FU_STORE)        → memunit.sv (M4)
 //   muldiv_rs (FU_MULDIV)                 → muldiv_unit.sv
 //
 // M3-A — branch recovery moves from a wholesale "selective flush" of
@@ -98,7 +98,7 @@ module core_ooo_top
     assign fence_i_o   = 1'b0;
 
     localparam int ALU_RS_DEPTH = OOO_ALU_RS_DEPTH;     // 4
-    localparam int LSU_RS_DEPTH = 2;                    // small for M2-A
+    // (LSU RS retired in M4 — LSQ takes over; depth declared next to nets)
     localparam int MD_RS_DEPTH  = OOO_MD_RS_DEPTH;      // 2
 
     // ── nets ─────────────────────────────────────────────────
@@ -152,17 +152,21 @@ module core_ooo_top
     fu_type_e                             alu_rs_fu_of      [0:ALU_RS_DEPTH-1];
     logic [ALU_RS_DEPTH-1:0]              alu_rs_squash_mask;
 
-    // LSU RS
-    logic                                 lsu_rs_full;
-    logic                                 lsu_rs_issue_valid;
-    uop_t                                 lsu_rs_issue_uop;
-    logic [OOO_ROB_IDX_W-1:0]             lsu_rs_issue_rob_idx;
-    logic [31:0]                          lsu_rs_issue_rs1_val, lsu_rs_issue_rs2_val;
-    logic [LSU_RS_DEPTH-1:0]              lsu_rs_busy_mask;
-    logic [OOO_ROB_IDX_W-1:0]             lsu_rs_rob_idx_of [0:LSU_RS_DEPTH-1];
-    fu_type_e                             lsu_rs_fu_of      [0:LSU_RS_DEPTH-1];
-    logic [LSU_RS_DEPTH-1:0]              lsu_rs_squash_mask;
-    logic [LSU_RS_DEPTH-1:0]              lsu_rs_block_mask;
+    // LSQ (M4 — replaces LSU RS)
+    logic                                 lsq_full;
+    onebit_sig_e                          lsq_fwd_en;
+    logic [OOO_ROB_IDX_W-1:0]             lsq_fwd_idx;
+    logic [31:0]                          lsq_fwd_result;
+    onebit_sig_e                          lsq_mem_kick;
+    fu_type_e                             lsq_mem_fu;
+    logic [31:0]                          lsq_mem_addr;
+    logic [31:0]                          lsq_mem_store_data;
+    load_store_width_e                    lsq_mem_width;
+    onebit_sig_e                          lsq_mem_unsigned;
+    logic [OOO_ROB_IDX_W-1:0]             lsq_mem_rob_idx;
+    // Per-entry exposure for branch-squash mask.
+    localparam int LSQ_DEPTH = 4;
+    logic [LSQ_DEPTH-1:0]                 lsq_squash_mask;
 
     // MULDIV RS
     logic                                 md_rs_full;
@@ -343,10 +347,10 @@ module core_ooo_top
     // capture tag for later wakeup. Now feeds whichever RS bank.
     // wb1=ALU, wb2=LSU, wb3=MULDIV.
     wire wb1_to_rs1 = (alu_wb_en == TRUE) && (alu_wb_idx == rat_rs1_idx);
-    wire wb2_to_rs1 = (mem_done  == TRUE) && (mem_done_idx == rat_rs1_idx);
+    wire wb2_to_rs1 = wb2_en_combined && (wb2_idx_combined == rat_rs1_idx);
     wire wb3_to_rs1 = (md_done   == TRUE) && (md_done_idx  == rat_rs1_idx);
     wire wb1_to_rs2 = (alu_wb_en == TRUE) && (alu_wb_idx == rat_rs2_idx);
-    wire wb2_to_rs2 = (mem_done  == TRUE) && (mem_done_idx == rat_rs2_idx);
+    wire wb2_to_rs2 = wb2_en_combined && (wb2_idx_combined == rat_rs2_idx);
     wire wb3_to_rs2 = (md_done   == TRUE) && (md_done_idx  == rat_rs2_idx);
 
     wire rs1_resolved_now = rat_rs1_busy
@@ -363,7 +367,7 @@ module core_ooo_top
         if (rat_rs1_busy) begin
             if      (rob_peek1_ready) alloc_rs1_value = rob_peek1_result;
             else if (wb1_to_rs1)      alloc_rs1_value = alu_wb_result;
-            else if (wb2_to_rs1)      alloc_rs1_value = mem_done_result;
+            else if (wb2_to_rs1)      alloc_rs1_value = wb2_result_combined;
             else if (wb3_to_rs1)      alloc_rs1_value = md_done_result;
             else                       alloc_rs1_value = 32'b0;
         end else begin
@@ -372,7 +376,7 @@ module core_ooo_top
         if (rat_rs2_busy) begin
             if      (rob_peek2_ready) alloc_rs2_value = rob_peek2_result;
             else if (wb1_to_rs2)      alloc_rs2_value = alu_wb_result;
-            else if (wb2_to_rs2)      alloc_rs2_value = mem_done_result;
+            else if (wb2_to_rs2)      alloc_rs2_value = wb2_result_combined;
             else if (wb3_to_rs2)      alloc_rs2_value = md_done_result;
             else                       alloc_rs2_value = 32'b0;
         end else begin
@@ -394,7 +398,7 @@ module core_ooo_top
     // room (or we're on the nop path), no snapshot stall, and we're
     // not redirecting.
     wire target_rs_full = (wants_alu_rs && alu_rs_full)
-                        || (wants_lsu_rs && lsu_rs_full)
+                        || (wants_lsu_rs && lsq_full)
                         || (wants_md_rs  && md_rs_full);
 
     // Snapshot stall: a branch-class uop can't dispatch when the
@@ -446,9 +450,9 @@ module core_ooo_top
         .wb1_en_i           (rob_wb1_en),
         .wb1_idx_i          (rob_wb1_idx),
         .wb1_result_i       (rob_wb1_result),
-        .wb2_en_i           (mem_done == TRUE),
-        .wb2_idx_i          (mem_done_idx),
-        .wb2_result_i       (mem_done_result),
+        .wb2_en_i           (wb2_en_combined),
+        .wb2_idx_i          (wb2_idx_combined),
+        .wb2_result_i       (wb2_result_combined),
         .wb3_en_i           (md_done  == TRUE),
         .wb3_idx_i          (md_done_idx),
         .wb3_result_i       (md_done_result),
@@ -485,9 +489,9 @@ module core_ooo_top
         .wb1_en_i           (alu_wb_en == TRUE),
         .wb1_idx_i          (alu_wb_idx),
         .wb1_result_i       (alu_wb_result),
-        .wb2_en_i           (mem_done  == TRUE),
-        .wb2_idx_i          (mem_done_idx),
-        .wb2_result_i       (mem_done_result),
+        .wb2_en_i           (wb2_en_combined),
+        .wb2_idx_i          (wb2_idx_combined),
+        .wb2_result_i       (wb2_result_combined),
         .wb3_en_i           (md_done   == TRUE),
         .wb3_idx_i          (md_done_idx),
         .wb3_result_i       (md_done_result),
@@ -504,33 +508,37 @@ module core_ooo_top
         .fu_of_o            (alu_rs_fu_of)
     );
 
-    // ── LSU RS ───────────────────────────────────────────────
-    // Serialize all LSU ops at the ROB head:
-    //   * STOREs must wait for head so speculation can't escape to
-    //     memory (no store buffer yet).
-    //   * LOADs must wait for head so they observe older stores in
-    //     program order (no memory disambiguation yet — proper LSQ
-    //     comes in M4).
-    // The RS still does operand wakeup; only the issue-ready gate
-    // is per-slot here.
-    always_comb begin
-        for (int i = 0; i < LSU_RS_DEPTH; i++) begin
-            lsu_rs_block_mask[i] = lsu_rs_busy_mask[i]
-                                   && (lsu_rs_rob_idx_of[i] != rob_head);
-        end
-    end
+    // ── LSQ (M4) ─────────────────────────────────────────────
+    // Real load-store queue. Replaces the M2-A head-gated LSU RS:
+    //   * STOREs still memory-write at commit (LSQ holds them
+    //     from dispatch; memunit kicked when rob_idx == ROB head).
+    //   * LOADs issue OoO once their address resolves AND every
+    //     older store has a known address. If an older store's
+    //     addr matches, forward the store's data (or wait for it).
+    // Forwarded loads bypass memunit entirely — their result goes
+    // straight to the CDB via lsq_fwd_*, muxed onto wb2 below.
 
-    wire lsu_rs_consume = lsu_rs_issue_valid && (mem_busy == FALSE);
+    // Combined wb2 (memunit completion OR LSQ forwarding). At most
+    // one of these fires per cycle (forwarding self-gates on
+    // mem_done inside lsq.sv).
+    wire                      wb2_en_combined     = (mem_done == TRUE)
+                                                    || (lsq_fwd_en == TRUE);
+    wire [OOO_ROB_IDX_W-1:0]  wb2_idx_combined    = (mem_done == TRUE)
+                                                    ? mem_done_idx
+                                                    : lsq_fwd_idx;
+    wire [31:0]               wb2_result_combined = (mem_done == TRUE)
+                                                    ? mem_done_result
+                                                    : lsq_fwd_result;
 
-    rs #(.DEPTH(LSU_RS_DEPTH)) lsu_rs_inst (
+    lsq #(.DEPTH(LSQ_DEPTH)) lsq_inst (
         .clk_i              (clk_i),
         .reset_i            (reset_i),
-        .flush_all_i        (1'b0),
-        .squash_mask_i      (lsu_rs_squash_mask),
-        .block_issue_mask_i (lsu_rs_block_mask),
+        .squash_en_i        (ex_redirect),
+        .flush_after_idx_i  (alu_rs_issue_rob_idx),
+        .flush_tail_i       (rob_tail),
 
         .alloc_en_i         (dispatch_to_lsu_rs),
-        .full_o             (lsu_rs_full),
+        .full_o             (lsq_full),
         .alloc_uop_i        (id_uop),
         .alloc_rob_idx_i    (rob_alloc_idx),
         .alloc_rs1_value_i  (alloc_rs1_value),
@@ -543,23 +551,30 @@ module core_ooo_top
         .wb1_en_i           (alu_wb_en == TRUE),
         .wb1_idx_i          (alu_wb_idx),
         .wb1_result_i       (alu_wb_result),
-        .wb2_en_i           (mem_done  == TRUE),
-        .wb2_idx_i          (mem_done_idx),
-        .wb2_result_i       (mem_done_result),
+        .wb2_en_i           (wb2_en_combined),
+        .wb2_idx_i          (wb2_idx_combined),
+        .wb2_result_i       (wb2_result_combined),
         .wb3_en_i           (md_done   == TRUE),
         .wb3_idx_i          (md_done_idx),
         .wb3_result_i       (md_done_result),
 
-        .issue_valid_o      (lsu_rs_issue_valid),
-        .issue_uop_o        (lsu_rs_issue_uop),
-        .issue_rob_idx_o    (lsu_rs_issue_rob_idx),
-        .issue_rs1_value_o  (lsu_rs_issue_rs1_val),
-        .issue_rs2_value_o  (lsu_rs_issue_rs2_val),
-        .issue_consume_i    (lsu_rs_consume),
+        .rob_head_idx_i     (rob_head),
 
-        .busy_mask_o        (lsu_rs_busy_mask),
-        .rob_idx_of_o       (lsu_rs_rob_idx_of),
-        .fu_of_o            (lsu_rs_fu_of)
+        .mem_kick_o         (lsq_mem_kick),
+        .mem_fu_o           (lsq_mem_fu),
+        .mem_addr_o         (lsq_mem_addr),
+        .mem_store_data_o   (lsq_mem_store_data),
+        .mem_width_o        (lsq_mem_width),
+        .mem_unsigned_o     (lsq_mem_unsigned),
+        .mem_rob_idx_o      (lsq_mem_rob_idx),
+        .mem_busy_i         (mem_busy),
+        .mem_done_i         (mem_done),
+        .mem_done_idx_i     (mem_done_idx),
+        .mem_done_result_i  (mem_done_result),
+
+        .fwd_en_o           (lsq_fwd_en),
+        .fwd_idx_o          (lsq_fwd_idx),
+        .fwd_result_o       (lsq_fwd_result)
     );
 
     // ── MULDIV RS ────────────────────────────────────────────
@@ -589,9 +604,9 @@ module core_ooo_top
         .wb1_en_i           (alu_wb_en == TRUE),
         .wb1_idx_i          (alu_wb_idx),
         .wb1_result_i       (alu_wb_result),
-        .wb2_en_i           (mem_done  == TRUE),
-        .wb2_idx_i          (mem_done_idx),
-        .wb2_result_i       (mem_done_result),
+        .wb2_en_i           (wb2_en_combined),
+        .wb2_idx_i          (wb2_idx_combined),
+        .wb2_result_i       (wb2_result_combined),
         .wb3_en_i           (md_done   == TRUE),
         .wb3_idx_i          (md_done_idx),
         .wb3_result_i       (md_done_result),
@@ -633,13 +648,6 @@ module core_ooo_top
                                                   alu_rs_issue_rob_idx,
                                                   rob_tail);
         end
-        for (int i = 0; i < LSU_RS_DEPTH; i++) begin
-            lsu_rs_squash_mask[i] = ex_redirect
-                                    && lsu_rs_busy_mask[i]
-                                    && is_younger(lsu_rs_rob_idx_of[i],
-                                                  alu_rs_issue_rob_idx,
-                                                  rob_tail);
-        end
         for (int i = 0; i < MD_RS_DEPTH; i++) begin
             md_rs_squash_mask[i]  = ex_redirect
                                     && md_rs_busy_mask[i]
@@ -647,6 +655,8 @@ module core_ooo_top
                                                   alu_rs_issue_rob_idx,
                                                   rob_tail);
         end
+        // LSQ computes its own squash mask internally from
+        // squash_en + flush_after_idx + flush_tail.
     end
 
     // ── EX (ALU FU) ──────────────────────────────────────────
@@ -692,29 +702,23 @@ module core_ooo_top
     assign bpu_update_is_uncond = ex_branch_is_uncond;
 
     // ── LSU (memunit) ────────────────────────────────────────
-    // LSU computes its own address gen from the LSU RS-issued op
-    // (independent of the ALU FU which now only handles ALU/branch).
-    wire [31:0] lsu_addr       = lsu_rs_issue_rs1_val + lsu_rs_issue_uop.alu_imm;
-    wire [31:0] lsu_store_data = lsu_rs_issue_rs2_val;
-
-    onebit_sig_e lsu_kick_e;
-    assign lsu_kick_e = onebit_sig_e'(lsu_rs_consume
-                                       && lsu_rs_issue_uop.illegal == FALSE);
-
-    assign ex_mem_addr   = lsu_addr;
-    assign ex_store_data = lsu_store_data;
+    // Memunit is driven by the LSQ now. The LSQ has already done
+    // address gen + data-source selection internally; we just
+    // feed memunit the pre-computed signals.
+    assign ex_mem_addr   = lsq_mem_addr;
+    assign ex_store_data = lsq_mem_store_data;
 
     memunit memunit_inst (
         .clk_i             (clk_i),
         .reset_i           (reset_i),
         .flush_i           (1'b0),
-        .kick_i            (lsu_kick_e),
-        .fu_i              (lsu_rs_issue_uop.fu),
-        .addr_i            (lsu_addr),
-        .store_data_i      (lsu_store_data),
-        .width_i           (lsu_rs_issue_uop.ls_width),
-        .mem_unsigned_i    (lsu_rs_issue_uop.mem_unsigned),
-        .rob_idx_i         (lsu_rs_issue_rob_idx),
+        .kick_i            (lsq_mem_kick),
+        .fu_i              (lsq_mem_fu),
+        .addr_i            (lsq_mem_addr),
+        .store_data_i      (lsq_mem_store_data),
+        .width_i           (lsq_mem_width),
+        .mem_unsigned_i    (lsq_mem_unsigned),
+        .rob_idx_i         (lsq_mem_rob_idx),
         .dmem_port         (dmem_port),
         .op_done_o         (mem_done),
         .op_done_rob_idx_o (mem_done_idx),

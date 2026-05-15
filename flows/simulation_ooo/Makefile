@@ -51,6 +51,7 @@ RTL_SRCS = \
     ../../design/core_ooo/src/memunit.sv \
     ../../design/core_ooo/src/muldiv_unit.sv \
     ../../design/core_ooo/src/bpu_ooo.sv \
+    ../../design/core_ooo/src/lsq.sv \
     ../../design/core_ooo/src/rat.sv \
     ../../design/core_ooo/src/rs.sv \
     ../../design/core_ooo/src/rob.sv \
