@@ -16,6 +16,9 @@ module decode
     input  logic [31:0]     instr_i,
     input  logic [31:0]     pc_i,
     input  onebit_sig_e     valid_i,
+    // BPU prediction stamped on this fetch (M3-B).
+    input  logic            pred_taken_i,
+    input  logic [31:0]     pred_target_i,
     output uop_t            uop_o
 );
 
@@ -61,6 +64,8 @@ module decode
         uop_o.is_branch      = FALSE;
         uop_o.is_jump        = FALSE;
         uop_o.is_jalr        = FALSE;
+        uop_o.pred_taken     = onebit_sig_e'(pred_taken_i);
+        uop_o.pred_target    = pred_target_i;
         uop_o.illegal        = FALSE;
 
         if (valid_i == TRUE) begin

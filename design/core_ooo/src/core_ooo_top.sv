@@ -1,4 +1,4 @@
-// OoO core v1 — top (M3 phase A pipeline)
+// OoO core v1 — top (M3 phase B pipeline)
 //
 // 5 logical stages:
 //
@@ -30,8 +30,15 @@
 // mispredicted branch (memunit is safe via its head-gating; muldiv
 // has no such gate).
 //
-// Next: M3-B — 2-bit BHT predictor in fetch (we currently
-// predict-not-taken implicitly).
+// M3-B — BTB-only BPU. Each fetch cycle the BTB is consulted at
+// pc_q; on hit, fetch redirects to the predicted target and stamps
+// the in-flight uop with {pred_taken, pred_target}. EX compares
+// against the actual outcome; mispredict triggers ex_redirect (and
+// thus the existing snap_restore + ROB squash + muldiv flush
+// machinery from M3-A). BTB is updated on every TAKEN resolved
+// branch.
+//
+// Next: M4 — real LSQ (speculative loads + commit-time stores).
 
 import common_pkg::*;
 import core_pkg::*;
@@ -99,6 +106,18 @@ module core_ooo_top
     logic [31:0]   if_instr;
     logic [31:0]   if_pc;
     onebit_sig_e   if_valid;
+    logic          if_pred_taken;
+    logic [31:0]   if_pred_target;
+
+    // BPU
+    logic [31:0]   bpu_lookup_pc;
+    logic          bpu_pred_valid;
+    logic          bpu_pred_taken;
+    logic [31:0]   bpu_pred_target;
+    logic          bpu_update_en;
+    logic [31:0]   bpu_update_pc;
+    logic [31:0]   bpu_update_target;
+    logic          bpu_update_is_uncond;
 
     // Decode
     uop_t          id_uop;
@@ -164,6 +183,12 @@ module core_ooo_top
     logic [31:0]                ex_mem_addr, ex_store_data;
     logic                       ex_redirect;
     logic [31:0]                ex_redirect_pc;
+    // EX-side branch resolution (drives BPU update + ROB tracking)
+    logic                       ex_branch_resolved;
+    logic [31:0]                ex_branch_pc;
+    logic                       ex_branch_actual_taken;
+    logic [31:0]                ex_branch_actual_target;
+    logic                       ex_branch_is_uncond;
 
     onebit_sig_e                mem_busy;
     onebit_sig_e                mem_done;
@@ -230,24 +255,46 @@ module core_ooo_top
 
     // ── IF ───────────────────────────────────────────────────
     fetch fetch_inst (
-        .clk_i         (clk_i),
-        .reset_i       (reset_i),
-        .reset_pc_i    (reset_pc_i),
-        .stall_i       (fetch_stall),
-        .redirect_i    (ex_redirect),
-        .redirect_pc_i (ex_redirect_pc),
-        .imem_port     (imem_port),
-        .instr_o       (if_instr),
-        .pc_o          (if_pc),
-        .valid_o       (if_valid)
+        .clk_i             (clk_i),
+        .reset_i           (reset_i),
+        .reset_pc_i        (reset_pc_i),
+        .stall_i           (fetch_stall),
+        .redirect_i        (ex_redirect),
+        .redirect_pc_i     (ex_redirect_pc),
+        .bpu_lookup_pc_o   (bpu_lookup_pc),
+        .bpu_pred_valid_i  (bpu_pred_valid),
+        .bpu_pred_taken_i  (bpu_pred_taken),
+        .bpu_pred_target_i (bpu_pred_target),
+        .imem_port         (imem_port),
+        .instr_o           (if_instr),
+        .pc_o              (if_pc),
+        .valid_o           (if_valid),
+        .pred_taken_o      (if_pred_taken),
+        .pred_target_o     (if_pred_target)
+    );
+
+    // ── BPU (M3-B) ───────────────────────────────────────────
+    bpu_ooo bpu_inst (
+        .clk_i              (clk_i),
+        .reset_i            (reset_i),
+        .lookup_pc_i        (bpu_lookup_pc),
+        .pred_valid_o       (bpu_pred_valid),
+        .pred_taken_o       (bpu_pred_taken),
+        .pred_target_o      (bpu_pred_target),
+        .update_en_i        (bpu_update_en),
+        .update_pc_i        (bpu_update_pc),
+        .update_target_i    (bpu_update_target),
+        .update_is_uncond_i (bpu_update_is_uncond)
     );
 
     // ── DECODE ───────────────────────────────────────────────
     decode decode_inst (
-        .instr_i (if_instr),
-        .pc_i    (if_pc),
-        .valid_i (if_valid),
-        .uop_o   (id_uop)
+        .instr_i       (if_instr),
+        .pc_i          (if_pc),
+        .valid_i       (if_valid),
+        .pred_taken_i  (if_pred_taken),
+        .pred_target_i (if_pred_target),
+        .uop_o         (id_uop)
     );
 
     // ── RAT ──────────────────────────────────────────────────
@@ -610,24 +657,39 @@ module core_ooo_top
     logic [31:0] ex_store_data_unused;
 
     execute execute_inst (
-        .clk_i          (clk_i),
-        .reset_i        (reset_i),
-        .stall_i        (1'b0),
-        .flush_i        (1'b0),
-        .uop_i          (alu_rs_issue_uop),
-        .rs1_val_i      (alu_rs_issue_rs1_val),
-        .rs2_val_i      (alu_rs_issue_rs2_val),
-        .issue_idx_i    (alu_rs_issue_rob_idx),
-        .issue_i        (alu_issue_e),
-        .alu_wb_en_o    (alu_wb_en),
-        .alu_wb_idx_o   (alu_wb_idx),
-        .alu_wb_result_o(alu_wb_result),
-        .alu_busy_o     (ex_alu_busy),
-        .mem_addr_o     (ex_mem_addr_unused),
-        .store_data_o   (ex_store_data_unused),
-        .redirect_o     (ex_redirect),
-        .redirect_pc_o  (ex_redirect_pc)
+        .clk_i                  (clk_i),
+        .reset_i                (reset_i),
+        .stall_i                (1'b0),
+        .flush_i                (1'b0),
+        .uop_i                  (alu_rs_issue_uop),
+        .rs1_val_i              (alu_rs_issue_rs1_val),
+        .rs2_val_i              (alu_rs_issue_rs2_val),
+        .issue_idx_i            (alu_rs_issue_rob_idx),
+        .issue_i                (alu_issue_e),
+        .alu_wb_en_o            (alu_wb_en),
+        .alu_wb_idx_o           (alu_wb_idx),
+        .alu_wb_result_o        (alu_wb_result),
+        .alu_busy_o             (ex_alu_busy),
+        .mem_addr_o             (ex_mem_addr_unused),
+        .store_data_o           (ex_store_data_unused),
+        .redirect_o             (ex_redirect),
+        .redirect_pc_o          (ex_redirect_pc),
+        .branch_resolved_o      (ex_branch_resolved),
+        .branch_pc_o            (ex_branch_pc),
+        .branch_actual_taken_o  (ex_branch_actual_taken),
+        .branch_actual_target_o (ex_branch_actual_target),
+        .branch_is_uncond_o     (ex_branch_is_uncond)
     );
+
+    // BPU update: every TAKEN resolved branch refreshes its BTB
+    // entry (allocates on first taken, updates target on JALR
+    // dynamic targets). NT outcomes don't allocate — they fall
+    // through fine on a future BTB miss.
+    assign bpu_update_en        = ex_branch_resolved
+                                  && ex_branch_actual_taken;
+    assign bpu_update_pc        = ex_branch_pc;
+    assign bpu_update_target    = ex_branch_actual_target;
+    assign bpu_update_is_uncond = ex_branch_is_uncond;
 
     // ── LSU (memunit) ────────────────────────────────────────
     // LSU computes its own address gen from the LSU RS-issued op

@@ -68,6 +68,12 @@ package core_ooo_pkg;
         onebit_sig_e       is_jump;      // JAL — target = pc + br_imm
         onebit_sig_e       is_jalr;      // JALR — target = (rs1 + br_imm) & ~1
 
+        // BPU prediction (M3-B). pred_taken=1 means fetch redirected
+        // to pred_target on the BPU's say-so. EX compares this against
+        // the actual outcome to compute mispredict.
+        onebit_sig_e       pred_taken;
+        logic [31:0]       pred_target;
+
         onebit_sig_e       valid;
         onebit_sig_e       illegal;
     } uop_t;
