@@ -1,10 +1,11 @@
-// OoO core v1 — top (M2 phase B pipeline)
+// OoO core v1 — top (M3 phase A pipeline)
 //
 // 5 logical stages:
 //
 //   IF       fetch.sv → {pc, instr, valid}
 //   DISPATCH decode + RAT lookup + arch-regfile read + ROB peek
 //            → ROB.alloc + RS.alloc into the right bank
+//            (also: snapshot RAT on branch-class dispatch)
 //   ISSUE    each RS bank picks its lowest-index ready slot
 //            independently
 //   EX       ALU FU (ALU/branch ops) + memunit (LOAD/STORE)
@@ -13,11 +14,24 @@
 //            every broadcast
 //   COMMIT   ROB head when ready → arch regfile write
 //
-// Phase B: three RS banks
+// Three RS banks:
 //   alu_rs    (FU_ALU + FU_BRANCH)        → execute.sv (ALU FU)
 //   lsu_rs    (FU_LOAD + FU_STORE)        → memunit.sv
 //   muldiv_rs (FU_MULDIV)                 → muldiv_unit.sv
-// Next: branch prediction + RAT snapshots (M3).
+//
+// M3-A — branch recovery moves from a wholesale "selective flush" of
+// the RAT to per-branch RAT snapshot + restore. A small N_SNAP=4
+// snapshot ring captures the post-update RAT at every branch
+// dispatch; on mispredict the matching snapshot is reloaded in one
+// cycle. This restores RAT entries that were pointing at OLDER
+// surviving in-flight producers (the wholesale-flush version cleared
+// them, falling through to a stale arch regfile — latent bug). It
+// also drains any in-flight muldiv op that's younger than the
+// mispredicted branch (memunit is safe via its head-gating; muldiv
+// has no such gate).
+//
+// Next: M3-B — 2-bit BHT predictor in fetch (we currently
+// predict-not-taken implicitly).
 
 import common_pkg::*;
 import core_pkg::*;
@@ -176,7 +190,40 @@ module core_ooo_top
     // Pipeline-wide control
     logic                       fetch_stall;
     logic                       flush_younger;
-    logic                       rat_flush;
+
+    // ── M3-A snapshot ring ───────────────────────────────────
+    // One snapshot per in-flight branch. With N_SNAP=4 the ring
+    // covers up to 4 nested branches; a 5th branch dispatch stalls
+    // until an older one resolves or commits. Branchy code averages
+    // ~3 in-flight branches at ROB_DEPTH=16, so 4 has headroom.
+    localparam int N_SNAP     = 4;
+    localparam int SNAP_IDX_W = $clog2(N_SNAP);
+
+    logic [SNAP_IDX_W-1:0]      snap_head_q;     // oldest in-flight branch's slot
+    logic [SNAP_IDX_W-1:0]      snap_tail_q;     // next free slot
+    logic [SNAP_IDX_W:0]        snap_count_q;    // 0..N_SNAP
+
+    // rob_idx → snap_idx map. Set when a branch dispatches; read
+    // when EX resolves a mispredict (ALU FU is the branch resolver).
+    logic [SNAP_IDX_W-1:0]      snap_of_rob [0:OOO_ROB_DEPTH-1];
+
+    logic                       snap_full;
+    logic                       snap_take;
+    logic [SNAP_IDX_W-1:0]      snap_take_idx;
+    logic                       snap_restore;
+    logic [SNAP_IDX_W-1:0]      snap_restore_idx;
+
+    // Branch-class uop = anything that can mispredict at v1. All
+    // FU_BRANCH ops qualify (conditional branches, JAL, JALR — fetch
+    // doesn't predict jumps so they look like always-mispredicts).
+    logic                       is_branch_class;
+
+    // ── M3-A muldiv flush gating ─────────────────────────────
+    // Drain a YOUNGER muldiv op when an older branch mispredicts.
+    // memunit doesn't need this — it's head-gated and its in-flight
+    // op is by construction the oldest in the ROB.
+    logic [OOO_ROB_IDX_W-1:0]   md_op_rob_idx;
+    logic                       md_unit_flush;
 
     // ── IF ───────────────────────────────────────────────────
     fetch fetch_inst (
@@ -201,24 +248,27 @@ module core_ooo_top
     );
 
     // ── RAT ──────────────────────────────────────────────────
-    rat rat_inst (
-        .clk_i             (clk_i),
-        .reset_i           (reset_i),
-        .flush_i           (rat_flush),
-        .flush_after_idx_i (alu_rs_issue_rob_idx),
-        .flush_tail_i      (rob_tail),
-        .rs1_addr_i        (id_uop.rs1),
-        .rs2_addr_i        (id_uop.rs2),
-        .rs1_busy_o        (rat_rs1_busy),
-        .rs1_rob_idx_o     (rat_rs1_idx),
-        .rs2_busy_o        (rat_rs2_busy),
-        .rs2_rob_idx_o     (rat_rs2_idx),
-        .write_en_i        (dispatch_en && id_uop.has_rd == TRUE),
-        .write_addr_i      (id_uop.rd),
-        .write_rob_idx_i   (rob_alloc_idx),
-        .clear_en_i        (commit_consume && rob_commit_uop.has_rd == TRUE),
-        .clear_addr_i      (rob_commit_uop.rd),
-        .clear_check_idx_i (rob_commit_idx)
+    rat #(
+        .N_SNAPSHOTS (N_SNAP)
+    ) rat_inst (
+        .clk_i              (clk_i),
+        .reset_i            (reset_i),
+        .rs1_addr_i         (id_uop.rs1),
+        .rs2_addr_i         (id_uop.rs2),
+        .rs1_busy_o         (rat_rs1_busy),
+        .rs1_rob_idx_o      (rat_rs1_idx),
+        .rs2_busy_o         (rat_rs2_busy),
+        .rs2_rob_idx_o      (rat_rs2_idx),
+        .write_en_i         (dispatch_en && id_uop.has_rd == TRUE),
+        .write_addr_i       (id_uop.rd),
+        .write_rob_idx_i    (rob_alloc_idx),
+        .clear_en_i         (commit_consume && rob_commit_uop.has_rd == TRUE),
+        .clear_addr_i       (rob_commit_uop.rd),
+        .clear_check_idx_i  (rob_commit_idx),
+        .snap_take_i        (snap_take),
+        .snap_take_idx_i    (snap_take_idx),
+        .snap_restore_i     (snap_restore),
+        .snap_restore_idx_i (snap_restore_idx)
     );
 
     // ── arch regfile ─────────────────────────────────────────
@@ -291,14 +341,22 @@ module core_ooo_top
     wire wants_nop_path = !wants_alu_rs && !wants_lsu_rs && !wants_md_rs;
 
     // Dispatch fires when: valid uop, ROB has room, target RS has
-    // room (or we're on the nop path), and we're not redirecting.
+    // room (or we're on the nop path), no snapshot stall, and we're
+    // not redirecting.
     wire target_rs_full = (wants_alu_rs && alu_rs_full)
                         || (wants_lsu_rs && lsu_rs_full)
                         || (wants_md_rs  && md_rs_full);
 
+    // Snapshot stall: a branch-class uop can't dispatch when the
+    // snapshot ring is full. Non-branch uops are unaffected.
+    assign is_branch_class = (id_uop.valid == TRUE)
+                             && (id_uop.fu == FU_BRANCH);
+    wire   snap_stall      = is_branch_class && snap_full;
+
     assign dispatch_en = (id_uop.valid == TRUE)
                        && !rob_full
                        && !target_rs_full
+                       && !snap_stall
                        && !ex_redirect;
     assign dispatch_to_alu_rs = dispatch_en && wants_alu_rs;
     assign dispatch_to_lsu_rs = dispatch_en && wants_lsu_rs;
@@ -607,10 +665,18 @@ module core_ooo_top
     onebit_sig_e md_kick_e;
     assign md_kick_e = onebit_sig_e'(md_rs_consume);
 
+    // Drain a younger-than-branch in-flight muldiv op on mispredict.
+    // Reuses is_younger() — the branch's rob_idx is the issuing
+    // ALU RS slot, which is alu_rs_issue_rob_idx.
+    assign md_unit_flush = ex_redirect && (md_busy == TRUE)
+                           && is_younger(md_op_rob_idx,
+                                         alu_rs_issue_rob_idx,
+                                         rob_tail);
+
     muldiv_unit muldiv_unit_inst (
         .clk_i             (clk_i),
         .reset_i           (reset_i),
-        .flush_i           (1'b0),
+        .flush_i           (md_unit_flush),
         .kick_i            (md_kick_e),
         .mul_op_i          (md_rs_issue_uop.mul_op),
         .a_i               (md_rs_issue_rs1_val),
@@ -619,12 +685,89 @@ module core_ooo_top
         .op_done_o         (md_done),
         .op_done_rob_idx_o (md_done_idx),
         .op_done_result_o  (md_done_result),
-        .busy_o             (md_busy)
+        .busy_o             (md_busy),
+        .op_rob_idx_o      (md_op_rob_idx)
     );
 
     // ── BRANCH RECOVERY ──────────────────────────────────────
-    assign flush_younger = ex_redirect;
-    assign rat_flush     = ex_redirect;
+    // ROB squashes [branch_idx+1..tail) on mispredict; RAT restores
+    // from the snapshot taken when the branch dispatched.
+    assign flush_younger    = ex_redirect;
+    assign snap_restore     = ex_redirect;
+    assign snap_restore_idx = snap_of_rob[alu_rs_issue_rob_idx];
+
+    // ── M3-A snapshot ring ───────────────────────────────────
+    // Take a snapshot every cycle a branch-class uop dispatches.
+    // The slot used is snap_tail_q (the next free).
+    assign snap_take     = dispatch_en && is_branch_class;
+    assign snap_take_idx = snap_tail_q;
+    assign snap_full     = (snap_count_q == N_SNAP[SNAP_IDX_W:0]);
+
+    wire branch_committed = commit_consume
+                            && (rob_commit_uop.fu == FU_BRANCH);
+
+    // Cleaner combinational next-state for the ring pointers, with
+    // restore taking precedence. The mispredicted branch keeps its
+    // own snapshot — it'll commit shortly (alu wb sets ready=1
+    // next cycle) and free the snapshot via the normal head++ path.
+    logic [SNAP_IDX_W-1:0] snap_head_d;
+    logic [SNAP_IDX_W-1:0] snap_tail_d;
+    logic [SNAP_IDX_W:0]   snap_count_d;
+    always_comb begin
+        snap_head_d  = snap_head_q;
+        snap_tail_d  = snap_tail_q;
+        snap_count_d = snap_count_q;
+
+        if (snap_restore) begin
+            // tail rewinds to one past the branch's slot; branches
+            // younger than this are squashed and their snapshots
+            // freed. snap_take is ignored this cycle (the
+            // dispatching uop is on the wrong path).
+            //
+            // New count = (new_tail - new_head) mod N_SNAP, with the
+            // disambiguation that "delta==0 in mod arithmetic" here
+            // means N_SNAP (full ring kept) — never empty, since we
+            // always keep at least the mispredicting branch's
+            // snapshot until it commits.
+            snap_tail_d = snap_restore_idx + 1'b1;
+            snap_head_d = snap_head_q + (branch_committed ? 1'b1 : 1'b0);
+            begin
+                automatic logic [SNAP_IDX_W-1:0] delta;
+                delta = snap_tail_d - snap_head_d;       // mod N_SNAP
+                snap_count_d = (delta == '0)
+                               ? N_SNAP[SNAP_IDX_W:0]
+                               : {1'b0, delta};
+            end
+        end else begin
+            if (snap_take) begin
+                snap_tail_d  = snap_tail_q + 1'b1;
+                snap_count_d = snap_count_q + 1'b1;
+            end
+            if (branch_committed) begin
+                snap_head_d  = snap_head_q + 1'b1;
+                snap_count_d = (snap_take ? snap_count_q
+                                          : (snap_count_q - 1'b1));
+            end
+        end
+    end
+
+    always_ff @(posedge clk_i or posedge reset_i) begin
+        if (reset_i) begin
+            snap_head_q  <= '0;
+            snap_tail_q  <= '0;
+            snap_count_q <= '0;
+            for (int i = 0; i < OOO_ROB_DEPTH; i++)
+                snap_of_rob[i] <= '0;
+        end else begin
+            snap_head_q  <= snap_head_d;
+            snap_tail_q  <= snap_tail_d;
+            snap_count_q <= snap_count_d;
+            // snap_of_rob write — even on restore the dispatching
+            // uop is wrong-path so we suppress it.
+            if (snap_take && !snap_restore)
+                snap_of_rob[rob_alloc_idx] <= snap_tail_q;
+        end
+    end
 
     // ── COMMIT ───────────────────────────────────────────────
     assign commit_consume = rob_commit_valid;
@@ -642,10 +785,11 @@ module core_ooo_top
     end
 
     // ── FETCH STALL ──────────────────────────────────────────
-    // Stall fetch when ROB is full or the target RS bank is full.
-    // The bank check captures FU_NONE/illegal too (those go to
-    // neither bank but still need a ROB slot).
-    assign fetch_stall = rob_full || target_rs_full;
+    // Stall fetch when ROB is full, the target RS bank is full, or
+    // a branch-class uop hits an exhausted snapshot ring. The bank
+    // check captures FU_NONE/illegal too (those go to neither bank
+    // but still need a ROB slot).
+    assign fetch_stall = rob_full || target_rs_full || snap_stall;
 
     // ── lint sink ────────────────────────────────────────────
     wire _unused = &{1'b0, ext_itr_i, s_ext_itr_i, timer_itr_i, soft_itr_i,

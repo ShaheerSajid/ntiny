@@ -36,7 +36,17 @@ module muldiv_unit
     output onebit_sig_e                 op_done_o,
     output logic [OOO_ROB_IDX_W-1:0]    op_done_rob_idx_o,
     output logic [31:0]                 op_done_result_o,
-    output onebit_sig_e                 busy_o
+    output onebit_sig_e                 busy_o,
+
+    // The rob_idx of the in-flight op (valid while busy_o=1). Top
+    // uses this to decide whether the in-flight op falls in a
+    // mispredicted branch's squash range and asserts flush_i.
+    // Without this, a YOUNGER muldiv op in flight when an older
+    // branch mispredicts would eventually fire op_done_o with a
+    // stale rob_idx that's been re-allocated to a new uop on the
+    // correct path — silent ROB corruption. (memunit is safe via
+    // its head-gating; muldiv has no such gate.)
+    output logic [OOO_ROB_IDX_W-1:0]    op_rob_idx_o
 );
 
     // ── classify the op (held) ───────────────────────────────
@@ -177,5 +187,6 @@ module muldiv_unit
     assign op_done_rob_idx_o = rob_idx_q;
     assign op_done_result_o  = result_q;
     assign busy_o            = onebit_sig_e'(state_q != IDLE);
+    assign op_rob_idx_o      = rob_idx_q;
 
 endmodule

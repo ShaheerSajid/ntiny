@@ -56,8 +56,8 @@ RTL_SRCS = \
     ../../design/core_ooo/src/core_ooo_top.sv \
     tb_ooo.sv
 
-# ── test battery (M0 sanity + M2 OoO/M-ext) ───────────────────
-TESTS = test_basic test_loop test_jalr test_subword test_imm_edges test_dep_chain test_ooo_stress test_muldiv
+# ── test battery (M0 sanity + M2 OoO/M-ext + M3 recovery) ─────
+TESTS = test_basic test_loop test_jalr test_subword test_imm_edges test_dep_chain test_ooo_stress test_muldiv test_misp_recovery
 
 # ── targets ───────────────────────────────────────────────────
 .PHONY: all build sw run test-all clean
