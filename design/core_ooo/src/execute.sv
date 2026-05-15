@@ -74,7 +74,7 @@ module execute
         .c_i          (32'b0),
         .alu_op_i     (uop_i.alu_op),
         .mul_op_i     (NO_MUL_OP),
-        .bit_op_i     (NO_BIT_OP),
+        .bit_op_i     (uop_i.bit_op),
         .float_op_i   (NO_FP_OP),
         .roundmode_i  (RNE),
         .alu_stall_o  (alu_stall),

@@ -5,7 +5,11 @@
 // (ecall/ebreak/CSR) is flagged illegal for M0 and lands in M7.
 //
 // M2 phase B adds the M extension — funct7=0000001 in OP_R steers to
-// FU_MULDIV with the matching mul_op. F lands in M5, B in M6.
+// FU_MULDIV with the matching mul_op.
+//
+// M6 adds the B extension (Zba/Zbb/Zbc/Zbs) + Zicond — fu stays at
+// FU_ALU but bit_op is set. The execute stage drives the ALU's
+// bit_op_i path so the same FU handles both base ALU and bit ops.
 
 import common_pkg::*;
 import core_pkg::*;
@@ -165,7 +169,7 @@ module decode
                     endcase
                 end
 
-                OP_I: begin                       // ADDI/SLTI/SLTIU/XORI/ORI/ANDI/SLLI/SRLI/SRAI
+                OP_I: begin                       // ADDI/SLTI/SLTIU/XORI/ORI/ANDI/SLLI/SRLI/SRAI + Zb*-I
                     uop_o.fu        = FU_ALU;
                     uop_o.alu_imm   = i_imm;
                     uop_o.uses_imm  = TRUE;
@@ -178,20 +182,48 @@ module decode
                         3'b100: uop_o.alu_op = XOR;          // XORI
                         3'b110: uop_o.alu_op = OR;           // ORI
                         3'b111: uop_o.alu_op = AND;          // ANDI
-                        3'b001: begin                        // SLLI
-                            uop_o.alu_op = SLL;
-                            if (funct7 != 7'b0000000) uop_o.illegal = TRUE;
+                        3'b001: begin                        // SLLI / Zb*-I (BSETI/BCLRI/BINVI/CLZ/CTZ/CPOP/SEXTB/SEXTH)
+                            unique case (funct7)
+                                7'b0000000: uop_o.alu_op = SLL;
+                                7'b0010100: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = BSETI; end
+                                7'b0100100: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = BCLRI; end
+                                7'b0110100: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = BINVI; end
+                                7'b0110000: begin
+                                    // CLZ/CTZ/CPOP/SEXTB/SEXTH encoded by rs2 (=funct5)
+                                    uop_o.alu_op = NO_ALU_OP;
+                                    unique case (rs2)
+                                        5'b00000: uop_o.bit_op = CLZ;
+                                        5'b00001: uop_o.bit_op = CTZ;
+                                        5'b00010: uop_o.bit_op = CPOP;
+                                        5'b00100: uop_o.bit_op = SEXTB;
+                                        5'b00101: uop_o.bit_op = SEXTH;
+                                        default:  uop_o.illegal = TRUE;
+                                    endcase
+                                    // rs2 here is the funct5 field, not an actual operand
+                                end
+                                default: uop_o.illegal = TRUE;
+                            endcase
                         end
-                        3'b101: begin                        // SRLI / SRAI
-                            if (funct7 == 7'b0000000)       uop_o.alu_op = SRL;
-                            else if (funct7 == 7'b0100000)  uop_o.alu_op = SRA;
-                            else                            uop_o.illegal = TRUE;
+                        3'b101: begin                        // SRLI / SRAI / Zb*-I (BEXTI/RORI/ORCB/REV8)
+                            unique case (funct7)
+                                7'b0000000: uop_o.alu_op = SRL;
+                                7'b0100000: uop_o.alu_op = SRA;
+                                7'b0100100: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = BEXTI; end
+                                7'b0110000: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = RORI;  end
+                                7'b0010100: if (rs2 == 5'b00111) begin
+                                                uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = ORCB;
+                                            end else uop_o.illegal = TRUE;
+                                7'b0110100: if (rs2 == 5'b11000) begin
+                                                uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = REV8;
+                                            end else uop_o.illegal = TRUE;
+                                default: uop_o.illegal = TRUE;
+                            endcase
                         end
                         default: uop_o.illegal = TRUE;
                     endcase
                 end
 
-                OP_R: begin                       // ADD/SUB/SLL/SLT/SLTU/XOR/SRL/SRA/OR/AND
+                OP_R: begin                       // ADD/SUB/SLL/SLT/SLTU/XOR/SRL/SRA/OR/AND + M + Zb*-R + Zicond
                     uop_o.fu       = FU_ALU;
                     uop_o.uses_imm = FALSE;
                     uop_o.has_rs1  = TRUE;
@@ -217,6 +249,35 @@ module decode
                         {7'b0000001, 3'b101}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = DIVU;   end
                         {7'b0000001, 3'b110}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = REM;    end
                         {7'b0000001, 3'b111}: begin uop_o.fu = FU_MULDIV; uop_o.alu_op = NO_ALU_OP; uop_o.mul_op = REMU;   end
+                        // Zba — funct7=0010000
+                        {7'b0010000, 3'b010}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = SH1ADD; end
+                        {7'b0010000, 3'b100}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = SH2ADD; end
+                        {7'b0010000, 3'b110}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = SH3ADD; end
+                        // Zbb min/max + Zbc clmul — funct7=0000101
+                        {7'b0000101, 3'b001}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = CLMUL;  end
+                        {7'b0000101, 3'b010}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = CLMULR; end
+                        {7'b0000101, 3'b011}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = CLMULH; end
+                        {7'b0000101, 3'b100}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = MIN;    end
+                        {7'b0000101, 3'b101}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = MINU;   end
+                        {7'b0000101, 3'b110}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = MAX;    end
+                        {7'b0000101, 3'b111}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = MAXU;   end
+                        // Zbb XNOR/ORN/ANDN — funct7=0100000
+                        {7'b0100000, 3'b100}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = XNOR; end
+                        {7'b0100000, 3'b110}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = ORN;  end
+                        {7'b0100000, 3'b111}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = ANDN; end
+                        // Zbb ROL/ROR — funct7=0110000
+                        {7'b0110000, 3'b001}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = ROL; end
+                        {7'b0110000, 3'b101}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = ROR; end
+                        // Zbb ZEXTH — funct7=0000100 funct3=100
+                        {7'b0000100, 3'b100}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = ZEXTH; end
+                        // Zbs BCLR/BEXT/BINV/BSET — reg form
+                        {7'b0100100, 3'b001}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = BCLR; end
+                        {7'b0100100, 3'b101}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = BEXT; end
+                        {7'b0110100, 3'b001}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = BINV; end
+                        {7'b0010100, 3'b001}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = BSET; end
+                        // Zicond — funct7=0000111
+                        {7'b0000111, 3'b101}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = CZERO_EQZ; end
+                        {7'b0000111, 3'b111}: begin uop_o.alu_op = NO_ALU_OP; uop_o.bit_op = CZERO_NEZ; end
                         default: uop_o.illegal = TRUE;
                     endcase
                 end
