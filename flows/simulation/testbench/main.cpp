@@ -5,7 +5,9 @@
 
 #include "Vtb_soc_top.h"
 #include "verilated.h"
+#if VM_TRACE_FST
 #include "verilated_fst_c.h"
+#endif
 
 // Default timeout: 10M cycles (20M half-cycles)
 #define DEFAULT_MAX_CYCLES 10000000
@@ -95,6 +97,7 @@ int main(int argc, char **argv) {
 
 	Vtb_soc_top *tb = new Vtb_soc_top;
 
+#if VM_TRACE_FST
 	VerilatedFstC *m_trace = NULL;
 	bool wave_opened = false;
 	bool wave_finished = false;
@@ -103,6 +106,11 @@ int main(int argc, char **argv) {
 		m_trace = new VerilatedFstC;
 		tb->trace(m_trace, TRACE_DEPTH);
 	}
+#else
+	if (wave_enabled) {
+		fprintf(stderr, "WARN: --trace-fst not compiled in; +wave_* ignored\n");
+	}
+#endif
 
 	vluint64_t sim_time = 0;
 	vluint64_t half_cycles = max_cycles * 2;
@@ -122,6 +130,7 @@ int main(int argc, char **argv) {
 		tb->clk ^= 1;
 		tb->eval();
 
+#if VM_TRACE_FST
 		// Cycle-resolution book-keeping at posedge clk after reset deasserts
 		if (wave_enabled && !wave_finished && tb->clk == 1 && !tb->reset) {
 			cycle_count++;
@@ -145,6 +154,7 @@ int main(int argc, char **argv) {
 
 		if (wave_opened && m_trace)
 			m_trace->dump(sim_time);
+#endif
 
 		sim_time++;
 	}
@@ -155,6 +165,7 @@ int main(int argc, char **argv) {
 	}
 
 	tb->final();
+#if VM_TRACE_FST
 	if (m_trace) {
 		if (wave_opened) {
 			m_trace->dump(sim_time);
@@ -162,6 +173,7 @@ int main(int argc, char **argv) {
 		}
 		delete m_trace;
 	}
+#endif
 	delete tb;
 	return exit_code;
 }
