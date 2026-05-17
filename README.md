@@ -86,8 +86,26 @@ scripts/
 ### Prerequisites
 
 - [Verilator](https://verilator.org) (v5+)
-- RISC-V GCC toolchain at `/opt/riscv/bin`
-- Python 3.6+ (for memory map generation and RISCOF)
+- RISC-V toolchain (bare-metal elf + Linux gnu); paths configured in `.env`
+- Spike ISS (only needed for RISCOF reference); path in `.env`
+- Python 3.10+ (for memory map generation and RISCOF)
+
+### One-time setup
+
+All tool paths live in `.env` at the repo root — `TOOLCHAIN_ELF`,
+`TOOLCHAIN_LINUX`, `SPIKE_BIN`, `RISCOF_VENV`. Every Makefile and
+helper script reads from there, so a single edit retargets the whole
+repo. Defaults are tuned for this dev box; override per checkout if
+your toolchains live elsewhere.
+
+After cloning, run the bootstrap once:
+
+```bash
+./.init           # creates .venv/, installs riscof, clones arch-test
+```
+
+`.init` is idempotent — safe to re-run if the venv or the
+`verification/riscof/riscv-arch-test/` clone gets nuked.
 
 ### Quick Start
 
@@ -122,8 +140,17 @@ make riscof_summary
 make riscof_testlist
 ```
 
-Current status: **204/5 pass** (5 known misalign false-negatives — see
-[reference_misalign_abi memory](https://github.com)). Zba+Zbb+Zbc+Zbs all pass.
+Current status (riscv-arch-test, latest tip): **225 PASS / 27 FAIL /
+3 MISSING out of 255** tests. The historic 204/5 record stands — the
+arch-test suite has since grown from 209 → 255 tests, so 22 of today's
+27 failures are newer-suite cases that didn't exist at the original
+verification milestone:
+- 5 historic `misalign-l*/s*` (HW-vs-M-mode-trap-handler ABI mismatch,
+  spec-permitted variants — see [reference_misalign_abi](docs/))
+- 17 PMP-misalign extensions + sv32×PMP edge cases + vm_* corners
+- 5 small CSR/trap-handler diffs (ecall, ebreak, cebreak,
+  pmpzaamo_cfg_wr, pmps_none/pmpu_none)
+- Zba+Zbb+Zbc+Zbs all pass
 
 ### Other Simulators
 
