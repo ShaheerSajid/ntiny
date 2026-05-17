@@ -20,7 +20,7 @@ VERILATOR_WARNINGS = \
 VERILATOR_FLAGS = \
 	$(VERILATOR_WARNINGS) \
 	--no-timing --timescale-override 1ns/10ps -O3 \
-	-DVERILATOR_SIM --trace \
+	-DVERILATOR_SIM \
 	-sv --top-module tb_soc_top --cc \
 	+define+RAM_SIZE_BYTES=$(RAM_SIZE)
 
