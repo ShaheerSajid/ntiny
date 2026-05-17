@@ -1,8 +1,12 @@
 # software/Makefile — Unified build system for ntiny firmware
 SHELL := /bin/bash
 
+# ─── Config (paths from repo-root .env) ───────────────────────────────────────
+NTINY_ROOT ?= $(shell cd .. && pwd)
+include $(NTINY_ROOT)/.env
+
 # ─── Toolchain ────────────────────────────────────────────────────────────────
-TOOLCHAIN = /opt/riscv-elf/bin
+TOOLCHAIN ?= $(TOOLCHAIN_ELF)
 CC      = $(TOOLCHAIN)/riscv64-unknown-elf-gcc
 OBJCOPY = $(TOOLCHAIN)/riscv64-unknown-elf-objcopy
 ELFSIZE = $(TOOLCHAIN)/riscv64-unknown-elf-size

@@ -1,9 +1,11 @@
 SHELL := /bin/bash
 
 NTINY_ROOT  := $(shell cd ../.. && pwd)
+include $(NTINY_ROOT)/.env
+
 SIM_DIR     := $(NTINY_ROOT)/flows/simulation
 MEM_MAP_JSON := $(NTINY_ROOT)/design/common/mem_map.json
-VENV        := $(HOME)/Software/riscof_env/bin/activate
+VENV        := $(RISCOF_VENV)
 SUITE       := $(shell pwd)/riscv-arch-test/riscv-test-suite
 ENV         := $(SUITE)/env
 WORK        := $(shell pwd)/riscof_work

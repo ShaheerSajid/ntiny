@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# ntiny init — one-shot bootstrap for a fresh checkout.
+#   * creates an in-repo python venv at $NTINY_ROOT/.venv
+#   * installs riscof (the python package the RISCOF flow drives)
+#   * clones the riscv-arch-test suite under verification/riscof/
+#   * warns about missing toolchains/spike binaries
+#
+# Usage: ./.init   (run once from the repo root, or any time the venv /
+# arch-test suite need to be re-bootstrapped)
+
+set -e
+
+NTINY_ROOT="$(cd "$(dirname "$0")" && pwd)"
+VENV_DIR="$NTINY_ROOT/.venv"
+
+. "$NTINY_ROOT/.env"
+
+echo "ntiny init: NTINY_ROOT=$NTINY_ROOT"
+
+# ── 1) Python venv ─────────────────────────────────────────────
+if [ ! -d "$VENV_DIR" ]; then
+    echo "  creating venv at $VENV_DIR"
+    python3 -m venv "$VENV_DIR"
+else
+    echo "  venv already at $VENV_DIR (skipping create)"
+fi
+
+# Source the venv for the rest of this script.
+# shellcheck source=/dev/null
+. "$VENV_DIR/bin/activate"
+
+# ── 2) Install riscof + deps ──────────────────────────────────
+if ! python -c "import riscof" 2>/dev/null; then
+    echo "  installing riscof + dependencies"
+    pip install --upgrade pip >/dev/null
+    pip install riscof
+else
+    echo "  riscof already installed (skipping)"
+fi
+
+# ── 3) Clone the riscv-arch-test suite ────────────────────────
+SUITE_DIR="$NTINY_ROOT/verification/riscof/riscv-arch-test"
+if [ ! -d "$SUITE_DIR" ] || [ -z "$(ls -A "$SUITE_DIR" 2>/dev/null)" ]; then
+    echo "  cloning riscv-arch-test under $SUITE_DIR"
+    (cd "$NTINY_ROOT/verification/riscof" && riscof arch-test --clone)
+else
+    echo "  riscv-arch-test already present (skipping)"
+fi
+
+# ── 4) Toolchain sanity ───────────────────────────────────────
+for tool in "$TOOLCHAIN_ELF/riscv64-unknown-elf-gcc" "$SPIKE_BIN/spike"; do
+    if [ -x "$tool" ]; then
+        echo "  OK: $tool"
+    else
+        echo "  WARN: $tool not found — edit .env to point at your install"
+    fi
+done
+
+# ── 5) Update .env with the freshly-created venv path ─────────
+# Only if the user is using a default (~/Software) path that doesn't exist.
+if [ ! -f "$RISCOF_VENV" ]; then
+    echo "  updating .env: RISCOF_VENV → $VENV_DIR/bin/activate"
+    sed -i "s|^RISCOF_VENV=.*|RISCOF_VENV=$VENV_DIR/bin/activate|" "$NTINY_ROOT/.env"
+fi
+
+echo ""
+echo "ntiny init complete."
+echo "  Activate the venv:  source .venv/bin/activate"
+echo "  Run RISCOF:         (cd verification/riscof && make run)"
+echo "  Build firmware:     (cd software && make)"
+echo "  Run Linux sim:      (cd flows/simulation && bash run_linux.sh)"
