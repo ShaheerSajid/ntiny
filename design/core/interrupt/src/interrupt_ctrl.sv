@@ -361,7 +361,12 @@ always_comb begin
     end else if (ecall_valid) begin
         cause_code = ecall_cause; epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
     end else if (ebreak_valid) begin
-        cause_code = 8'd3;  epc_out = pc_for_id; mtval_out = pc_for_id; is_interrupt = 1'b0;
+        // Per spec mtval-on-breakpoint is implementation-defined (0 or the
+        // breakpoint VA). Spike writes 0; matching that lets RISCOF's
+        // arch_test M-mode handler short-circuit to cleanup_epilogs on a
+        // tval∉code-segment check (otherwise the handler resumes past
+        // EBREAK and the test_A_res writes diverge from the reference).
+        cause_code = 8'd3;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
     end else if (external_valid && m_ie_global) begin
         cause_code = 8'd11; epc_out = pc_for_async; mtval_out = 32'h0; is_interrupt = 1'b1;
     end else if (software_valid && m_ie_global) begin
