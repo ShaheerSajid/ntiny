@@ -1,6 +1,8 @@
 // Sv32 MMU — ITLB, DTLB, shared Page Table Walker
 // Sits inside core_top between virtual addresses (PC / ALU) and physical buses
 
+`include "mem_map.svh"
+
 import common_pkg::*;
 import core_pkg::*;
 
@@ -599,13 +601,34 @@ module mmu_sv32 (
     assign d_fault_o = (d_translate && d_req_i && dtlb_hit && !d_perm_ok) ||
                        (d_translate && ptw_state == PTW_FAULT && !ptw_for_insn && !ptw_pmp_fault_r);
     assign d_fault_addr_o = (ptw_state == PTW_FAULT && !ptw_for_insn) ? ptw_vaddr : d_vaddr_i;
-    // Access faults (cause 5/7): PMP denial on data access or PTW PMP fault for data
+    // Unmapped-PA detection — must match addr_decoder.sv's slave selects.
+    // Spike fires load_access_fault for accesses to physical addresses not
+    // backed by any memory/peripheral; without this, the DUT bus silently
+    // completes the load with stale readdata (rvalid is gated by the
+    // peripheral bridge's any_periph_sel, but the core's load path uses
+    // ready=1 and ignores rvalid for regular non-AMO/non-PTW data ops).
+    // Required by the rv32i_m/vm_sv32/* RISCOF tests which exercise an
+    // M-mode trap-handler load to PA=0x1d0 after a satp restore.
+    wire d_pa_in_ram   = (d_paddr_out >= `RAM_BASE)  && (d_paddr_out <= `RAM_END);
+    wire d_pa_in_boot  = (d_paddr_out >= `BOOT_BASE) && (d_paddr_out <= `BOOT_END);
+    wire d_pa_in_periph= (d_paddr_out[31:20] == 12'h100) &&
+                         (d_paddr_out[19:16] <= 4'h7);
+    wire d_pa_in_clint = (d_paddr_out[31:16] == 16'h0200);
+    wire d_pa_in_plic  = (d_paddr_out[31:25] == 7'b0000_110);
+    wire d_pa_is_tohost= (d_paddr_out == `TOHOST_ADDR);
+    wire d_pa_unmapped = !(d_pa_in_ram | d_pa_in_boot | d_pa_in_periph |
+                           d_pa_in_clint | d_pa_in_plic | d_pa_is_tohost);
+    // Only meaningful when d_paddr_out is settled (no translation in flight).
+    wire d_pa_settled  = !d_translate || dtlb_hit;
+    // Access faults (cause 5/7): PMP denial on data access, PTW PMP fault for
+    // data, or access to an unmapped physical address.
     // Data PMP fault: uses d_req_raw_i (pipeline's raw request) to avoid
     // combinational loop: d_req_i comes from core2avl which is downstream
     // of the bus suppression that this fault triggers.
     // Use combinational d_pmp_fault_comb for immediate fault detection.
     // The registered d_pmp_fault is used only for interrupt_ctrl (via core_top).
     assign d_access_fault_o = (d_req_raw_i && !ptw_in_read && d_pmp_fault_comb) ||
+                              (d_req_raw_i && !ptw_in_read && d_pa_settled && d_pa_unmapped) ||
                               (ptw_state == PTW_FAULT && !ptw_for_insn && ptw_pmp_fault_r);
     assign d_access_fault_addr_o = (ptw_state == PTW_FAULT && !ptw_for_insn) ? ptw_vaddr : d_vaddr_i;
 
