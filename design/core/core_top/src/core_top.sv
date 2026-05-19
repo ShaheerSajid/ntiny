@@ -2686,7 +2686,12 @@ amo_unit amo_unit_inst
 // D-port mux: PTW > AMO > core data access
 // Virtual address before translation (for MMU input)
 assign d_vaddr_pre = amo_active ? amo_dbus_addr : c2a_address;
-assign d_store_for_mmu = amo_active ? amo_dbus_write : c2a_write;
+// AMO accesses are read-modify-write at the architectural level: any
+// access-fault must be reported as cause=7 (store/AMO access fault),
+// not cause=5 (load access fault), even during the AMO's internal read
+// phase. Pin is_store=1 whenever the AMO unit owns the dport. Required
+// by rv32i_m/pmp/pmpzaamo_cfg_wr.
+assign d_store_for_mmu = amo_active ? 1'b1 : c2a_write;
 assign d_req_for_mmu = amo_active ? (amo_dbus_read | amo_dbus_write) : (c2a_read | c2a_write);
 // Raw data request from pipeline — not gated by exception_from_ie or PMP faults.
 // Used by MMU PMP checker to avoid combinational loop through d_req → PMP → trap → suppression → d_req.
