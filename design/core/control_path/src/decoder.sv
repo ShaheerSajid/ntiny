@@ -488,9 +488,10 @@ assign ctrl_bus_o.predicted_taken = FALSE; // BPU: static not-taken default (fut
 // rest of the pipeline still goes through the legacy interrupt_ctrl
 // path until Phase 4.3 cuts it over to wb_trap_unit.
 always_comb begin
-    ctrl_bus_o.wb_event = WB_NONE;
-    ctrl_bus_o.wb_cause = 5'd0;
-    ctrl_bus_o.wb_tval  = 32'd0;
+    ctrl_bus_o.wb_event   = WB_NONE;
+    ctrl_bus_o.wb_cause   = 5'd0;
+    ctrl_bus_o.wb_tval    = 32'd0;
+    ctrl_bus_o.instr_word = instruction_i;
     if (csr_op == SYSTEM && csr_addr == 12'd0) begin
         // ECALL: cause depends on current priv level — set at the
         // tag-promotion site in core_top, not here.

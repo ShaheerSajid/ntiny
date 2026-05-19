@@ -1773,6 +1773,8 @@ interrupt_ctrl interrupt_ctrl_inst
   .ebreak_raw_i       (ctrl_bus_if_id_raw.ebreak),
   .illegal_insn_i     (illegal_insn_id),
   .ie_csr_invalid_i   (csr_invalid),
+  .id_instr_word_i    (ctrl_bus_if_id_raw.instr_word),
+  .ie_instr_word_i    (ctrl_bus_ie.instr_word),
   .insn_valid_id_i    (insn_valid_id),
   .debug_ebreak_i     (dcsr_ebreak),
   .branch_taken_i     (branch_taken_valid),
