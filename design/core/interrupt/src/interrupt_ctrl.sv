@@ -61,6 +61,11 @@ module interrupt_ctrl (
     // ── IE-stage CSR invalid (unimplemented CSR accessed) ────────────────
     input                ie_csr_invalid_i,
 
+    // Raw 32-bit decoded instruction at ID/IE; used as mtval for illegal-
+    // instruction traps so spike-compatible bytes land in the signature.
+    input [31:0]         id_instr_word_i,
+    input [31:0]         ie_instr_word_i,
+
     // ── IE-stage signals for misalign detection ─────────────────────────
     input mem_op_e       ie_mem_op_i,
     input load_store_width_e ie_ls_width_i,
@@ -350,14 +355,19 @@ always_comb begin
     end else if (misalign_store || misalign_amo) begin
         cause_code = 8'd6;  epc_out = pc_for_ie; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
     end else if (ie_csr_illegal) begin
-        cause_code = 8'd2;  epc_out = pc_for_ie; mtval_out = 32'h0; is_interrupt = 1'b0;
+        // Spike emits the offending instruction encoding in mtval for
+        // illegal-instruction traps; RISCOF's arch_test handler is built
+        // around that. Per spec (Priv §3.1.16) mtval may be 0 or the
+        // instruction bytes — pick spike's convention here for parity.
+        cause_code = 8'd2;  epc_out = pc_for_ie; mtval_out = ie_instr_word_i; is_interrupt = 1'b0;
     // IF/ID-stage instruction access fault (PMP) — before page fault
     end else if (insn_access_fault_i) begin
         cause_code = 8'd1;  epc_out = pc_for_id; mtval_out = insn_access_fault_addr_i; is_interrupt = 1'b0;
     end else if (insn_page_fault_i) begin
         cause_code = 8'd12; epc_out = pc_for_id; mtval_out = page_fault_addr; is_interrupt = 1'b0;
     end else if (illegal_valid) begin
-        cause_code = 8'd2;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
+        // See ie_csr_illegal note: emit raw instruction bytes (ID stage).
+        cause_code = 8'd2;  epc_out = pc_for_id; mtval_out = id_instr_word_i; is_interrupt = 1'b0;
     end else if (ecall_valid) begin
         cause_code = ecall_cause; epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
     end else if (ebreak_valid) begin
