@@ -261,16 +261,11 @@ logic        ptw_we;
 logic [31:0] ptw_wdata;
 logic        d_store_for_mmu;
 
-// Track whether PTW had a read request on the bus last cycle.
-// rvalid from the RAM is pulsed 1 cycle after the read request — so we must
-// only accept rvalid when it corresponds to the PTW's OWN request, not a
-// stale rvalid left over from a prior core load/AMO that happened right
-// before the PTW took over the dbus.
-logic ptw_req_prev;
-always_ff @(posedge clk_i or posedge reset_i)
-    if (reset_i) ptw_req_prev <= 1'b0;
-    else         ptw_req_prev <= ptw_req;
-wire ptw_rvalid = dmem_port.rvalid & ptw_req_prev;
+// (Phase 1e: PTW's own per-master rvalid ownership is now provided by
+// dmem_arb's pending_rd_master_q tracking. The previous ad-hoc
+// `ptw_req_prev + ptw_rvalid = dmem_port.rvalid & ptw_req_prev` is
+// removed — it was the same mechanism, just inlined here before the
+// arb existed.)
 
 // Registered instruction page fault — breaks the combinational loop:
 //   i_fault_o → trap_valid → interrupt_valid → mmu_priv → i_translate → i_fault_o
@@ -2538,10 +2533,11 @@ mmu_sv32 mmu_inst (
   .ptw_req_o      (ptw_req),
   .ptw_we_o       (ptw_we),
   .ptw_wdata_o    (ptw_wdata),
-  .ptw_data_i     (dmem_port.rdata),
-  // Read stall: wait for rvalid. Write stall (svadu): wait for ready.
-  .ptw_stall_i    (ptw_we ? ~dmem_port.ready :
-                   ptw_req ? ~ptw_rvalid : ~dmem_port.ready),
+  // Phase 1e: PTW consumes arb's per-master signals. Same semantics as
+  // before: read stall = wait for rvalid (gated by ownership inside the
+  // arb), write stall (svadu A/D) = wait for ready.
+  .ptw_data_i     (ptw_arb_rdata),
+  .ptw_stall_i    (ptw_we ? ~ptw_arb_ready : ~ptw_arb_rvalid),
   .ptw_active_o   (ptw_active),
   // PMP
   .pmpcfg_i              (pmpcfg_csr),
