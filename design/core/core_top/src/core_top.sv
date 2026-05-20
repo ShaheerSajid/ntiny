@@ -2659,34 +2659,19 @@ amo_unit amo_unit_inst
 	.dbus_read_o      (amo_dbus_read),
 	.dbus_write_o     (amo_dbus_write),
 	.dbus_writedata_o (amo_dbus_writedata),
-	.dbus_readdata_i  (dmem_port.rdata),
-	// AMO/PTW bus arbitration race fix (2026-04-30):
-	// dmem_port is shared between PTW (highest priority), AMO and the
-	// core's load/store unit. When ptw_active=1, dmem_port.req/we/wdata
-	// are driven by PTW, NOT by amo_unit — but amo_unit's stall input
-	// previously sampled dmem_port.ready/rvalid raw, so it interpreted
-	// PTW completions as its own. On AMO_READ this captured the wrong
-	// rdata (a PTE word) into read_data_q → CAS loops corrupted memory
-	// → folio refcount underflow → 6.6 xas_load livelock at ~88M cycles.
-	//
-	// Use both live ptw_active AND a 1-cycle-delayed ptw_active_q.
-	// The combined "ptw_owns_bus" stays high for one cycle past PTW
-	// completion, so any residual rvalid/ready/rdata from the PTW's
-	// last transaction is discarded by amo_unit. After ptw_active_q
-	// drops, amo_unit's own request goes on the bus and the bus's
-	// subsequent response is genuinely AMO's.
-	// Also include mmu_d_stall so the AMO never issues bus traffic
-	// while MMU translation is in flight (TLB miss + PTW walk, or the
-	// pre-PTW translation latency where d_paddr is unstable). Without
-	// this gate, AMO's dbus_read can latch garbage rdata from a
-	// previous transaction OR fire a request with stale d_paddr,
-	// producing wild low-PA reads that alias to early RAM in our
-	// model. Caught with bus_read.log probe: 1005 wild AMO LR reads
-	// per Linux v7.0 boot, the data of which feeds the IDR's
-	// radix_tree state and corrupts shift fields, ultimately
-	// crashing pty_init via radix_tree_extend BUG_ON.
-	.dbus_stall_i     (ptw_owns_bus | mmu_d_stall |
-	                   (amo_dbus_read ? ~dmem_port.rvalid : ~dmem_port.ready)),
+	.dbus_readdata_i  (amo_arb_rdata),
+	// Phase 1c bus revamp: AMO now consumes per-master arb signals
+	// instead of the shared dmem_port fan-out. amo_arb_rvalid /
+	// amo_arb_ready are gated by the arbiter on amo_grant + ownership
+	// of the outstanding read, so the AMO/PTW response-leak race that
+	// motivated the Phase 0 bandaid (ptw_active_q + composite stall)
+	// is now structurally prevented: amo_arb_rvalid only fires when
+	// pending_rd_master_q == M_AMO, which can only happen when AMO's
+	// own request was accepted. PTW completions are routed to
+	// ptw_arb_rvalid and ignored here. mmu_d_stall / ptw_active /
+	// fault suppression all flow through amo_grant (the arb returns
+	// amo_grant=0 in those cases), so the explicit terms drop out.
+	.dbus_stall_i     (amo_dbus_read ? ~amo_arb_rvalid : ~amo_arb_ready),
 	// Control
 	.result_o         (amo_result),
 	.stall_o          (amo_stall),
