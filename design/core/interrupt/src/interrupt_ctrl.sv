@@ -111,6 +111,10 @@ module interrupt_ctrl (
     // ── PMP access faults ───────────────────────────────────────────────
     input        insn_access_fault_i,     // registered mmu_i_access_fault_r
     input [31:0] insn_access_fault_addr_i,
+    // tval for instruction access faults: identical to ..._addr_i except on a
+    // straddled-32-bit insn where the upper half-fetch trapped — there it
+    // reports the offending half VA. See rv32i_m/pmp/pmpzca_misaligned_na4.
+    input [31:0] insn_access_fault_tval_i,
     input        data_access_fault_i,     // mmu_d_access_fault (combinational)
     input        data_access_fault_is_store_i,
     input [31:0] data_access_fault_addr_i,
@@ -362,7 +366,7 @@ always_comb begin
         cause_code = 8'd2;  epc_out = pc_for_ie; mtval_out = ie_instr_word_i; is_interrupt = 1'b0;
     // IF/ID-stage instruction access fault (PMP) — before page fault
     end else if (insn_access_fault_i) begin
-        cause_code = 8'd1;  epc_out = pc_for_id; mtval_out = insn_access_fault_addr_i; is_interrupt = 1'b0;
+        cause_code = 8'd1;  epc_out = pc_for_id; mtval_out = insn_access_fault_tval_i; is_interrupt = 1'b0;
     end else if (insn_page_fault_i) begin
         cause_code = 8'd12; epc_out = pc_for_id; mtval_out = page_fault_addr; is_interrupt = 1'b0;
     end else if (illegal_valid) begin

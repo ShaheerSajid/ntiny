@@ -225,6 +225,7 @@ logic [31:0] aligner_pc_id;
 logic       aligner_valid;
 logic       aligner_fault;
 logic [4:0] aligner_cause;
+logic [31:0] aligner_fault_addr;
 logic       aligner_pred_taken;
 logic [31:0] aligner_pred_target;
 wire        aligner_pred_is_branch;
@@ -282,6 +283,7 @@ logic        mmu_d_fault_is_store_r;  // Bug 30: registered is-store flag
 logic [31:0] mmu_i_fault_addr_r, mmu_d_fault_addr_r;
 logic        mmu_i_access_fault_r,      mmu_d_access_fault_r;
 logic [31:0] mmu_i_access_fault_addr_r, mmu_d_access_fault_addr_r;
+logic [31:0] mmu_i_access_fault_tval_r;
 
 // ── Phase 4.8: buffer-routed instruction-side faults ──
 // Forward references to aligner_valid / aligner_fault / aligner_cause /
@@ -363,6 +365,11 @@ trap_sequencer trap_seq_inst (
     .mmu_i_access_fault_i       (i_buf_access_fault | mmu_i_access_fault_ptw),
     .mmu_i_access_fault_addr_i  (mmu_i_access_fault_ptw ? mmu_i_access_fault_ptw_addr
                                                         : aligner_pc_id),
+    // tval reports the offending half-fetch VA so a straddled 32-bit insn
+    // whose upper half hit the PMP fault matches spike's mtval. See
+    // rv32i_m/pmp/pmpzca_misaligned_na4.
+    .mmu_i_access_fault_tval_i  (mmu_i_access_fault_ptw ? mmu_i_access_fault_ptw_addr
+                                                        : aligner_fault_addr),
     .mmu_d_access_fault_i       (mmu_d_access_fault),
     .mmu_d_access_fault_addr_i  (mmu_d_access_fault_addr),
     // Registered faults (to interrupt_ctrl)
@@ -373,6 +380,7 @@ trap_sequencer trap_seq_inst (
     .d_fault_is_store_r_o       (mmu_d_fault_is_store_r),
     .i_access_fault_r_o         (mmu_i_access_fault_r),
     .i_access_fault_addr_r_o    (mmu_i_access_fault_addr_r),
+    .i_access_fault_tval_r_o    (mmu_i_access_fault_tval_r),
     .d_access_fault_r_o         (mmu_d_access_fault_r),
     .d_access_fault_addr_r_o    (mmu_d_access_fault_addr_r)
 );
@@ -1462,11 +1470,12 @@ compressed_aligner compressed_aligner_inst (
     .redirect_valid_i    (arb_redirect_valid && arb_redirect_kind != RDR_BPU_IF),
     .redirect_target_i   (arb_redirect_target),
 
-    .instruction_o       (aligner_inst),
-    .pc_id_o             (aligner_pc_id),
-    .instruction_valid_o (aligner_valid),
-    .instruction_fault_o (aligner_fault),
-    .instruction_cause_o (aligner_cause),
+    .instruction_o            (aligner_inst),
+    .pc_id_o                  (aligner_pc_id),
+    .instruction_valid_o      (aligner_valid),
+    .instruction_fault_o      (aligner_fault),
+    .instruction_cause_o      (aligner_cause),
+    .instruction_fault_addr_o (aligner_fault_addr),
     .is_compressed_o     (aligner_is_compressed),
     .pred_taken_o        (aligner_pred_taken),
     .pred_target_o       (aligner_pred_target)
@@ -1807,6 +1816,7 @@ interrupt_ctrl interrupt_ctrl_inst
   // PMP access faults
   .insn_access_fault_i       (mmu_i_access_fault_r),
   .insn_access_fault_addr_i  (mmu_i_access_fault_addr_r),
+  .insn_access_fault_tval_i  (mmu_i_access_fault_tval_r),
   // Use registered version to break combinational loop:
   // d_pmp_fault → trap_valid → interrupt_valid → flush_i → settles wrong.
   // Registered path — IE stall holds the faulting instruction for 1 cycle
