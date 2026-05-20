@@ -11,6 +11,7 @@
 ../../design/core/c_ext/src/c_controller.sv
 ../../design/interconnect/src/addr_decoder.sv
 ../../design/interconnect/src/periph_bridge.sv
+../../design/interconnect/src/dmem_arb.sv
 ../../design/memory/src/ram_dp.sv
 ../../design/memory/src/icache.sv
 ../../design/memory/src/dcache.sv

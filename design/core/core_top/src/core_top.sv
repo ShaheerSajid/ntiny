@@ -2705,53 +2705,47 @@ assign d_req_for_mmu = amo_active ? (amo_dbus_read | amo_dbus_write) : (c2a_read
 assign d_req_raw = amo_active ? (amo_dbus_read | amo_dbus_write) :
                   (ctrl_bus_ie.mem_op != NO_MEM_OP);
 
-// PTW takes over D-port when walking page table; otherwise use translated address
-assign dmem_port.addr  = ptw_active ? ptw_addr : d_paddr;
-assign dmem_port.be    = ptw_active ? 4'b1111 :
-                         amo_active ? amo_dbus_byteenable : c2a_byteenable;
-// MMU-translation gate: while mmu_d_stall is high (DTLB miss in flight,
-// PTW walking, or translation pre-settled), `d_paddr` is NOT stable —
-// can be garbage / pre-translation / partially-walked. The IE-stage holds
-// the store and `c2a_write` is asserted combinationally from
-// ctrl_bus_ie.mem_op every cycle; without this gate, the always-ready
-// RAM accepts every cycle of `req && we`, committing the store to whatever
-// d_paddr happens to be, giving multiple commits to wild PAs (caught by
-// the bus_write probe: 8703 wild low-PA writes per Linux v7.0 boot,
-// silently aliasing to early RAM via incomplete decode in ram_dp.sv,
-// corrupting OpenSBI/kernel memory and crashing pty_init layout-sensitively).
+// PTW takes over D-port when walking page table; otherwise the MMU-
+// translated `d_paddr` flows through (shared by AMO + core2avl since
+// both feed the same d-translate stage upstream).
 //
-// Suppress the c2a-path commit until the MMU has finished translating.
-// PTW path is unaffected (gated only by ptw_active). AMO path is
-// unaffected (it interlocks via amo_unit's own dbus_stall_i which already
-// includes ptw_active). exception_from_ie / mmu_d_access_fault /
-// mmu_d_fault still suppress as before.
-//
-// The first attempt at this bug used `ie_flush` instead, which broke
-// boot because most ie_flush events come from interrupts retiring on a
-// committed store (architecturally-required commit-then-trap contract).
-// `mmu_d_stall` correctly captures only the cycles where d_paddr isn't
-// trustworthy yet.
-// Gate BOTH the c2a-path AND the amo-path bus outputs by
-// d_xlat_pending. AMO's dbus_stall_i already covers translation, but
-// the AMO state machine still drives amo_dbus_read/amo_dbus_write
-// outputs at the bus level — without an output-side gate, those
-// signals reach dmem_port.req while d_paddr is still unstable,
-// producing wild low-PA AMO LR/SC reads (1005 per Linux v7.0 boot
-// caught by bus_read probe). PTW is unaffected (ptw_addr is
-// independent of d_paddr).
+// All static-priority muxing + write-suppression that used to live
+// inline here is now in dmem_arb. See docs/bus_revamp_plan.md Phase 1
+// for the rationale (and Phase 1c–1e for upcoming grant-based master
+// migration). `d_xlat_pending` is still asserted by mmu_d_stall and
+// passed in so the arb can replicate the bus.req/we = 0 suppression
+// that prevented the wild-PA store/AMO commits during translation.
 wire d_xlat_pending = mmu_d_stall;
-assign dmem_port.req   = ptw_active ? ptw_req :
-                         (mmu_d_access_fault || mmu_d_fault) ? 1'b0 :  // PMP/page fault: suppress bus
-                         d_xlat_pending ? 1'b0 :                        // MMU translation in flight (covers c2a+amo)
-                         amo_active ? (amo_dbus_read | amo_dbus_write) :
-                                      (c2a_read | c2a_write);
-assign dmem_port.we    = ptw_active ? ptw_we :
-                         (mmu_d_access_fault || mmu_d_fault) ? 1'b0 :  // PMP/page fault: suppress bus
-                         d_xlat_pending ? 1'b0 :                        // MMU translation in flight (covers c2a+amo)
-                         amo_active ? amo_dbus_write :
-                                      c2a_write;
-assign dmem_port.wdata = ptw_active ? ptw_wdata :
-                         amo_active ? amo_dbus_writedata  : c2a_writedata;
+wire ptw_grant, amo_grant, c2a_grant;
+dmem_arb dmem_arb_inst (
+    .ptw_req_i              (ptw_req),
+    .ptw_we_i               (ptw_we),
+    .ptw_addr_i             (ptw_addr),
+    .ptw_wdata_i            (ptw_wdata),
+    .ptw_grant_o            (ptw_grant),
+
+    .amo_req_i              (amo_dbus_read | amo_dbus_write),
+    .amo_we_i               (amo_dbus_write),
+    .amo_be_i               (amo_dbus_byteenable),
+    .amo_wdata_i            (amo_dbus_writedata),
+    .amo_grant_o            (amo_grant),
+
+    .c2a_req_i              (c2a_read | c2a_write),
+    .c2a_we_i               (c2a_write),
+    .c2a_be_i               (c2a_byteenable),
+    .c2a_wdata_i            (c2a_writedata),
+    .c2a_grant_o            (c2a_grant),
+
+    .data_paddr_i           (d_paddr),
+
+    .ptw_active_i           (ptw_active),
+    .amo_active_i           (amo_active),
+    .d_xlat_pending_i       (d_xlat_pending),
+    .mmu_d_access_fault_i   (mmu_d_access_fault),
+    .mmu_d_fault_i          (mmu_d_fault),
+
+    .bus                    (dmem_port)
+);
 
 always_ff@(posedge clk_i or posedge reset_i)
 	begin
