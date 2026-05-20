@@ -24,12 +24,18 @@
 // its own physical address directly.
 //
 module dmem_arb (
+    input  logic        clk_i,
+    input  logic        reset_i,
+
     // PTW (master 0, highest priority)
     input  logic        ptw_req_i,
     input  logic        ptw_we_i,
     input  logic [31:0] ptw_addr_i,
     input  logic [31:0] ptw_wdata_i,
     output logic        ptw_grant_o,
+    output logic        ptw_ready_o,
+    output logic        ptw_rvalid_o,
+    output logic [31:0] ptw_rdata_o,
 
     // AMO (master 1)
     input  logic        amo_req_i,
@@ -37,6 +43,9 @@ module dmem_arb (
     input  logic [3:0]  amo_be_i,
     input  logic [31:0] amo_wdata_i,
     output logic        amo_grant_o,
+    output logic        amo_ready_o,
+    output logic        amo_rvalid_o,
+    output logic [31:0] amo_rdata_o,
 
     // core2avl (master 2, lowest priority — the regular load/store path)
     input  logic        c2a_req_i,
@@ -44,6 +53,9 @@ module dmem_arb (
     input  logic [3:0]  c2a_be_i,
     input  logic [31:0] c2a_wdata_i,
     output logic        c2a_grant_o,
+    output logic        c2a_ready_o,
+    output logic        c2a_rvalid_o,
+    output logic [31:0] c2a_rdata_o,
 
     // Shared MMU-translated PA for AMO + core2avl.
     input  logic [31:0] data_paddr_i,
@@ -97,5 +109,62 @@ module dmem_arb (
     assign bus.wdata = ptw_active_i ? ptw_wdata_i :
                        amo_active_i ? amo_wdata_i :
                                       c2a_wdata_i;
+
+    // ── Per-master response routing ─────────────────────────────────────
+    // ntiny's downstream slave (RAM/peripheral) is in-order, single-
+    // outstanding per master, with `ready` always high (no real
+    // back-pressure today) and `rvalid` arriving exactly one cycle
+    // after a read request is accepted. So tracking the "pending read
+    // master" with a 2-bit registered state is enough — no FIFO.
+    //
+    // pending_rd_master_q stores the grant ID of the most recent
+    // accepted read. When bus.rvalid fires, that master gets it; in
+    // the same cycle a new read can be accepted, overwriting the
+    // state because the response was just consumed.
+    typedef enum logic [1:0] {
+        M_NONE = 2'd0,
+        M_PTW  = 2'd1,
+        M_AMO  = 2'd2,
+        M_C2A  = 2'd3
+    } master_id_e;
+
+    master_id_e pending_rd_master_q;
+    wire        read_accepted = bus.req & ~bus.we & bus.ready;
+    master_id_e granted_master;
+    always_comb begin
+        if      (ptw_grant_o) granted_master = M_PTW;
+        else if (amo_grant_o) granted_master = M_AMO;
+        else if (c2a_grant_o) granted_master = M_C2A;
+        else                  granted_master = M_NONE;
+    end
+
+    always_ff @(posedge clk_i or posedge reset_i) begin
+        if (reset_i) begin
+            pending_rd_master_q <= M_NONE;
+        end else if (read_accepted) begin
+            pending_rd_master_q <= granted_master;
+        end else if (bus.rvalid) begin
+            pending_rd_master_q <= M_NONE;
+        end
+    end
+
+    // Per-master ready: a master can have its request accepted only when
+    // it currently holds the grant and the slave is ready. Forward-compat
+    // signal — not yet consumed by any master (1c–1e wire them in).
+    assign ptw_ready_o = ptw_grant_o & bus.ready;
+    assign amo_ready_o = amo_grant_o & bus.ready;
+    assign c2a_ready_o = c2a_grant_o & bus.ready;
+
+    // Per-master rvalid: the slave's rvalid is routed to whichever master
+    // owns the outstanding read this cycle.
+    assign ptw_rvalid_o = (pending_rd_master_q == M_PTW) & bus.rvalid;
+    assign amo_rvalid_o = (pending_rd_master_q == M_AMO) & bus.rvalid;
+    assign c2a_rvalid_o = (pending_rd_master_q == M_C2A) & bus.rvalid;
+
+    // rdata is broadcast (the per-master rvalid above is the timing-and-
+    // ownership gate).
+    assign ptw_rdata_o = bus.rdata;
+    assign amo_rdata_o = bus.rdata;
+    assign c2a_rdata_o = bus.rdata;
 
 endmodule

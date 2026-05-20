@@ -2716,25 +2716,40 @@ assign d_req_raw = amo_active ? (amo_dbus_read | amo_dbus_write) :
 // passed in so the arb can replicate the bus.req/we = 0 suppression
 // that prevented the wild-PA store/AMO commits during translation.
 wire d_xlat_pending = mmu_d_stall;
-wire ptw_grant, amo_grant, c2a_grant;
+wire        ptw_grant,  amo_grant,  c2a_grant;
+wire        ptw_arb_ready, amo_arb_ready, c2a_arb_ready;
+wire        ptw_arb_rvalid, amo_arb_rvalid, c2a_arb_rvalid;
+wire [31:0] ptw_arb_rdata,  amo_arb_rdata,  c2a_arb_rdata;
 dmem_arb dmem_arb_inst (
+    .clk_i                  (clk_i),
+    .reset_i                (reset_i),
+
     .ptw_req_i              (ptw_req),
     .ptw_we_i               (ptw_we),
     .ptw_addr_i             (ptw_addr),
     .ptw_wdata_i            (ptw_wdata),
     .ptw_grant_o            (ptw_grant),
+    .ptw_ready_o            (ptw_arb_ready),
+    .ptw_rvalid_o           (ptw_arb_rvalid),
+    .ptw_rdata_o            (ptw_arb_rdata),
 
     .amo_req_i              (amo_dbus_read | amo_dbus_write),
     .amo_we_i               (amo_dbus_write),
     .amo_be_i               (amo_dbus_byteenable),
     .amo_wdata_i            (amo_dbus_writedata),
     .amo_grant_o            (amo_grant),
+    .amo_ready_o            (amo_arb_ready),
+    .amo_rvalid_o           (amo_arb_rvalid),
+    .amo_rdata_o            (amo_arb_rdata),
 
     .c2a_req_i              (c2a_read | c2a_write),
     .c2a_we_i               (c2a_write),
     .c2a_be_i               (c2a_byteenable),
     .c2a_wdata_i            (c2a_writedata),
     .c2a_grant_o            (c2a_grant),
+    .c2a_ready_o            (c2a_arb_ready),
+    .c2a_rvalid_o           (c2a_arb_rvalid),
+    .c2a_rdata_o            (c2a_arb_rdata),
 
     .data_paddr_i           (d_paddr),
 
