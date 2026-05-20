@@ -444,7 +444,9 @@ debug_ctrl debug_ctrl_inst (
     .ar_ad_i          (ar_ad_i),
     .ar_di_i          (ar_di_i),
     .am_en_i          (am_en_i),
-    .dmem_ready_i     (dmem_port.ready),
+    // Phase 1d: per-master arb routing (debug abstract-memory accesses
+    // ride the c2a path via dbg_mem_override).
+    .dmem_ready_i     (c2a_arb_ready),
     // Pipeline state
     .id_ebreak_i      (ctrl_bus_if_id_raw.ebreak),  // _raw: comb-loop break (see interrupt_ctrl input note)
     .c_busy_i         (c_busy),
@@ -490,8 +492,12 @@ hazard_unit hazard_unit_inst (
     .mmu_d_stall_i      (mmu_d_stall),
     .pmp_d_fault_i      (mmu_d_access_fault),  // stall IE 1 cycle for registered trap
     .d_page_fault_i     (mmu_d_fault),         // stall IE 1 cycle for registered trap
-    .dmem_req_i         (dmem_port.req),
-    .dmem_ready_i       (dmem_port.ready),
+    // Phase 1d: hazard_unit uses per-master arb signals for the c2a
+    // path. The "core" request here is c2a's intent to issue (gated by
+    // mem_op != NO_MEM_OP); arb-ready tells us whether the arb would
+    // accept the request this cycle.
+    .dmem_req_i         (c2a_read | c2a_write),
+    .dmem_ready_i       (c2a_arb_ready),
     .insert_bubble_i    (insert_bubble),
     // Control flow
     .interrupt_valid_i  (interrupt_valid),
@@ -2620,7 +2626,8 @@ core2avl core2avl_inst
 	.data2write_i		  (dbg_mem_override? am_di_i :  opB_forwarded_data),
 	.data2read_o		  (readdata_imem),
 	//avl signals (intermediate, muxed with AMO unit)
-	.readdata_i			  (dmem_port.rdata),
+	// Phase 1d: per-master arb routing replaces shared dmem_port fan-out.
+	.readdata_i			  (c2a_arb_rdata),
 	.address_o			  (c2a_address),
 	.writedata_o		  (c2a_writedata),
 	.byteenable_o		  (c2a_byteenable),
