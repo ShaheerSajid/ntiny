@@ -2632,17 +2632,12 @@ core2avl core2avl_inst
 	.misalign_stall_o (misalign_stall)
 );
 
-// ── PTW-bus-ownership latch for AMO arbitration ────────────────
-// ptw_active drops the cycle PTW finishes, but the bus's residual
-// rvalid/ready/rdata from PTW's last transaction can persist for one
-// more cycle. amo_unit must stay stalled across that boundary or it
-// will consume PTW's response as its own (corrupting read_data_q).
-logic ptw_active_q;
-always_ff @(posedge clk_i or posedge reset_i) begin
-    if (reset_i) ptw_active_q <= 1'b0;
-    else         ptw_active_q <= ptw_active;
-end
-wire ptw_owns_bus = ptw_active | ptw_active_q;
+// (Phase 1f: ptw_active_q + ptw_owns_bus latch removed. They were the
+// Phase 0 bandaid for the AMO/PTW response-leak race; since 1c routed
+// amo_unit through dmem_arb's per-master amo_arb_rvalid — which is
+// gated by pending_rd_master_q == M_AMO and so cannot fire for a PTW
+// response — the latch became dead code. Structural ownership replaces
+// the timing-margin workaround.)
 
 // ── AMO unit ──────────────────────────────────────────────────
 amo_unit amo_unit_inst
