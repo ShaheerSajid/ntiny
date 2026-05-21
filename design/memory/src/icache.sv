@@ -1,15 +1,33 @@
 // ── L1 Instruction Cache ─────────────────────────────────────────────
-// Phase 2a of the bus revamp: 4-way set-associative, 32-byte lines,
-// VIPT geometry. Still transparent to the pipeline — every request is
-// forwarded to the backing store and the cache fills the responded word
-// on the side. Real cache benefit (hit returns without touching RAM)
-// arrives in Phase 2b with the multi-beat fill FSM.
+// Phase 2b-ii of the bus revamp: cache hits now BYPASS the backing
+// store. mem_req is only issued on a miss; on a hit the cache returns
+// data from its internal arrays and the RAM access is skipped (real
+// bandwidth savings on hot loops + tight icache regions).
 //
-// Geometry:
-//   CACHE_BYTES = 4096
-//   WAYS         = 4
-//   LINE_BYTES   = 32  → 8 words per line
-//   BYTES_PER_WAY = 1024 → 32 sets per way
+// Compared to Phase 2a (which forwarded every request to RAM and just
+// filled words on the side), 2b-ii is the first version where the cache
+// actually saves RAM port-A traffic.
+//
+// Pipeline contract is UNCHANGED from 2a:
+//   - cpu_ready_o = mem_ready_i (always 1 here; never stalls).
+//   - cpu_rvalid_o asserts 1 cycle after acceptance, the same SRAM-
+//     style timing the fetch pipeline already expects.
+//
+// Why no stalling FSM / multi-beat fill in this commit: the producer
+// (`core_top.sv`) relies on the cache being able to accept a request
+// every cycle to drive the inflight_vaddr_q ↔ rdata alignment that
+// gives correct {word, vaddr} buffer entries for the very first fetch
+// at reset deassert. Real multi-beat fills with a stalling slave need
+// a producer-side "first fetch pending" register to keep the master
+// re-issuing the reset PC across the stall window — that lands later
+// (Phase 3 sub-step), together with the AXI burst master where the
+// burst geometry actually matters.
+//
+// Geometry (unchanged from 2a):
+//   CACHE_BYTES    = 4096
+//   WAYS           = 4
+//   LINE_BYTES     = 32  → 8 words per line
+//   BYTES_PER_WAY  = 1024 → 32 sets per way
 //
 // Address layout (32-bit byte address):
 //   [31 .. 10]  tag      (22 bits)
@@ -17,26 +35,25 @@
 //   [ 4 ..  2]  word-off ( 3 bits)
 //   [ 1 ..  0]  byte-off ( 2 bits, ignored — word-aligned)
 //
-// Word-level valid bits inside each line let the transparent fill
-// (one word per response) install only the responded word; siblings in
-// the same line stay invalid until they're touched. Once the fill FSM
-// in 2b can refill a full line, we can drop the per-word vector and
-// use line-level valid only.
+// Per-word valid bits inside each line let single-word fills install
+// only the word that was responded; siblings in the same line stay
+// invalid until they're touched (so a hit requires both line_valid and
+// word_valid).
 //
-// Replacement: round-robin per set (one 2-bit FIFO pointer per set).
+// Replacement: round-robin per set.
 //
 // FENCE.I: invalidates all entries in 1 cycle.
 //
 module icache #(
     parameter ADDR_WIDTH  = 32,
     parameter DATA_WIDTH  = 32,
-    parameter CACHE_BYTES = 4096        // total cache size in bytes
+    parameter CACHE_BYTES = 4096
 )(
     input  logic                  clk_i,
     input  logic                  reset_i,
     input  logic                  flush_i,      // FENCE.I: invalidate all
 
-    // CPU-facing slave port (directly replaces RAM interface)
+    // CPU-facing slave port
     input  logic                  cpu_req_i,
     input  logic [ADDR_WIDTH-1:0] cpu_addr_i,
     output logic [DATA_WIDTH-1:0] cpu_rdata_o,
@@ -65,13 +82,13 @@ localparam int INDEX_BITS     = $clog2(SETS);                     // 5
 localparam int TAG_BITS       = ADDR_WIDTH - INDEX_BITS - WORD_OFF_BITS - BYTE_OFF_BITS; // 22
 localparam int WAY_BITS       = $clog2(WAYS);                     // 2
 
-// ── Storage (per way × per set) ──────────────────────────────────────
-logic                  line_valid [WAYS][SETS];                          // line in this way is allocated
-logic                  word_valid [WAYS][SETS][WORDS_PER_LINE];          // per-word valid
+// ── Storage ──────────────────────────────────────────────────────────
+logic                  line_valid [WAYS][SETS];
+logic                  word_valid [WAYS][SETS][WORDS_PER_LINE];
 logic [TAG_BITS-1:0]   tags       [WAYS][SETS];
 logic [DATA_WIDTH-1:0] data       [WAYS][SETS][WORDS_PER_LINE];
 
-// Round-robin replacement pointer per set
+// Round-robin replacement pointer per set.
 logic [WAY_BITS-1:0]   repl_ptr   [SETS];
 
 // ── Address decomposition (combinational) ────────────────────────────
@@ -99,28 +116,38 @@ always_comb begin
     end
 end
 
-// ── Transparent forward to backing store ─────────────────────────────
-// Same pattern as the old icache: every request goes to RAM. Phase 2b
-// short-circuits this on hit.
-assign mem_req_o   = cpu_req_i;
+// ── Memory-side req ──────────────────────────────────────────────────
+// 2b-ii change: skip the mem_req when this cycle's CPU request is a
+// hit. On a miss we still forward unchanged. flush_i suppresses too —
+// a FENCE.I happens at the IE stage and the same-cycle producer fetch
+// is wrong-path; not sending it down to RAM avoids a spurious read.
+assign mem_req_o   = cpu_req_i & ~hit & ~flush_i;
 assign mem_addr_o  = cpu_addr_i;
 assign cpu_ready_o = mem_ready_i;
 
-// ── Register the hit path so cache data appears the same cycle the
-//    backing store would have responded (1-cycle latency for both). ──
-logic                    hit_r;
-logic [DATA_WIDTH-1:0]   cache_rdata_r;
+// ── Hit-side response (1-cycle pipeline matching SRAM timing) ────────
+// hit_r captures whether THIS request was a hit, so next cycle we know
+// to route cache data instead of mem data. cache_rdata_r samples the
+// hit-way data array unconditionally; it's only consumed on hit_r=1.
+logic                  hit_r;
+logic [DATA_WIDTH-1:0] cache_rdata_r;
 
 always_ff @(posedge clk_i) begin
-    hit_r         <= hit & cpu_req_i & ~flush_i;
+    hit_r         <= cpu_req_i & hit & ~flush_i;
     cache_rdata_r <= data[hit_way_id][addr_index][addr_word_off];
 end
 
-// Output: cache data on hit, RAM data on miss.
+// Output: cache data on hit_r, RAM data on miss. cpu_rvalid_o is
+// hit_r OR mem_rvalid_i so the master sees a valid response in both
+// cases.
 assign cpu_rdata_o  = hit_r ? cache_rdata_r : mem_rdata_i;
-assign cpu_rvalid_o = mem_rvalid_i;
+assign cpu_rvalid_o = hit_r | mem_rvalid_i;
 
-// ── Pending fill (1-cycle pipeline to align RAM response with cache) ─
+// ── Miss fill pipeline (single-word, registered to align with RAM) ───
+// Unchanged from 2a: each miss response installs the responded word
+// into the picked way; the rest of the line stays invalid until those
+// words get touched. Multi-beat line fills are deferred to a later
+// phase where the AXI master path makes burst geometry meaningful.
 logic                      fill_pending_r;
 logic [TAG_BITS-1:0]       fill_tag_r;
 logic [INDEX_BITS-1:0]     fill_index_r;
@@ -130,6 +157,9 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
         fill_pending_r <= 1'b0;
     end else begin
+        // Track misses (where we actually issued mem_req). On hit we
+        // intentionally don't fill (the word is already cached) so
+        // fill_pending_r stays 0 and we don't double-install.
         fill_pending_r <= cpu_req_i & ~hit & ~flush_i;
         fill_tag_r     <= addr_tag;
         fill_index_r   <= addr_index;
@@ -137,16 +167,11 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     end
 end
 
-// Install-time tag-match (re-checked against current cache state, NOT
-// latched at request time). Latching the match at request time made
-// back-to-back fills for consecutive words in the same line race: the
-// second fill would still see "no matching tag" because the first
-// fill's install hadn't committed yet, and would allocate the same
-// tag in a SECOND way — leaving two ways holding the same tag and
-// hit_way_id picking the wrong one on subsequent hits, returning
-// stale data and panicking Linux init. Computing this here closes
-// the race because the always_ff that uses it commits AFTER any
-// install from this very cycle is visible in the storage arrays.
+// Install-time tag-match — see the 2a hotfix commit (23c222e) for the
+// long-form rationale. Computed combinationally against the *current*
+// cache state so back-to-back fills for consecutive words in the same
+// line slot into the way the previous fill just allocated rather than
+// picking a new way (avoids the two-ways-same-tag Linux-init bug).
 logic                  install_tag_match;
 logic [WAY_BITS-1:0]   install_tag_match_way;
 always_comb begin
@@ -174,8 +199,8 @@ always_ff @(posedge clk_i or posedge reset_i) begin
         for (int s = 0; s < SETS; s++) repl_ptr[s] <= '0;
     end else if (flush_i) begin
         // FENCE.I: invalidate every line. Word_valid bits are gated by
-        // line_valid in the hit check, so just clearing line_valid is
-        // sufficient — but we clear word_valid too for cleanliness.
+        // line_valid in the hit check, so clearing line_valid is
+        // sufficient — we also clear word_valid for cleanliness.
         for (int w = 0; w < WAYS; w++) begin
             for (int s = 0; s < SETS; s++) begin
                 line_valid[w][s] <= 1'b0;
@@ -185,10 +210,6 @@ always_ff @(posedge clk_i or posedge reset_i) begin
             end
         end
     end else if (fill_pending_r && mem_rvalid_i) begin
-        // Pick the way to install in. install_tag_match is computed
-        // combinationally from the *current* cache state above, so a
-        // back-to-back fill for the same line slots into the way the
-        // previous fill just allocated rather than picking a new way.
         automatic logic [WAY_BITS-1:0] install_way =
             install_tag_match ? install_tag_match_way : repl_ptr[fill_index_r];
 
