@@ -125,37 +125,38 @@ logic                      fill_pending_r;
 logic [TAG_BITS-1:0]       fill_tag_r;
 logic [INDEX_BITS-1:0]     fill_index_r;
 logic [WORD_OFF_BITS-1:0]  fill_word_r;
-logic                      fill_tag_match_r;
-logic [WAY_BITS-1:0]       fill_tag_match_way_r;
-
-// Did any way already hold this line (just a different word)? If yes,
-// the new word slots into that existing way; if no, repl_ptr picks a
-// replacement way and the entire line is reset to invalid words first.
-logic                  tag_match_any;
-logic [WAY_BITS-1:0]   tag_match_way;
-always_comb begin
-    tag_match_any = 1'b0;
-    tag_match_way = '0;
-    for (int w = 0; w < WAYS; w++) begin
-        if (line_valid[w][addr_index] && tags[w][addr_index] == addr_tag) begin
-            tag_match_any = 1'b1;
-            tag_match_way = w[WAY_BITS-1:0];
-        end
-    end
-end
 
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
-        fill_pending_r       <= 1'b0;
-        fill_tag_match_r     <= 1'b0;
-        fill_tag_match_way_r <= '0;
+        fill_pending_r <= 1'b0;
     end else begin
-        fill_pending_r       <= cpu_req_i & ~hit & ~flush_i;
-        fill_tag_r           <= addr_tag;
-        fill_index_r         <= addr_index;
-        fill_word_r          <= addr_word_off;
-        fill_tag_match_r     <= tag_match_any;
-        fill_tag_match_way_r <= tag_match_way;
+        fill_pending_r <= cpu_req_i & ~hit & ~flush_i;
+        fill_tag_r     <= addr_tag;
+        fill_index_r   <= addr_index;
+        fill_word_r    <= addr_word_off;
+    end
+end
+
+// Install-time tag-match (re-checked against current cache state, NOT
+// latched at request time). Latching the match at request time made
+// back-to-back fills for consecutive words in the same line race: the
+// second fill would still see "no matching tag" because the first
+// fill's install hadn't committed yet, and would allocate the same
+// tag in a SECOND way — leaving two ways holding the same tag and
+// hit_way_id picking the wrong one on subsequent hits, returning
+// stale data and panicking Linux init. Computing this here closes
+// the race because the always_ff that uses it commits AFTER any
+// install from this very cycle is visible in the storage arrays.
+logic                  install_tag_match;
+logic [WAY_BITS-1:0]   install_tag_match_way;
+always_comb begin
+    install_tag_match     = 1'b0;
+    install_tag_match_way = '0;
+    for (int w = 0; w < WAYS; w++) begin
+        if (line_valid[w][fill_index_r] && tags[w][fill_index_r] == fill_tag_r) begin
+            install_tag_match     = 1'b1;
+            install_tag_match_way = w[WAY_BITS-1:0];
+        end
     end
 end
 
@@ -184,11 +185,14 @@ always_ff @(posedge clk_i or posedge reset_i) begin
             end
         end
     end else if (fill_pending_r && mem_rvalid_i) begin
-        // Pick the way to install in.
+        // Pick the way to install in. install_tag_match is computed
+        // combinationally from the *current* cache state above, so a
+        // back-to-back fill for the same line slots into the way the
+        // previous fill just allocated rather than picking a new way.
         automatic logic [WAY_BITS-1:0] install_way =
-            fill_tag_match_r ? fill_tag_match_way_r : repl_ptr[fill_index_r];
+            install_tag_match ? install_tag_match_way : repl_ptr[fill_index_r];
 
-        if (!fill_tag_match_r) begin
+        if (!install_tag_match) begin
             // New tag in this set — evict the way picked by repl_ptr,
             // invalidate all its words, then install the requested one.
             tags[install_way][fill_index_r] <= fill_tag_r;

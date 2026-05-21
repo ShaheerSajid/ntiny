@@ -89,22 +89,6 @@ always_comb begin
     end
 end
 
-// Tag-only match (line in this set holds the same tag, even if not all
-// words are valid yet). Used by the fill pipe to decide whether to
-// install into an existing way or evict via repl_ptr.
-logic                tag_match_any;
-logic [WAY_BITS-1:0] tag_match_way;
-always_comb begin
-    tag_match_any = 1'b0;
-    tag_match_way = '0;
-    for (int w = 0; w < WAYS; w++) begin
-        if (line_valid[w][addr_index] && tags[w][addr_index] == addr_tag) begin
-            tag_match_any = 1'b1;
-            tag_match_way = w[WAY_BITS-1:0];
-        end
-    end
-end
-
 // ── Transparent forward to backing store (writes + reads) ────────────
 assign mem_req_o   = cpu_req_i;
 assign mem_we_o    = cpu_we_i;
@@ -124,21 +108,32 @@ logic                      fill_pending_r;
 logic [TAG_BITS-1:0]       fill_tag_r;
 logic [INDEX_BITS-1:0]     fill_index_r;
 logic [WORD_OFF_BITS-1:0]  fill_word_r;
-logic                      fill_tag_match_r;
-logic [WAY_BITS-1:0]       fill_tag_match_way_r;
 
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
-        fill_pending_r       <= 1'b0;
-        fill_tag_match_r     <= 1'b0;
-        fill_tag_match_way_r <= '0;
+        fill_pending_r <= 1'b0;
     end else begin
-        fill_pending_r       <= cpu_req_i & ~cpu_we_i & ~hit & ~flush_i;
-        fill_tag_r           <= addr_tag;
-        fill_index_r         <= addr_index;
-        fill_word_r          <= addr_word_off;
-        fill_tag_match_r     <= tag_match_any;
-        fill_tag_match_way_r <= tag_match_way;
+        fill_pending_r <= cpu_req_i & ~cpu_we_i & ~hit & ~flush_i;
+        fill_tag_r     <= addr_tag;
+        fill_index_r   <= addr_index;
+        fill_word_r    <= addr_word_off;
+    end
+end
+
+// Install-time tag-match — see icache.sv for the long-form rationale.
+// Same race here for back-to-back loads to consecutive words in the
+// same line; using the latched fill_tag_match_r let two ways hold the
+// same tag and hit_way_id picked the wrong one.
+logic                  install_tag_match;
+logic [WAY_BITS-1:0]   install_tag_match_way;
+always_comb begin
+    install_tag_match     = 1'b0;
+    install_tag_match_way = '0;
+    for (int w = 0; w < WAYS; w++) begin
+        if (line_valid[w][fill_index_r] && tags[w][fill_index_r] == fill_tag_r) begin
+            install_tag_match     = 1'b1;
+            install_tag_match_way = w[WAY_BITS-1:0];
+        end
     end
 end
 
@@ -188,9 +183,9 @@ always_ff @(posedge clk_i or posedge reset_i) begin
         // Read-miss fill: install word in an existing matching way or evict.
         if (fill_pending_r && mem_rvalid_i) begin
             automatic logic [WAY_BITS-1:0] install_way =
-                fill_tag_match_r ? fill_tag_match_way_r : repl_ptr[fill_index_r];
+                install_tag_match ? install_tag_match_way : repl_ptr[fill_index_r];
 
-            if (!fill_tag_match_r) begin
+            if (!install_tag_match) begin
                 tags[install_way][fill_index_r] <= fill_tag_r;
                 for (int x = 0; x < WORDS_PER_LINE; x++) begin
                     word_valid[install_way][fill_index_r][x] <= 1'b0;
