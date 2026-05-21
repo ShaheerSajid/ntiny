@@ -158,7 +158,11 @@ task dump_signature;
 				word_begin = (sig_begin_addr - `RAM_BASE) / 4;
 				word_end   = (sig_end_addr - `RAM_BASE) / 4;
 				for (sig_idx = word_begin; sig_idx < word_end; sig_idx = sig_idx + 1) begin
+`ifdef RAM_RANDOM_DELAY
+					sig_word = soc_top_inst.ram_inst.backing.mem[sig_idx];
+`else
 					sig_word = soc_top_inst.ram_inst.mem[sig_idx];
+`endif
 					$fwrite(sig_fd, "%08x\n", sig_word);
 				end
 				$fclose(sig_fd);

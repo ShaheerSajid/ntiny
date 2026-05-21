@@ -13,6 +13,7 @@
 ../../design/interconnect/src/periph_bridge.sv
 ../../design/interconnect/src/dmem_arb.sv
 ../../design/memory/src/ram_dp.sv
+../../design/memory/src/ram_dp_delayed.sv
 ../../design/memory/src/icache.sv
 ../../design/memory/src/dcache.sv
 ../../design/uncore/clint/src/clint.sv

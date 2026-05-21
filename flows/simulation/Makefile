@@ -154,6 +154,20 @@ verilator_build:
 	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
 	mv obj_dir/Vtb_soc_top ./
 
+# Verification-only build: swap ram_dp for ram_dp_delayed, which adds
+# pseudo-random `ready` stalls and `rvalid` latency on both ports. Use
+# this when you want to confirm the bus / arbiter / master pipeline
+# tolerates a non-ideal slave (today's ram_dp masks any "assumes
+# ready=1 / 1-cycle rvalid" bug by being perfect).
+verilator_build_random_ram:
+	verilator $(VERILATOR_COMMON) \
+	-DDV_TRACER \
+	+define+RAM_RANDOM_DELAY \
+	$(VERILATOR_INCDIRS) \
+	$(VERILATOR_SRCS)
+	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
+	mv obj_dir/Vtb_soc_top ./
+
 # Build without DV_TRACER for bench (dhrystone/coremark) — avoids the
 # multi-GB trace log that slows down long-running benchmarks. Uses 64KB
 # RAM to match link_bench.ld (default 32KB is too small for Dhrystone

@@ -67,6 +67,29 @@ verilator:
 	cp $(SIM_DIR)/obj_dir/Vtb_soc_top $(SIM_DIR)/Vtb_soc_top
 	@echo "Model built: $(SIM_DIR)/Vtb_soc_top"
 
+# Same as `verilator` but uses ram_dp_delayed (random stall + rvalid
+# latency). Use `make run_random_ram` to run the full suite against
+# this stressed RAM and confirm the bus path still gets clean signatures.
+.PHONY: verilator_random_ram
+verilator_random_ram:
+	@echo "Building Verilator model for RISCOF+RAM_RANDOM_DELAY (RAM=$(RAM_SIZE))..."
+	cd $(SIM_DIR) && rm -rf obj_dir && verilator $(VERILATOR_FLAGS) \
+		+define+RAM_RANDOM_DELAY \
+		$(VERILATOR_INCDIRS) $(VERILATOR_SRCS)
+	make -j4 -C $(SIM_DIR)/obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
+	cp $(SIM_DIR)/obj_dir/Vtb_soc_top $(SIM_DIR)/Vtb_soc_top
+	@echo "Model built: $(SIM_DIR)/Vtb_soc_top"
+
+.PHONY: run_random_ram
+run_random_ram: verilator_random_ram
+	@echo "Running RISCOF compliance tests (random-delay RAM)..."
+	source $(VENV) && riscof run \
+		--config=config.ini \
+		--suite=$(SUITE) \
+		--env=$(ENV) \
+		--work-dir=$(WORK) || true
+	@$(MAKE) summary
+
 # Build with FPU
 .PHONY: verilator_fpu
 verilator_fpu:

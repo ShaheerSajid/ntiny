@@ -228,6 +228,37 @@ module soc_top
     );
 
     // Unified Dual-Port RAM
+    //
+    // Verification flag RAM_RANDOM_DELAY swaps the always-ready
+    // `ram_dp` for the sim-only `ram_dp_delayed`, which injects
+    // pseudo-random stalls on `ready` and extra latency on `rvalid`.
+    // Use it to stress the bus path under non-trivial slave timing
+    // (catches "master assumes ready=1 / 1-cycle rvalid" bugs that
+    // hide behind today's SRAM model).
+`ifdef RAM_RANDOM_DELAY
+    ram_dp_delayed #(
+        .DEPTH    (`RAM_DEPTH),
+        .HEX_FILE ("ram.hex")
+    ) ram_inst (
+        .clk_i       (clk_i),
+        .reset_i     (reset_i),
+        // Port A — I-Cache fills (read-only)
+        .pa_req_i    (ic_mem_req),
+        .pa_addr_i   (ic_mem_addr),
+        .pa_rdata_o  (ic_mem_rdata),
+        .pa_rvalid_o (ic_mem_rvalid),
+        .pa_ready_o  (ic_mem_ready),
+        // Port B — D-Cache fills + write-through
+        .pb_req_i    (dc_mem_req),
+        .pb_we_i     (dc_mem_we),
+        .pb_addr_i   (dc_mem_addr),
+        .pb_be_i     (dc_mem_be),
+        .pb_wdata_i  (dc_mem_wdata),
+        .pb_rdata_o  (dc_mem_rdata),
+        .pb_rvalid_o (dc_mem_rvalid),
+        .pb_ready_o  (dc_mem_ready)
+    );
+`else
     ram_dp #(
         .DEPTH    (`RAM_DEPTH),
         .HEX_FILE ("ram.hex")
@@ -249,6 +280,7 @@ module soc_top
         .pb_rvalid_o (dc_mem_rvalid),
         .pb_ready_o  (dc_mem_ready)
     );
+`endif
 
     // ── D-port read data mux ────────────────────────────────
     // Select read data from D-Cache or peripheral bridge
