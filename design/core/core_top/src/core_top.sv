@@ -1297,22 +1297,32 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     end
 end
 
-// inflight_q tracks "a fetch is on the bus, waiting for rvalid".
+// inflight_q tracks "a fetch was accepted by the slave, waiting for rvalid".
+//
+// Phase 2b-i: gate the set on (req & ready) — the OBI/AXI-style
+// transaction-acceptance contract. Today `imem_port.ready` is hard-1
+// (RAM is always-ready, icache is transparent), so this remains
+// functionally identical to the old `imem_port.req` gate. When 2b-ii
+// turns icache into a stalling slave during multi-beat fills,
+// inflight_q correctly stays 0 until the cache actually accepts a
+// request rather than firing on every speculative re-issue.
 //
 // Priority on the same cycle:
-//   1. imem_port.req → inflight_q=1 (a new request is being issued —
-//      its rvalid will arrive next cycle and we want to capture it).
-//      This wins over arb_redirect_valid because on the redirect cycle
-//      the producer issues a req for the *new* target (pc_in already
-//      reflects the redirect because the pc_sel mux is combinational).
-//   2. arb_redirect_valid && !imem_port.req → inflight_q=0 (a redirect
-//      with no new req this cycle drops any prior wrong-path in-flight).
-//   3. imem_port.rvalid (and not req) → inflight_q=0 (response landed).
+//   1. imem_port.req & imem_port.ready → inflight_q=1 (request accepted;
+//      rvalid will arrive next cycle and we want to capture it). This
+//      wins over arb_redirect_valid because on the redirect cycle the
+//      producer issues a req for the *new* target (pc_in already reflects
+//      the redirect because the pc_sel mux is combinational).
+//   2. arb_redirect_valid && !(req & ready) → inflight_q=0 (a redirect
+//      with no accepted req this cycle drops any prior wrong-path
+//      in-flight).
+//   3. imem_port.rvalid (and not req-accepted) → inflight_q=0 (response
+//      landed).
 logic inflight_q;
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i)
         inflight_q <= 1'b0;
-    else if (imem_port.req)
+    else if (imem_port.req & imem_port.ready)
         inflight_q <= 1'b1;
     else if (arb_redirect_valid)
         inflight_q <= 1'b0;
