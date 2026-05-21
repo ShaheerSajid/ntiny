@@ -6,11 +6,19 @@ cd "$(dirname "$0")"
 
 TIMEOUT=${1:-2000000000}
 shift 2>/dev/null || true   # remaining $@ are extra +plusargs forwarded to Vtb_soc_top
-OPENSBI_BIN=$(find ../../software/linux/external/opensbi/build \
-    -name "fw_payload.bin" -path "*/opensbi-platform/*" 2>/dev/null | head -1)
 
+# Caller can pin a specific fw_payload (e.g. the FreeRTOS flow points
+# here from software/freertos/Makefile). Otherwise auto-locate the
+# Linux build's fw_payload.bin under software/linux/external/opensbi/.
 if [ -z "$OPENSBI_BIN" ]; then
-    echo "ERROR: OpenSBI fw_payload.bin not found. Build it first (see software/linux/README.md)"
+    OPENSBI_BIN=$(find ../../software/linux/external/opensbi/build \
+        -name "fw_payload.bin" -path "*/opensbi-platform/*" 2>/dev/null | head -1)
+fi
+
+if [ -z "$OPENSBI_BIN" ] || [ ! -f "$OPENSBI_BIN" ]; then
+    echo "ERROR: OpenSBI fw_payload.bin not found ($OPENSBI_BIN)."
+    echo "Build it first (see software/linux/README.md or software/freertos/README.md),"
+    echo "or pass OPENSBI_BIN=/path/to/fw_payload.bin."
     exit 1
 fi
 

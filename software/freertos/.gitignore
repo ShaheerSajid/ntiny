@@ -1,0 +1,6 @@
+external/
+build/
+*.elf
+*.bin
+*.map
+*.o
