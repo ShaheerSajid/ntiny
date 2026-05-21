@@ -61,6 +61,11 @@ module interrupt_ctrl (
     // ── IE-stage CSR invalid (unimplemented CSR accessed) ────────────────
     input                ie_csr_invalid_i,
 
+    // Raw 32-bit decoded instruction at ID/IE; used as mtval for illegal-
+    // instruction traps so spike-compatible bytes land in the signature.
+    input [31:0]         id_instr_word_i,
+    input [31:0]         ie_instr_word_i,
+
     // ── IE-stage signals for misalign detection ─────────────────────────
     input mem_op_e       ie_mem_op_i,
     input load_store_width_e ie_ls_width_i,
@@ -106,6 +111,10 @@ module interrupt_ctrl (
     // ── PMP access faults ───────────────────────────────────────────────
     input        insn_access_fault_i,     // registered mmu_i_access_fault_r
     input [31:0] insn_access_fault_addr_i,
+    // tval for instruction access faults: identical to ..._addr_i except on a
+    // straddled-32-bit insn where the upper half-fetch trapped — there it
+    // reports the offending half VA. See rv32i_m/pmp/pmpzca_misaligned_na4.
+    input [31:0] insn_access_fault_tval_i,
     input        data_access_fault_i,     // mmu_d_access_fault (combinational)
     input        data_access_fault_is_store_i,
     input [31:0] data_access_fault_addr_i,
@@ -350,18 +359,28 @@ always_comb begin
     end else if (misalign_store || misalign_amo) begin
         cause_code = 8'd6;  epc_out = pc_for_ie; mtval_out = ie_fault_addr_i; is_interrupt = 1'b0;
     end else if (ie_csr_illegal) begin
-        cause_code = 8'd2;  epc_out = pc_for_ie; mtval_out = 32'h0; is_interrupt = 1'b0;
+        // Spike emits the offending instruction encoding in mtval for
+        // illegal-instruction traps; RISCOF's arch_test handler is built
+        // around that. Per spec (Priv §3.1.16) mtval may be 0 or the
+        // instruction bytes — pick spike's convention here for parity.
+        cause_code = 8'd2;  epc_out = pc_for_ie; mtval_out = ie_instr_word_i; is_interrupt = 1'b0;
     // IF/ID-stage instruction access fault (PMP) — before page fault
     end else if (insn_access_fault_i) begin
-        cause_code = 8'd1;  epc_out = pc_for_id; mtval_out = insn_access_fault_addr_i; is_interrupt = 1'b0;
+        cause_code = 8'd1;  epc_out = pc_for_id; mtval_out = insn_access_fault_tval_i; is_interrupt = 1'b0;
     end else if (insn_page_fault_i) begin
         cause_code = 8'd12; epc_out = pc_for_id; mtval_out = page_fault_addr; is_interrupt = 1'b0;
     end else if (illegal_valid) begin
-        cause_code = 8'd2;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
+        // See ie_csr_illegal note: emit raw instruction bytes (ID stage).
+        cause_code = 8'd2;  epc_out = pc_for_id; mtval_out = id_instr_word_i; is_interrupt = 1'b0;
     end else if (ecall_valid) begin
         cause_code = ecall_cause; epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
     end else if (ebreak_valid) begin
-        cause_code = 8'd3;  epc_out = pc_for_id; mtval_out = pc_for_id; is_interrupt = 1'b0;
+        // Per spec mtval-on-breakpoint is implementation-defined (0 or the
+        // breakpoint VA). Spike writes 0; matching that lets RISCOF's
+        // arch_test M-mode handler short-circuit to cleanup_epilogs on a
+        // tval∉code-segment check (otherwise the handler resumes past
+        // EBREAK and the test_A_res writes diverge from the reference).
+        cause_code = 8'd3;  epc_out = pc_for_id; mtval_out = 32'h0; is_interrupt = 1'b0;
     end else if (external_valid && m_ie_global) begin
         cause_code = 8'd11; epc_out = pc_for_async; mtval_out = 32'h0; is_interrupt = 1'b1;
     end else if (software_valid && m_ie_global) begin

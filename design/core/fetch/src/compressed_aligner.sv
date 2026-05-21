@@ -70,6 +70,11 @@ module compressed_aligner
     output logic                 instruction_valid_o,
     output logic                 instruction_fault_o,
     output logic [4:0]           instruction_cause_o,
+    // VA of the faulting half-fetch (matches spike's mtval for instruction
+    // access/page faults on uncompressed 32-bit insns that straddle two
+    // fetch words). Equals pc_id_o except when only the *upper* half
+    // (next_i.vaddr) trapped on a straddled insn.
+    output logic [31:0]          instruction_fault_addr_o,
     output logic                 is_compressed_o,
     // BPU at IF: forward the prediction stored in the head entry to ID.
     // Only meaningful when instruction_valid_o is high.
@@ -152,6 +157,7 @@ module compressed_aligner
         instruction_valid_raw  = 1'b0;
         instruction_fault_o    = 1'b0;
         instruction_cause_o    = 5'b0;
+        instruction_fault_addr_o = 32'b0;
         is_compressed_o        = 1'b0;
         pop_internal           = 1'b0;
         next_half_index        = eff_half_idx;
@@ -168,6 +174,7 @@ module compressed_aligner
                         instruction_valid_raw = 1'b1;
                         instruction_fault_o   = head_i.fault;
                         instruction_cause_o   = head_i.cause;
+                        instruction_fault_addr_o = head_i.vaddr;
                         is_compressed_o       = 1'b0;
                         pop_internal          = 1'b1;
                         next_half_index       = 1'b0;
@@ -179,6 +186,7 @@ module compressed_aligner
                         instruction_valid_raw = 1'b1;
                         instruction_fault_o   = head_i.fault;
                         instruction_cause_o   = head_i.cause;
+                        instruction_fault_addr_o = head_i.vaddr;
                         is_compressed_o       = 1'b1;
                         pop_internal          = 1'b0;  // upper half still in head
                         next_half_index       = 1'b1;
@@ -195,6 +203,12 @@ module compressed_aligner
                             instruction_valid_raw = 1'b1;
                             instruction_fault_o   = head_i.fault | next_i.fault;
                             instruction_cause_o   = head_i.fault ? head_i.cause : next_i.cause;
+                            // Report the address of the offending half-fetch
+                            // (head if it faulted, otherwise next). Matches
+                            // spike's tval on a straddled-insn access fault —
+                            // see rv32i_m/pmp/pmpzca_misaligned_na4.
+                            instruction_fault_addr_o = head_i.fault ? (head_i.vaddr + 32'd2)
+                                                                    : next_i.vaddr;
                             is_compressed_o       = 1'b0;
                             pop_internal          = 1'b1;
                             // After popping head, next becomes the new head.
@@ -213,6 +227,7 @@ module compressed_aligner
                         instruction_valid_raw = 1'b1;
                         instruction_fault_o   = head_i.fault;
                         instruction_cause_o   = head_i.cause;
+                        instruction_fault_addr_o = head_i.vaddr + 32'd2;
                         is_compressed_o       = 1'b1;
                         pop_internal          = 1'b1;
                         next_half_index       = 1'b0;

@@ -51,6 +51,12 @@ module trap_sequencer (
     input  logic        mmu_d_fault_is_store_i,  // Bug 30: latch is-store flag
     input  logic        mmu_i_access_fault_i,
     input  logic [31:0] mmu_i_access_fault_addr_i,
+    // Separate tval for instruction access faults: identical to
+    // mmu_i_access_fault_addr_i (= the instruction's PC) except on a
+    // straddled 32-bit insn where the upper half-fetch hit the PMP fault —
+    // here mtval reports the offending half VA, matching spike. See
+    // rv32i_m/pmp/pmpzca_misaligned_na4.
+    input  logic [31:0] mmu_i_access_fault_tval_i,
     input  logic        mmu_d_access_fault_i,
     input  logic [31:0] mmu_d_access_fault_addr_i,
 
@@ -62,6 +68,7 @@ module trap_sequencer (
     output logic        d_fault_is_store_r_o,  // Bug 30: registered is-store flag
     output logic        i_access_fault_r_o,
     output logic [31:0] i_access_fault_addr_r_o,
+    output logic [31:0] i_access_fault_tval_r_o,
     output logic        d_access_fault_r_o,
     output logic [31:0] d_access_fault_addr_r_o
 );
@@ -194,12 +201,15 @@ module trap_sequencer (
         if (reset_i) begin
             i_access_fault_r_o      <= 1'b0;
             i_access_fault_addr_r_o <= 32'b0;
+            i_access_fault_tval_r_o <= 32'b0;
         end else if (clear_other) begin
             i_access_fault_r_o      <= 1'b0;
             i_access_fault_addr_r_o <= 32'b0;
+            i_access_fault_tval_r_o <= 32'b0;
         end else begin
             i_access_fault_r_o      <= mmu_i_access_fault_i;
             i_access_fault_addr_r_o <= mmu_i_access_fault_addr_i;
+            i_access_fault_tval_r_o <= mmu_i_access_fault_tval_i;
         end
     end
 

@@ -413,6 +413,10 @@ typedef struct {
   wb_event_e   wb_event;          // NONE / TRAP / XRET / DRET
   logic [4:0]  wb_cause;           // mcause to write (only meaningful when wb_event==WB_TRAP)
   logic [31:0] wb_tval;            // mtval to write (only meaningful when wb_event==WB_TRAP)
+  // Raw 32-bit decoded instruction (compressed insts arrive expanded). Used
+  // as mtval for illegal-instruction traps so the RISCOF arch_test handler
+  // sees the same bytes spike reports.
+  logic [31:0] instr_word;
 } ctrl_bus_e;
 
 // NOP control bundle — used as pipeline flush/reset value.
@@ -456,6 +460,7 @@ function automatic ctrl_bus_e CTRL_BUS_NOP();
 	CTRL_BUS_NOP.wb_event        = WB_NONE;
 	CTRL_BUS_NOP.wb_cause        = 5'd0;
 	CTRL_BUS_NOP.wb_tval         = 32'd0;
+	CTRL_BUS_NOP.instr_word      = 32'd0;
 endfunction
 
 endpackage
