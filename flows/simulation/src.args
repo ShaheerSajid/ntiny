@@ -1,3 +1,4 @@
+../../design/core/fetch/src/fetch_pkg.sv
 ../../design/common/common_pkg.sv
 ../../design/common/lzc.sv
 ../../design/core/include/core_pkg.sv
@@ -69,7 +70,6 @@
 ../../design/core/bpu/src/btb.sv
 ../../design/core/bpu/src/ras.sv
 ../../design/core/bpu/src/bpu.sv
-../../design/core/fetch/src/fetch_pkg.sv
 ../../design/core/fetch/src/fetch_buffer.sv
 ../../design/core/fetch/src/compressed_aligner.sv
 ../../design/core/fetch/src/redirect_arbiter.sv

@@ -33,7 +33,8 @@
 NTINY      := $(abspath $(CURDIR)/../..)
 EXTERNAL_DIR := $(CURDIR)/external
 SIM_DIR    := $(NTINY)/flows/simulation
-TOOLCHAIN_BIN ?= /opt/riscv-linux-gnu/bin
+TOOLCHAIN_BIN ?= /opt/riscv-linux/bin
+
 
 LINUX_TAG     ?= v6.6
 OPENSBI_TAG   ?= v1.8
@@ -49,7 +50,7 @@ OPENSBI_DIR   ?= $(EXTERNAL_DIR)/opensbi
 BUILDROOT_DIR ?= $(EXTERNAL_DIR)/buildroot
 INITRAMFS     ?= $(CURDIR)/initramfs.cpio
 
-CROSS_COMPILE := riscv64-unknown-linux-gnu-
+CROSS_COMPILE := riscv32-unknown-linux-gnu-
 ARCH          := riscv
 ISA           := rv32imac_zicsr_zifencei_zba_zbb_zbc_zbs
 ABI           := ilp32

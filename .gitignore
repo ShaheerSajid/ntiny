@@ -33,6 +33,11 @@ flows/simulation/*.hex
 
 # Software build outputs
 software/build/
+software/freertos/build/
+software/freertos/external/
+
+# Simulation run logs
+flows/simulation/logs/
 
 # Vivado generated artifacts (project dir + journals + logs)
 flows/synthesis/fpga/vivado/**/project_dir/

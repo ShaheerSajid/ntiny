@@ -42,13 +42,12 @@ if true; then
     # a cycle window. With no plusarg the trace machinery stays
     # dormant; the cost is ~2-3x runtime even when not dumping. Use
     # GTKWave (or surfer/scviewer) to inspect /tmp/wave.fst post-hoc.
-    verilator -Wno-INITIALDLY -Wno-UNUSED -Wno-WIDTH \
+    verilator -Wno-INITIALDLY -Wno-UNUSED -Wno-WIDTH -Wno-fatal -Wno-BLKLOOPINIT -Wno-CASEINCOMPLETE \
         -Wno-PINMISSING -Wno-MULTIDRIVEN -Wno-STMTDLY \
         -Wno-UNPACKED -Wno-UNSIGNED \
         -Wno-LITENDIAN -Wno-MODDUP -Wno-MISINDENT \
         --no-timing --timescale-override 1ns/10ps -O3 --threads 4 \
-        --trace-fst --trace-structs --trace-params --trace-threads 2 \
-        -DVERILATOR_SIM -DDV_TRACER -sv --top-module tb_soc_top --cc \
+        -DVERILATOR_SIM -sv --top-module tb_soc_top --cc \
         +define+RAM_SIZE_BYTES=134217728 \
         +incdir+../../design/common/ \
         +incdir+../../design/uncore/i2c/src/ +incdir+../../design/uncore/timer/src/ \

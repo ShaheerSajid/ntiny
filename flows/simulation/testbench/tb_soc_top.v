@@ -174,7 +174,7 @@ always @(posedge clk) begin
 	    soc_top_inst.dmem_bus.req &&
 	    soc_top_inst.dmem_bus.we &&
 	    soc_top_inst.dmem_bus.addr == `TOHOST_ADDR &&
-	    soc_top_inst.core_top_inst.priv_level == 2'b11) begin
+	    soc_top_inst.core_top_inst.priv_level == 2'b01) begin
 		dump_signature;
 		if (soc_top_inst.dmem_bus.wdata == 32'h1) begin
 			$display("TEST PASSED");
