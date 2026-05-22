@@ -118,10 +118,14 @@ end
 
 // ── Memory-side req ──────────────────────────────────────────────────
 // 2b-ii change: skip the mem_req when this cycle's CPU request is a
-// hit. On a miss we still forward unchanged. flush_i suppresses too —
-// a FENCE.I happens at the IE stage and the same-cycle producer fetch
-// is wrong-path; not sending it down to RAM avoids a spurious read.
-assign mem_req_o   = cpu_req_i & ~hit & ~flush_i;
+// hit AND the cache isn't being invalidated this cycle. The flush_i
+// guard MUST keep mem_req=1 during a FENCE.I cycle even if the cache
+// would have hit: hit_r is also gated to 0 by ~flush_i below, so
+// without forwarding to RAM the master would see neither hit_r nor
+// mem_rvalid_i — a silently dropped fetch. (That regression panicked
+// Linux init at flush_icache_pte during set_pte_range, mirroring
+// Phase 2a's "exitcode=0xb" race.)
+assign mem_req_o   = cpu_req_i & (~hit | flush_i);
 assign mem_addr_o  = cpu_addr_i;
 assign cpu_ready_o = mem_ready_i;
 
