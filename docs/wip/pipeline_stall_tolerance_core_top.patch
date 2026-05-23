@@ -1,5 +1,5 @@
 diff --git a/design/core/core_top/src/core_top.sv b/design/core/core_top/src/core_top.sv
-index 9bd0d78..77dbdbf 100644
+index 9bd0d78..4eb9c8b 100644
 --- a/design/core/core_top/src/core_top.sv
 +++ b/design/core/core_top/src/core_top.sv
 @@ -869,6 +869,50 @@ wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
@@ -53,7 +53,26 @@ index 9bd0d78..77dbdbf 100644
  // ── Pending fetch target (deferred-redirect register) ──────────────────
  //
  // When a redirect (branch / xRET / trap / debug) lands on a virtually-
-@@ -1074,8 +1118,12 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
+@@ -911,7 +955,17 @@ wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
+ // re-fills).
+ logic [31:0] pending_target_q;
+ logic        pending_target_v_q;
+-wire         redirect_deferred = arb_redirect_valid & mmu_i_stall;
++// A redirect that fires WHILE the icache slave is back-pressuring
++// (icache_stall=1) has to be captured into pending_target_q just like
++// the existing mmu_i_stall case — otherwise the master, stuck holding
++// the pre-redirect (req, addr), never gets to issue the redirect
++// target and the target is permanently lost. Symptom under the
++// always-ready RAM: never (icache_stall is permanently 0). Symptom
++// under ram_dp_delayed: a JAL that fires arb_redirect_valid same
++// cycle as the slave drops ready falls through to PC+4, sending the
++// CPU into a wild fetch path (load-access-fault loop in the test
++// epilogue).
++wire         redirect_deferred = arb_redirect_valid & (mmu_i_stall | icache_stall);
+ wire         pending_target_drained = pending_target_v_q && (pc_ie == pending_target_q);
+ // Forward declaration: actual flop sits beside fb_push (after fetch_flush)
+ logic        pending_first_push_done_q;
+@@ -1074,8 +1128,12 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
  	// bubble. That guard is dead and removed.)
  	// Phase 4.8: xret_hold_pc keeps pc_out parked at the xret target
  	// while the FSM waits for priv to settle and the fetch to complete.
@@ -67,7 +86,7 @@ index 9bd0d78..77dbdbf 100644
  	.pc_in_i	(pc_in),
  	.pc_out_o	(pc_out)
  );
-@@ -1110,7 +1158,12 @@ always_ff @(posedge clk_i or posedge reset_i) begin
+@@ -1110,7 +1168,12 @@ always_ff @(posedge clk_i or posedge reset_i) begin
  end
  wire refetch_extended = refetch_after_trap | refetch_pending_q;
  
