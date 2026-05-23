@@ -1213,13 +1213,21 @@ assign imem_port.wdata = 32'b0;
 wire arb_redirect_flushing = arb_redirect_valid && (arb_redirect_kind != RDR_BPU_IF);
 assign fetch_flush = arb_redirect_flushing | xret_at_decode | xret_draining;
 
-// inflight_vaddr_q latches i_vaddr on every cycle imem_port.req is
-// high. The vaddr register itself has NO reset (so a request issued in
-// the very first non-reset cycle is captured even if we're still
-// settling out of reset).
+// inflight_vaddr_q latches i_vaddr on the cycle the slave accepts the
+// request — the OBI/AXI-style (req & ready) acceptance edge. Mirrors
+// the 2b-i upgrade to inflight_q (commit 8946b68). Today's RAM keeps
+// ready hard-1 so this is functionally identical to "if (req)", but
+// the (req & ready) gate is the only correct latch point for a
+// stalling slave: while ready=0 the master holds the same (req, addr)
+// and inflight_vaddr_q must stay at the last accepted addr — not get
+// overwritten on every speculative re-issue, which would mismatch the
+// addr against the eventual rdata.
+//
+// The FF still has no reset (so a request accepted during the very
+// first non-reset cycle is captured even if we're still settling).
 logic [31:0] inflight_vaddr_q;
 always_ff @(posedge clk_i) begin
-    if (imem_port.req)
+    if (imem_port.req & imem_port.ready)
         inflight_vaddr_q <= i_vaddr;
 end
 
