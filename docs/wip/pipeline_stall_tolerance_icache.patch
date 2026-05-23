@@ -1,0 +1,60 @@
+diff --git a/design/memory/src/icache.sv b/design/memory/src/icache.sv
+index b1c732d..005fd80 100644
+--- a/design/memory/src/icache.sv
++++ b/design/memory/src/icache.sv
+@@ -147,11 +147,19 @@ end
+ assign cpu_rdata_o  = hit_r ? cache_rdata_r : mem_rdata_i;
+ assign cpu_rvalid_o = hit_r | mem_rvalid_i;
+ 
+-// ── Miss fill pipeline (single-word, registered to align with RAM) ───
+-// Unchanged from 2a: each miss response installs the responded word
+-// into the picked way; the rest of the line stays invalid until those
+-// words get touched. Multi-beat line fills are deferred to a later
+-// phase where the AXI master path makes burst geometry meaningful.
++// ── Miss fill pipeline (single-word, SR-latched across rvalid latency) ─
++// Captures the fill state at the (req & ~hit & ~flush_i & ready) accept
++// edge and HOLDS it until mem_rvalid_i clears the latch. Without this
++// hold, when the slave's rvalid arrives more than one cycle after the
++// accept (under +define+RAM_RANDOM_DELAY or any future stalling slave),
++// fill_{tag,index,word}_r would still be tracking whatever addr the
++// master happens to be asserting NOW — which is a different addr (and
++// likely a different word offset) than the one being responded to. The
++// install would then deposit the right data into the wrong slot.
++//
++// Today's RAM keeps ready=1 and emits rvalid exactly 1 cycle after
++// acceptance, so the set→clear window is always exactly 2 cycles —
++// functionally identical to the previous "if (req)" gate.
+ logic                      fill_pending_r;
+ logic [TAG_BITS-1:0]       fill_tag_r;
+ logic [INDEX_BITS-1:0]     fill_index_r;
+@@ -161,13 +169,23 @@ always_ff @(posedge clk_i or posedge reset_i) begin
+     if (reset_i) begin
+         fill_pending_r <= 1'b0;
+     end else begin
+-        // Track misses (where we actually issued mem_req). On hit we
+-        // intentionally don't fill (the word is already cached) so
+-        // fill_pending_r stays 0 and we don't double-install.
+-        fill_pending_r <= cpu_req_i & ~hit & ~flush_i;
+-        fill_tag_r     <= addr_tag;
+-        fill_index_r   <= addr_index;
+-        fill_word_r    <= addr_word_off;
++        // Set on accept-of-miss takes priority over clear-on-rvalid in
++        // the same posedge: a new miss accepted on the same edge as the
++        // previous transaction's rvalid is a real new transaction (the
++        // slave just transitioned IDLE and can accept the very next
++        // cycle's req) — clearing without re-arming would silently
++        // drop its install. The downstream install always_ff uses Q
++        // values from BEFORE this posedge, so the previous transaction
++        // still installs correctly with the OLD captured fill_{tag,
++        // index,word}.
++        if (cpu_req_i & ~hit & ~flush_i & cpu_ready_o) begin
++            fill_pending_r <= 1'b1;
++            fill_tag_r     <= addr_tag;
++            fill_index_r   <= addr_index;
++            fill_word_r    <= addr_word_off;
++        end else if (mem_rvalid_i) begin
++            fill_pending_r <= 1'b0;
++        end
+     end
+ end
+ 
