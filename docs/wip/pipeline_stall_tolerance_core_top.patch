@@ -1,8 +1,16 @@
 diff --git a/design/core/core_top/src/core_top.sv b/design/core/core_top/src/core_top.sv
-index 9bd0d78..4eb9c8b 100644
+index 9bd0d78..4b18470 100644
 --- a/design/core/core_top/src/core_top.sv
 +++ b/design/core/core_top/src/core_top.sv
-@@ -869,6 +869,50 @@ wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
+@@ -493,6 +493,7 @@ hazard_unit hazard_unit_inst (
+     // accept the request this cycle.
+     .dmem_req_i         (c2a_read | c2a_write),
+     .dmem_ready_i       (c2a_arb_ready),
++    .dmem_rdata_pending_i (c2a_load_pending_q & ~c2a_arb_rvalid),
+     .insert_bubble_i    (insert_bubble),
+     // Control flow
+     .interrupt_valid_i  (interrupt_valid),
+@@ -869,6 +870,50 @@ wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
                              refetch_after_trap |
                              insert_bubble | fetch_stall;
  
@@ -53,7 +61,7 @@ index 9bd0d78..4eb9c8b 100644
  // ── Pending fetch target (deferred-redirect register) ──────────────────
  //
  // When a redirect (branch / xRET / trap / debug) lands on a virtually-
-@@ -911,7 +955,17 @@ wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
+@@ -911,7 +956,17 @@ wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
  // re-fills).
  logic [31:0] pending_target_q;
  logic        pending_target_v_q;
@@ -72,7 +80,7 @@ index 9bd0d78..4eb9c8b 100644
  wire         pending_target_drained = pending_target_v_q && (pc_ie == pending_target_q);
  // Forward declaration: actual flop sits beside fb_push (after fetch_flush)
  logic        pending_first_push_done_q;
-@@ -1074,8 +1128,12 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
+@@ -1074,8 +1129,12 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
  	// bubble. That guard is dead and removed.)
  	// Phase 4.8: xret_hold_pc keeps pc_out parked at the xret target
  	// while the FSM waits for priv to settle and the fetch to complete.
@@ -86,7 +94,7 @@ index 9bd0d78..4eb9c8b 100644
  	.pc_in_i	(pc_in),
  	.pc_out_o	(pc_out)
  );
-@@ -1110,7 +1168,12 @@ always_ff @(posedge clk_i or posedge reset_i) begin
+@@ -1110,7 +1169,12 @@ always_ff @(posedge clk_i or posedge reset_i) begin
  end
  wire refetch_extended = refetch_after_trap | refetch_pending_q;
  
@@ -100,3 +108,78 @@ index 9bd0d78..4eb9c8b 100644
                        xret_drive_va                                 ? xret_target_q :
                        pending_overrides_vaddr                       ? pending_target_q :
                                                                        pc_in;
+@@ -1353,7 +1417,32 @@ end
+ // Phase 4.8: xret_drop_push drops the stale rvalid from the wrong-priv
+ // fetch that was issued on the wb_xret_fire cycle (before the FSM could
+ // suppress it). The rdata is from PA=VA (untranslated) and is garbage.
+-wire fb_push_raw = imem_port.rvalid && !arb_redirect_flushing && !xret_drop_push;
++// inflight_q gate: an rvalid arriving AFTER the master's accepted
++// fetch was killed by a redirect (random-RAM delay > 1 cycle) carries
++// the WRONG-PATH word but inflight_vaddr_q still points at the
++// pre-redirect addr. Without this gate the stale push leaks an
++// already-flushed instruction back into the buffer.
++//
++// Today's always-ready RAM emits rvalid exactly 1 cycle after the
++// (req&ready) accept, so the wrong-path window collapses into the
++// arb_redirect_flushing pulse the existing gate already blocks. Under
++// +define+RAM_RANDOM_DELAY the rvalid can arrive 2+ cycles after the
++// accept, opening a window where arb_redirect_flushing has already
++// dropped but inflight_q has been cleared by the redirect (case 2 in
++// inflight_q's set/clear priority) — perfect signal to identify the
++// stale response and drop it.
++//
++// Symptom this fixes (add-01 under random RAM): JAL at 0x800032fc
++// commits a correct mispredict to 0x8000331c, pc_out latches the
++// new target, but a stale rvalid for the JAL's PC+4 (0x80003300)
++// arrives the next cycle and pushes into the just-flushed buffer.
++// The aligner emits the wrong-path lw → uninitialised-sp load fault
++// → spin in the uninit mtvec. See project_pipeline_stall_tolerance_wip.md.
++//
++// Safe wrt reset PC: with first_fetch_pending_q (WIP patch Step 2),
++// the producer holds i_vaddr=reset_PC until the slave accepts, so
++// inflight_q is set before the reset-PC rvalid arrives.
++wire fb_push_raw = imem_port.rvalid && inflight_q && !arb_redirect_flushing && !xret_drop_push;
+ 
+ fetch_pkg::fetch_buffer_entry_t fb_push_entry;
+ assign fb_push_entry.word  = imem_port.rdata;
+@@ -2085,6 +2174,7 @@ branch_target_address branch_target_address_inst
+ 	.target_o	(branch_target_address)
+ );
+ 
++
+ // ── BPU — IF-stage prediction (per-half, registered redirect) + ID fallback + RAS ──
+ //
+ // The BPU reads combinationally at i_vaddr and i_vaddr+2 (the fetch
+@@ -2721,6 +2811,32 @@ wire        ptw_grant,  amo_grant,  c2a_grant;
+ wire        ptw_arb_ready, amo_arb_ready, c2a_arb_ready;
+ wire        ptw_arb_rvalid, amo_arb_rvalid, c2a_arb_rvalid;
+ wire [31:0] ptw_arb_rdata,  amo_arb_rdata,  c2a_arb_rdata;
++
++// ── CPU load in-flight tracker (variable-latency slave handling) ─────
++// hazard_unit's existing dmem_busy only stalls IE until c2a_arb_ready=1
++// (the request-acceptance edge). It does NOT wait for c2a_arb_rvalid
++// (the response). Under always-ready RAM that's fine — rvalid follows
++// accept by exactly 1 cycle and lines up with the IE→IMEM advance.
++// Under +define+RAM_RANDOM_DELAY rvalid can arrive N>1 cycles after
++// accept, so IMEM→IWB would capture readdata_imem while c2a_arb_rdata
++// is still stale/zero — the destination register silently gets 0.
++// (Symptom: pmpm_cfg_tor_check-01 reads its trap-handler-base pointer
++// as 0 → mtvec set to 0xfffffeac → first ECALL traps to garbage PC.)
++//
++// Mirrors the icache-side inflight_q (and amo_unit's dbus_stall_i =
++// ~amo_arb_rvalid pattern). Set when a c2a READ is accepted; held
++// until the matching rvalid arrives. Only tracks loads — stores
++// commit on ready alone, no rvalid wait needed.
++logic c2a_load_pending_q;
++always_ff @(posedge clk_i or posedge reset_i) begin
++    if (reset_i)
++        c2a_load_pending_q <= 1'b0;
++    else if (c2a_read & c2a_arb_ready)
++        c2a_load_pending_q <= 1'b1;     // accept-set wins over rvalid-clear,
++                                         // so back-to-back loads keep the flag high
++    else if (c2a_arb_rvalid)
++        c2a_load_pending_q <= 1'b0;
++end
+ dmem_arb dmem_arb_inst (
+     .clk_i                  (clk_i),
+     .reset_i                (reset_i),
