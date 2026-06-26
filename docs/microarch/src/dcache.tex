@@ -1,0 +1,72 @@
+\section{Data cache (\texttt{dcache})}
+\textit{Source: \texttt{design/memory/src/dcache.sv}}
+
+\noindent\emph{This section is deliberately general. The \sig{dcache} is slated to
+be replaced by the generated \texttt{iob-cache} (AXI back-end), so what matters here
+is the \emph{contract} it presents---geometry, the master/slave handshake, and the
+no-stale-data invariant---not its bit-level internals.}
+
+\subsection{What it is today}
+The \sig{dcache} is the data-side L1 of the bus revamp's Phase 2a. It is
+\textbf{4-way set-associative}, \textbf{32-byte lines}, \textbf{32 sets},
+\textbf{4\,KB} total (\texttt{dcache.sv:48--58}), with a VIPT geometry mirroring the
+icache. But it is not yet a real caching cache: it is \textbf{transparent
+write-through}. Every CPU request is forwarded to backing memory, and
+\sig{cpu\_rdata\_o} is wired straight from the memory response
+(\texttt{dcache.sv:93--104}). The tag/data arrays are filled opportunistically so a
+later phase (2c) can flip on read-from-cache, but right now they never \emph{serve}
+a load---they only shadow memory.
+
+The reason for this half-step is the invariant in the header comment: the pipeline
+must never see stale cached data on a write$\rightarrow$read hazard. Wiring reads
+through to memory guarantees that for free while the geometry and fill machinery are
+brought up and verified.
+
+\diagram{dcache}{\texttt{dcache} block view. The CPU request always forwards to
+memory (\sig{mem\_req\_o}); the read result returns straight from
+\sig{mem\_rdata\_i} (write-through). The tag/data arrays (blue) are filled and
+write-merged in the background so a future phase can read from them.}{fig:dcache}{1.0}
+
+\subsection{Geometry and arrays}
+A 32-bit address splits as tag\,\sig{[31:10]} / index\,\sig{[9:5]} /
+word-offset\,\sig{[4:2]} / byte-offset\,\sig{[1:0]} (\texttt{dcache.sv:55--58}).
+Storage is four parallel arrays indexed by \sig{[way][set]}: \sig{line\_valid},
+\sig{tags}, \sig{data}, and a \emph{per-word} \sig{word\_valid[way][set][word]}
+(\texttt{dcache.sv:62--65}). The per-word valid bits let a transparent fill install
+\emph{one} word per memory response without wrongly marking the rest of the line
+present. Replacement is round-robin per set (\sig{repl\_ptr[set]}). There are no
+dirty bits---write-through means memory is always current.
+
+A hit is the parallel AND across ways of \sig{line\_valid \& (tags==addr\_tag) \&
+word\_valid[\dots word]} (\texttt{dcache.sv:74--82}); \sig{hit} is the OR of the
+four. Even on a hit the request still goes to memory today---the hit signal only
+gates the background bookkeeping, not the data path.
+
+\subsection{Handshake: master and slave sides}
+The CPU-facing (slave) port is the now-familiar latency-tolerant handshake:
+\sig{cpu\_req\_i}/\sig{cpu\_we\_i}/\sig{cpu\_addr\_i}/\sig{cpu\_be\_i}/\sig{cpu\_wdata\_i}
+in, \sig{cpu\_ready\_o} to accept, and \sig{cpu\_rdata\_o}\,+\,\sig{cpu\_rvalid\_o}
+as a separate response beat. The memory-facing (master) port mirrors it:
+\sig{mem\_req\_o\dots}, \sig{mem\_ready\_i}, \sig{mem\_rdata\_i}\,+\,\sig{mem\_rvalid\_i}.
+Because the cache is transparent, the two ports are essentially tied together:
+\sig{mem\_req\_o}=\sig{cpu\_req\_i} and \sig{cpu\_ready\_o}=\sig{mem\_ready\_i}.
+
+\subsection{The latency contract (the part iob-cache must keep)}
+\latencynote{The \sig{dcache} \emph{itself} produces no pipeline stall. It does not
+own a busy signal; it just forwards \sig{cpu\_ready\_o}=\sig{mem\_ready\_i} and lets
+the response beat (\sig{cpu\_rvalid\_o}) arrive whenever the slave returns it. All
+the variable-latency handling lives \emph{outside} the cache---in \sig{core2avl} and
+the load-pending tracking in \sig{core\_top}, and in \sig{soc\_top}'s
+\sig{rd\_inflight\_q} routing (next section). This is exactly the property that
+makes \texttt{iob-cache} a near drop-in: its \texttt{iob\_s} front-end is the same
+``request accepted by \sig{ready}, data returns later on a valid'' split, so the
+core-side stall fixes that were done for variable latency are the prerequisite, not
+wasted work. The fill machinery here uses a single-outstanding assumption (ready
+drops during a miss so a second read cannot be issued, \texttt{dcache.sv} +
+\sig{soc\_top}); any replacement must preserve at least that contract.}
+
+\subsection{Flush}
+\sig{FENCE.I} drives \sig{flush\_i}, which clears every \sig{line\_valid} and
+\sig{word\_valid} bit in one cycle (\texttt{dcache.sv:173--181}). The same wire
+flushes the icache. Plain \sig{FENCE} is a no-op for a write-through cache over
+always-current memory, and \sig{sfence.vma} is handled in the MMU, not here.

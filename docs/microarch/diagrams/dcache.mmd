@@ -1,0 +1,36 @@
+%% dcache (transparent write-through) — minimal-text block diagram. Detail in src/dcache.tex.
+flowchart LR
+  classDef in   fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+  classDef out  fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+  classDef comb fill:#fef9c3,stroke:#a16207,color:#713f12;
+  classDef reg  fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
+  classDef mux  fill:#e5e7eb,stroke:#374151,color:#111827;
+
+  subgraph CPU[cpu side]
+    direction TB
+    REQ[cpu_req_i / cpu_we_i]:::in
+    AD[cpu_addr_i]:::in
+    RD[cpu_rdata_o / cpu_rvalid_o]:::out
+  end
+
+  HIT[hit detect<br/>tag + line_valid + word_valid]:::comb
+  ARR[(tags / data /<br/>word_valid arrays)]:::reg
+  FILL[fill latch<br/>fill_pending_r]:::reg
+  WR[write-hit merge<br/>wr_hit_r]:::reg
+
+  subgraph MEM[memory side]
+    direction TB
+    MREQ[mem_req_o ...]:::out
+    MRD[mem_rdata_i / mem_rvalid_i]:::in
+  end
+
+  REQ --> HIT
+  AD --> HIT
+  ARR --> HIT
+  REQ -->|always| MREQ
+  AD --> MREQ
+  MRD -->|write-through rdata| RD
+  MRD --> FILL
+  FILL -->|install word| ARR
+  REQ --> WR
+  WR -->|byte merge| ARR

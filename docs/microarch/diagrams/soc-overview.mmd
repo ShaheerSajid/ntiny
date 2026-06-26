@@ -1,0 +1,38 @@
+%% SoC overview — minimal-text block diagram. Detail in src/soc-overview.tex.
+flowchart TB
+  classDef core fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+  classDef cache fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
+  classDef comb fill:#fef9c3,stroke:#a16207,color:#713f12;
+  classDef mem  fill:#dcfce7,stroke:#15803d,color:#14532d;
+  classDef per  fill:#e5e7eb,stroke:#374151,color:#111827;
+  classDef irq  fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+
+  CORE[core_top]:::core
+
+  IC[icache]:::cache
+  DC[dcache]:::cache
+  DEC[addr_decoder]:::comb
+  PB[periph_bridge]:::comb
+  RAM[(ram_dp<br/>Port A / Port B)]:::mem
+
+  subgraph PERIPH[peripherals]
+    direction LR
+    UART[uart]:::per
+    SPI[spi]:::per
+    I2C[i2c]:::per
+    GPIO[gpio]:::per
+    PWM[pwm]:::per
+    TMR[timer]:::per
+  end
+
+  CLINT[clint<br/>MTIP MSIP]:::irq
+  PLIC[plic<br/>MEIP SEIP]:::irq
+
+  CORE -->|imem_bus| IC --> RAM
+  CORE -->|dmem_bus| DEC
+  DEC -->|ram_sel| DC --> RAM
+  DEC -->|periph sels| PB --> PERIPH
+  PB -. rd_inflight_q .-> CORE
+  PERIPH -->|irq lines| PLIC
+  CLINT -->|timer/soft| CORE
+  PLIC -->|ext| CORE

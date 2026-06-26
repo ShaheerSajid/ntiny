@@ -1,0 +1,94 @@
+\section{SoC overview}
+{\sloppy\textit{Sources: \texttt{design/soc\_top/src/soc\_top.sv},
+\texttt{design/interconnect/src/addr\_decoder.sv},
+\texttt{design/interconnect/src/periph\_bridge.sv},
+\texttt{design/common/mem\_map.svh}.}\par}
+
+\subsection{Top-level structure}
+\sig{soc\_top} ties the core to memory and the peripherals. The core exposes two
+ports, both on the latency-tolerant \sig{mem\_bus} interface: \sig{imem\_bus} (fetch)
+and \sig{dmem\_bus} (load/store). The instruction side goes through \sig{icache} into
+port A of a dual-port RAM (\sig{ram\_dp}, or \sig{ram\_dp\_delayed} for
+variable-latency tests). The data side goes through \sig{addr\_decoder}: requests for
+the RAM range go to \sig{dcache} and port B of the same RAM; everything else goes
+through \sig{periph\_bridge} to the peripherals. Interrupts come back from
+\sig{clint} (timer/software) and \sig{plic} (external).
+
+\diagram{soc-overview}{\sig{soc\_top} wiring. Fetch (\sig{imem\_bus}) flows through
+\sig{icache} to RAM port A. Loads/stores (\sig{dmem\_bus}) are decoded by
+\sig{addr\_decoder} into either \sig{dcache}\,$\rightarrow$\,RAM port B or
+\sig{periph\_bridge}\,$\rightarrow$\,peripherals; the \sig{rd\_inflight\_q} logic
+routes the read response back to the right one. \sig{clint} and \sig{plic} feed the
+core's interrupt inputs.}{fig:soc}{1.0}
+
+\subsection{Memory map}
+All bases live in \texttt{mem\_map.svh}. The decode splits cleanly: RAM is high
+memory, the \texttt{0x1000\_xxxx} block is the peripheral window (selected by
+\sig{addr[19:16]}), and the standard RISC-V cores sit at their architectural
+addresses.
+
+\begin{center}\small
+\begin{tabularx}{\textwidth}{l l Y}
+\toprule
+\textbf{region} & \textbf{base} & \textbf{notes}\\\midrule
+RAM        & \sig{0x8000\_0000} & main memory (\sig{RAM\_BASE}; size from \sig{RAM\_SIZE\_BYTES})\\
+boot ROM   & \sig{0x0000\_1000} & reset vector lands here (sim: \texttt{bootmem})\\
+UART       & \sig{0x1000\_0000} & \sig{addr[19:16]}=\sig{0}; sifive,uart0\\
+SPI        & \sig{0x1001\_0000} & \sig{addr[19:16]}=\sig{1}; sifive,spi0\\
+I2C        & \sig{0x1002\_0000} & \sig{addr[19:16]}=\sig{2}; opencores i2c\\
+GPIO       & \sig{0x1003\_0000} & \sig{addr[19:16]}=\sig{3}; sifive,gpio0\\
+PWM        & \sig{0x1004\_0000} & \sig{addr[19:16]}=\sig{4}; sifive,pwm0\\
+TIMER      & \sig{0x1005\_0000} & \sig{addr[19:16]}=\sig{5}\\
+CRC        & \sig{0x1006\_0000} & \sig{addr[19:16]}=\sig{6}; accelerator\\
+CLINT      & \sig{0x0200\_0000} & MSIP / MTIMECMP / MTIME\\
+PLIC       & \sig{0x0C00\_0000} & priority / pending / enable / claim\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Address decode and response mux}
+\sig{addr\_decoder} is pure combinational: it compares \sig{addr\_i} against each
+base/range and drives a one-hot of selects (\sig{ram\_sel\_o}, \sig{uart\_sel\_o},
+\sig{clint\_sel\_o}, \dots). The peripheral selects share the
+\texttt{0x100\_xxxxx} test plus a 4-bit \sig{addr[19:16]} compare. On the return
+path, \sig{periph\_bridge} latches which peripheral was read and, one cycle later,
+muxes its \sig{readdata} onto \sig{rdata\_o} with \sig{rvalid\_o}---peripherals are
+single-cycle and always ready.
+
+\subsection{Variable-latency read routing: \sig{rd\_inflight\_q}}
+\latencynote{The d-bus has two possible responders (\sig{dcache} for RAM,
+\sig{periph\_bridge} for everything else), and they can answer with different
+latencies. The hazard is timing: once a read is \emph{accepted}, the LSU moves
+\sig{dmem\_bus.addr} on to the next access, so \sig{ram\_sel} no longer reflects the
+\emph{outstanding} read. A response muxed on live \sig{ram\_sel} would then be routed
+to the wrong responder---under always-ready RAM the response came back the same
+cycle so this never showed, but under variable latency the load result was silently
+dropped. The fix (\texttt{soc\_top.sv:303--322}) captures the target at accept time.
+\sig{d\_read\_accept} = \sig{dmem\_bus.req \& \textasciitilde dmem\_bus.we \&
+dmem\_bus.ready}; on that edge \sig{rd\_inflight\_q}$\leftarrow$1 and
+\sig{rd\_to\_ram\_q}$\leftarrow$\sig{ram\_sel} (a snapshot). The response is then
+routed by the \emph{snapshot}, not the live select:
+\sig{dmem\_bus.rdata} = \sig{rd\_to\_ram\_q ? dc\_cpu\_rdata : periph\_rdata}, and
+\sig{rvalid} is gated by \sig{rd\_inflight\_q}. \sig{rd\_inflight\_q} clears when the
+response is consumed. This is the SoC-level twin of \sig{dmem\_arb}'s per-master
+\sig{pending\_rd\_master\_q}: both exist to make sure a delayed read result reaches
+exactly the requester that is waiting for it. The design is single-outstanding on the
+d-bus, so one snapshot flop is enough.}
+
+\subsection{Reset and boot}
+\sig{reset\_i} fans out to the core, caches, RAM, and every peripheral; the debug
+module can additionally assert \sig{ndmreset} to reset the core over JTAG. On reset
+the program counter loads its \sig{DEFAULT} vector (\sig{0x0000\_1000} for the boot
+ROM build, or \sig{0x8000\_0000} for a RAM-resident image), and the core begins
+fetching there through \sig{imem\_bus}\,$\rightarrow$\,\sig{icache}.
+
+\subsection{Interrupts}
+Two cores deliver interrupts. \sig{clint} provides the machine timer
+(\sig{MTIP}, from \sig{mtime}\,$\geq$\,\sig{mtimecmp}) and software (\sig{MSIP})
+interrupts straight to the core. \sig{plic} aggregates the peripheral interrupt lines
+(UART rx/tx, SPI, I2C, GPIO) and presents two contexts: M-mode
+(\sig{ext\_interrupt}\,$\rightarrow$\,\sig{MEIP}) and S-mode
+(\sig{s\_ext\_interrupt}\,$\rightarrow$\,\sig{SEIP}), each with its own enable,
+threshold, and claim/complete registers. This split (CLINT for timer/IPI, PLIC for
+device IRQs with priority and per-mode contexts) is what lets the Linux driver model
+bind to the SoC directly, which the peripheral standardisation work targets.
