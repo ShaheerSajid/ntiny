@@ -1,0 +1,69 @@
+\section{Introduction}
+
+This document describes the \textbf{ntiny} core one module at a time, bottom-up:
+the memory leaves first, then the caches, the bus, the load/store and atomic
+units, the core control logic, and finally how they compose into \sig{core\_top}
+and the SoC. Each module gets a block diagram, a port summary, a plain-language
+walk-through, and---where it matters---a note on how it behaves when memory does
+\emph{not} answer in a single cycle.
+
+\subsection{The pipeline, in one breath}
+
+ntiny is a classic in-order pipeline. Instructions flow through five stages:
+
+\begin{center}
+\sig{IF} (fetch) $\rightarrow$ \sig{ID} (decode/align) $\rightarrow$
+\sig{IE} (execute) $\rightarrow$ \sig{IMEM} (memory) $\rightarrow$
+\sig{IWB} (writeback).
+\end{center}
+
+A fetch front-end (PC logic, instruction cache, a fetch buffer, and a compressed
+aligner) feeds a decoder; the execute stage resolves branches and runs the ALU;
+the memory stage issues data accesses through a shared data bus; writeback
+commits results and CSR side effects. Forwarding paths and a central
+\sig{hazard\_unit} keep the pipeline correct without software-visible stalls.
+
+\subsection{The one idea that explains the hard bugs}
+
+\latencynote{The original pipeline was \emph{statically scheduled} around a
+memory that always answers in exactly one cycle. With single-cycle memory, ``the
+load's data is on the bus exactly when the consumer needs it,'' so no dynamic
+interlock is required---correctness falls out of the fixed schedule. The moment
+memory latency becomes \emph{variable} (a real cache miss, \sig{+RAM\_RANDOM\_DELAY},
+a future AXI/DRAM slave), that invariant breaks everywhere a memory result is
+produced or consumed: forwarding, branch/JALR resolution, the writeback commit
+gate, the fetch in-flight tracking, the bus response routing, and the cache
+itself. Each such site needs an explicit ``data-not-ready-yet'' handshake. This
+is why ``just more wait time'' is deceptively invasive---it is not one stall
+point, it is the removal of a global timing assumption. Throughout this document,
+\textbf{Latency notes} flag exactly where that assumption lived and what replaced
+it.}
+
+\subsection{How to read the diagrams}
+
+Every diagram uses one consistent visual vocabulary so shapes always mean the
+same thing:
+
+\begin{center}
+\begin{tabular}{>{\raggedright}p{3.2cm} l}
+\toprule
+\textbf{shape / colour} & \textbf{meaning} \\
+\midrule
+yellow rectangle      & combinational logic (decode, mux net, ALU op) \\
+blue rectangle        & register / flip-flop (pipeline reg, latch, counter) \\
+green stadium         & a state machine (state register + transitions) \\
+grey hexagon          & multiplexer / select \\
+purple cylinder       & memory array (SRAM, cache tag/data arrays) \\
+white box             & an instantiated sub-module \\
+pale boxes (in/out)   & module ports, grouped left (inputs) / right (outputs) \\
+\midrule
+solid arrow           & data / datapath signal \\
+dotted arrow          & control / handshake / stall / freeze \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Diagrams are deliberately \emph{sparse}: node labels are short signal or block
+names, and all the detail lives in the prose of each section. The diagram sources
+are Mermaid (\texttt{docs/microarch/diagrams/*.mmd}); rebuild the figures and this
+PDF with \texttt{python3 docs/microarch/build.py}.

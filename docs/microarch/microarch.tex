@@ -1,0 +1,65 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{amssymb}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+
+\graphicspath{{figures/}}
+
+% --- look & feel -----------------------------------------------------------
+\definecolor{ink}{HTML}{0f172a}
+\definecolor{accent}{HTML}{1d4ed8}
+\definecolor{muted}{HTML}{475569}
+\titleformat{\section}{\Large\bfseries\color{accent}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\color{ink}}{\thesubsection}{0.6em}{}
+\setlength{\parskip}{0.5em}\setlength{\parindent}{0pt}
+\pagestyle{fancy}\fancyhf{}\rhead{\small ntiny microarchitecture}
+\lhead{\small\leftmark}\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+% signal / code font
+\newcommand{\sig}[1]{\texttt{#1}}
+
+% diagram include: \diagram{file}{caption}{label}{width}
+\newcommand{\diagram}[4]{%
+  \begin{figure}[h]\centering
+  \includegraphics[width=#4\textwidth]{#1}%
+  \caption{#2}\label{#3}\end{figure}}
+
+% a compact "1-cycle-memory assumption" callout
+\newcommand{\latencynote}[1]{%
+  \par\vspace{0.3em}\noindent
+  \fcolorbox{orange}{orange!6}{\parbox{0.97\linewidth}{%
+  \footnotesize\textbf{Latency note.}~#1}}\par\vspace{0.3em}}
+
+\begin{document}
+
+% --- title -----------------------------------------------------------------
+\begin{titlepage}
+\centering\vspace*{3cm}
+{\Huge\bfseries\color{accent} ntiny Core}\\[0.4cm]
+{\LARGE Microarchitecture Reference}\\[1.5cm]
+{\large A bottom-up, module-by-module description of the ntiny RISC-V core,}\\
+{\large its memory subsystem, and its behaviour under variable memory latency.}\\[2cm]
+{\large\color{muted} RV32IMACZicsr\_Zifencei + Sv32 + PMP \quad$\cdot$\quad 5-stage in-order}\\[0.3cm]
+{\color{muted} generated from \texttt{docs/microarch/}}
+\vfill
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+\input{src/00-intro}
+\clearpage
+\input{src/icache}
+\clearpage
+\input{src/core2avl}
+
+\end{document}

@@ -1,0 +1,60 @@
+%% icache (stalling, single-outstanding) — minimal-text. Detail in src/icache.tex.
+flowchart LR
+  classDef in   fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+  classDef out  fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+  classDef comb fill:#fef9c3,stroke:#a16207,color:#713f12;
+  classDef reg  fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
+  classDef fsm  fill:#dcfce7,stroke:#15803d,color:#14532d;
+  classDef mux  fill:#e5e7eb,stroke:#374151,color:#111827;
+  classDef mem  fill:#ede9fe,stroke:#6d28d9,color:#4c1d95;
+
+  subgraph IN[in]
+    direction TB
+    REQ[cpu_req / cpu_addr]:::in
+    FL[flush_i]:::in
+    MRV[mem_rvalid / rdata]:::in
+    MRDY[mem_ready]:::in
+  end
+
+  DEC[addr decode]:::comb
+  ARR[(cache arrays)]:::mem
+  HIT[hit detect 4-way]:::comb
+  FSM([FSM<br/>IDLE / FILL]):::fsm
+  FILL[fill_*_q]:::reg
+  MOUT[mem_outstanding_q]:::reg
+  HR[hit resp_q]:::reg
+  INST[install]:::comb
+  RDY[ready logic]:::comb
+  RQ[req logic]:::comb
+  RVM{{rvalid mux}}:::mux
+  RDM{{rdata mux}}:::mux
+
+  subgraph OUT[out]
+    direction TB
+    CRDY[cpu_ready]:::out
+    CRV[cpu_rvalid]:::out
+    CRD[cpu_rdata]:::out
+    MREQ[mem_req]:::out
+    MADDR[mem_addr]:::out
+  end
+
+  REQ --> DEC --> HIT
+  ARR --> HIT
+  HIT -->|miss| FSM
+  HIT -->|hit| HR
+  FSM -->|miss| FILL
+  FILL --> INST --> ARR
+  MRV --> INST
+  FL -. flush .-> ARR
+  FSM --> RDY --> CRDY
+  FSM --> RQ --> MREQ
+  FILL --> RQ
+  FILL --> MADDR
+  MOUT -. gate .-> RQ
+  MOUT -. gate .-> RDY
+  MRDY -. set .-> MOUT
+  MRV -. clr .-> MOUT
+  HR --> RVM --> CRV
+  MRV --> RVM
+  HR --> RDM --> CRD
+  MRV --> RDM

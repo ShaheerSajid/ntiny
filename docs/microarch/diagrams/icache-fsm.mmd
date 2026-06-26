@@ -1,0 +1,9 @@
+%% icache fill FSM  -  design/memory/src/icache.sv
+%% (stateDiagram-v2 transition labels must be single-line plain text)
+stateDiagram-v2
+  [*] --> S_IDLE
+  S_IDLE --> S_IDLE : accept_hit - 1-cycle resp_valid_q next cycle
+  S_IDLE --> S_FILL : accept_miss - capture fill_*_q, fill_live=1
+  S_FILL --> S_FILL : drive mem_req until mem_ready, then await mem_rvalid
+  S_FILL --> S_IDLE : fill_live and mem_rvalid - install word + cpu_rvalid
+  S_FILL --> S_IDLE : flush_i abandons - drain RAM read, no cpu_rvalid owed

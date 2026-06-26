@@ -1,0 +1,103 @@
+\section{Instruction cache (\texttt{icache})}
+\textit{Source: \texttt{design/memory/src/icache.sv}}
+
+\subsection{Purpose}
+The \sig{icache} sits between the fetch front-end and instruction-side RAM
+(port~A). It answers instruction fetches from a small on-chip array when it can
+(a \emph{hit}), and fetches a missing word from RAM (a \emph{miss}) otherwise.
+It is a \textbf{single-outstanding stalling slave}: it can hold the fetch unit
+off (\sig{cpu\_ready}=0) while it services a miss, and it tolerates RAM that
+takes an arbitrary number of cycles to answer.
+
+\diagram{icache.pdf}{\texttt{icache} datapath. Left: CPU/fetch and RAM inputs.
+Right: CPU and RAM outputs. The FSM, the captured fill registers, and the
+\sig{mem\_outstanding} tracker are what make it latency-tolerant.}{fig:icache}{1.0}
+
+\subsection{Geometry}
+4\,KB, 4-way set-associative, 32-byte lines (8 words per line), 32 sets. An
+address splits as \sig{tag[31:10]}, \sig{index[9:5]}, \sig{word\_off[4:2]}, byte
+offset \sig{[1:0]} (ignored---fetches are word-aligned). Each line carries a
+\sig{line\_valid} bit \emph{and} per-word \sig{word\_valid} bits, so a single-word
+fill installs only the word that was returned; a hit needs both bits set.
+Replacement is round-robin per set (\sig{repl\_ptr}).
+
+\subsection{Ports}
+\begin{center}\small
+\begin{tabular}{l l l}
+\toprule
+\textbf{port} & \textbf{dir} & \textbf{meaning}\\\midrule
+\sig{cpu\_req\_i / cpu\_addr\_i} & in  & fetch request + word address\\
+\sig{cpu\_rdata\_o}             & out & fetched instruction word\\
+\sig{cpu\_rvalid\_o}            & out & response valid (one pulse per accepted req)\\
+\sig{cpu\_ready\_o}             & out & 1 = can accept a new request this cycle\\
+\sig{flush\_i}                  & in  & FENCE.I: invalidate all lines\\
+\sig{mem\_req\_o / mem\_addr\_o} & out & RAM read request to port~A\\
+\sig{mem\_rdata\_i / mem\_rvalid\_i} & in & RAM read response\\
+\sig{mem\_ready\_i}             & in  & RAM accepts a request this cycle\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{How a request is served}
+\textbf{Address decode and hit test} are combinational on \sig{cpu\_addr\_i}: the
+four ways are checked in parallel for (\sig{line\_valid} \textsc{and} tag match
+\textsc{and} \sig{word\_valid}); \sig{hit} is their OR and \sig{hit\_way\_id}
+selects the matching way.
+
+\textbf{On a hit}, the cache registers a one-cycle response: \sig{resp\_valid\_q}
+pulses next cycle and \sig{resp\_data\_q} holds the selected word. \sig{cpu\_ready}
+stays high, so hits accept back-to-back at one fetch per cycle---the same
+behaviour fetch always saw.
+
+\textbf{On a miss}, the FSM (\S\ref{sec:icache-fsm}) leaves \sig{S\_IDLE} for
+\sig{S\_FILL}, drops \sig{cpu\_ready} to 0 (the fetch unit now \emph{holds} its
+address and request stable), captures the request into \sig{fill\_tag/index/word/
+addr\_q} with \sig{fill\_live\_q}=1, and drives \sig{mem\_req} to RAM. When the
+RAM read returns (\sig{mem\_rvalid}), the word is installed into the array and
+forwarded to the CPU as \sig{cpu\_rvalid} with \sig{mem\_rdata}; the FSM returns
+to \sig{S\_IDLE}.
+
+\textbf{Install} (\sig{install\_tag\_match}) is recomputed against the
+\emph{current} array state at write time, so back-to-back fills of consecutive
+words in the same line land in the way the previous fill just allocated instead
+of picking a fresh way (this avoids a two-ways-same-tag corruption seen earlier
+in Linux init).
+
+\textbf{FENCE.I} (\sig{flush\_i}) invalidates every line in one cycle and blocks
+new accepts; a fill already in flight is abandoned but its RAM read is still
+drained (below).
+
+\subsection{Why it is latency-tolerant}
+\latencynote{The previous icache was \emph{transparent}: \sig{cpu\_ready}=\sig{mem\_ready},
+\sig{mem\_addr}=\sig{cpu\_addr} combinationally, and the response was derived
+from the \emph{live} \sig{cpu\_addr}. That silently assumes RAM returns data
+exactly one cycle after the request. Under variable latency the fetch unit has
+already advanced \sig{cpu\_addr} to the next word by the time the data arrives,
+so the transparent cache returned the \emph{wrong-offset} word (e.g.\ it answered
+a fetch of \sig{0x..04} with the word at \sig{0x..08}), which double-executed
+branch targets and corrupted \sig{beq}/\sig{bne}/\sig{cj} results. The fix is the
+structure in Fig.~\ref{fig:icache}: \sig{cpu\_ready} drops during a fill so the
+master holds; the fill address is \emph{captured} and used for the RAM request,
+the install slot, and the response; and \sig{mem\_outstanding\_q} keeps the RAM
+port strictly single-outstanding (so an abandoned FENCE.I fill's late response is
+swallowed before a new fill can issue). Under always-ready RAM \sig{mem\_outstanding}
+clears in one cycle, so a miss simply costs one stall cycle---baseline behaviour
+is unchanged.}
+
+\subsection{Fill FSM}\label{sec:icache-fsm}
+\diagram{icache-fsm.pdf}{\texttt{icache} fill FSM. A hit is served from
+\texttt{S\_IDLE} in one cycle; a miss enters \texttt{S\_FILL}, holds the master
+off, issues the captured RAM read, and waits for \texttt{mem\_rvalid}.}{fig:icache-fsm}{0.78}
+
+\begin{center}\small
+\begin{tabular}{l l p{7.5cm}}
+\toprule
+\textbf{from} & \textbf{to} & \textbf{when / action}\\\midrule
+\sig{S\_IDLE} & \sig{S\_IDLE} & accept\_hit: register \sig{resp\_valid\_q} for next cycle\\
+\sig{S\_IDLE} & \sig{S\_FILL} & accept\_miss: capture \sig{fill\_*\_q}, set \sig{fill\_live}\\
+\sig{S\_FILL} & \sig{S\_FILL} & drive \sig{mem\_req} until \sig{mem\_ready} accepts, then await \sig{mem\_rvalid}\\
+\sig{S\_FILL} & \sig{S\_IDLE} & \sig{fill\_live}\,\&\,\sig{mem\_rvalid}: install word, pulse \sig{cpu\_rvalid}\\
+\sig{S\_FILL} & \sig{S\_IDLE} & \sig{flush\_i} abandons the fill; RAM read drained, no \sig{cpu\_rvalid} owed\\
+\bottomrule
+\end{tabular}
+\end{center}

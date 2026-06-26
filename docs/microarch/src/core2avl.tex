@@ -1,0 +1,65 @@
+\section{Load/Store unit (\texttt{core2avl})}
+\textit{Source: \texttt{design/core/avalon\_master/src/core2avl.sv}}
+
+\subsection{Purpose}
+\sig{core2avl} is the CPU's load/store unit (LSU). It turns a decoded memory
+operation (a load or store of a byte/half/word at some address) into bus
+transactions, and formats returning read data (sign- or zero-extended, shifted to
+the right byte lanes). A naturally-aligned access is one bus beat; a half/word
+that straddles a 32-bit word boundary is split into two aligned beats by a small
+FSM.
+
+\diagram{core2avl.pdf}{\texttt{core2avl} datapath. Address/op enter on the left;
+bus request signals and the formatted read result leave on the right. The IWB
+ctrl latch (blue) holds the formatting controls across a multi-cycle load.}{fig:core2avl}{1.0}
+
+\subsection{Ports}
+\begin{center}\small
+\begin{tabular}{l l l}
+\toprule
+\textbf{port} & \textbf{dir} & \textbf{meaning}\\\midrule
+\sig{mem\_op / load\_store\_width / mem\_unsigned} & in & op kind, size, signedness\\
+\sig{addr\_i}        & in  & access address (from the ALU)\\
+\sig{data2write\_i}  & in  & store data\\
+\sig{readdata\_i}    & in  & read data from the bus\\
+\sig{stall\_i}       & in  & freeze the IWB control latch + FSM (= \sig{iwb\_stall})\\
+\sig{address\_o / byteenable\_o / writedata\_o} & out & bus request fields\\
+\sig{read\_o / write\_o} & out & bus request strobes\\
+\sig{data2read\_o}   & out & formatted load result (to IWB)\\
+\sig{misalign\_stall\_o} & out & 1 during the first beat of a crossing access\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{How it works}
+\textbf{Misalign detect} computes, combinationally from the width and
+\sig{addr[1:0]}, whether the access crosses a word boundary. If not, the access
+is a single aligned beat: \sig{address\_o}=\sig{addr\_i}, \sig{byteenable\_o} is
+the byte-lane mask for that size/offset, and \sig{writedata\_o} is the store data
+shifted into the correct lanes.
+
+\textbf{Crossing accesses} use the \sig{IDLE\,$\rightarrow$\,SECOND} FSM. The
+first beat reads/writes the low part at the aligned address; the operands
+(\sig{addr\_q}, \sig{wdata\_q}, \sig{width\_q}, \sig{op\_q}) and the first read
+word are latched; the next cycle issues the second beat at the next word, and the
+two halves are recombined on the read path. \sig{misalign\_stall\_o} holds the
+pipeline for the extra beat.
+
+\textbf{Read formatting} (\sig{read extract}) selects the right bytes from
+\sig{readdata\_i} using a small \emph{IWB control latch}---\sig{be\_iwb},
+\sig{mode\_iwb}, \sig{mem\_unsigned\_iwb}, \sig{byt\_iwb}---that was captured when
+the access was issued, then applies sign/zero extension to produce
+\sig{data2read\_o}.
+
+\subsection{The IWB control latch and variable latency}
+\latencynote{\sig{read extract} formats \emph{live} \sig{readdata\_i} using the
+\emph{registered} controls in the IWB ctrl latch. Those controls are clocked by
+\sig{stall\_i}. Originally \sig{stall\_i} was tied to 0, so the latch updated
+every cycle. With single-cycle memory that is fine: the read data arrives the one
+cycle the controls are still valid. Under variable latency the load's data
+arrives several cycles later---by which point the \emph{next} instruction (often
+a non-load) has overwritten \sig{be\_iwb} to ``no byte lanes,'' so the returning
+word formats to \sig{0}. The fix is to drive \sig{stall\_i}=\sig{iwb\_stall}: the
+latch (and the FSM) freeze while the load waits, so \sig{be\_iwb} survives until
+\sig{readdata\_i} is valid. Because \sig{iwb\_stall} is permanently 0 under
+always-ready RAM, baseline behaviour is unchanged.}
