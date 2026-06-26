@@ -1,3 +1,32 @@
+// ── core_top: the RV32 pipeline integration ──────────────────────────
+// This is the top of the CPU core. It wires together every block the rest
+// of this document describes into a classic 5-stage in-order pipeline and
+// drives the two latency-tolerant memory ports (imem_port / dmem_port).
+//
+// Pipeline stages (and the register walls between them):
+//   IF   fetch        — PC, redirect arbiter, icache, fetch_buffer, aligner
+//   ID   decode       — decoder, imm_gen, reg_file read, forwarding, BPU
+//   IE   execute      — ALU (int/mul/div/Zb*/FPU), branch resolve, CSR, AMO
+//   IMEM memory       — core2avl LSU drives the d-bus; dcache/peripherals
+//   IWB  write-back   — result/load data written to the register file
+//
+// NAMING CONVENTION (read this to navigate the file): a signal's suffix
+// says which stage it belongs to — _id / _ie / _imem / _iwb. The same
+// value flopped down the pipe appears as e.g. pc_id, pc_ie, pc_imem,
+// pc_iwb; likewise imm_*, exec_result_*. `ctrl_bus_*` is the decoded
+// control bundle (ctrl_bus_e) carried alongside. The big wire-declaration
+// block below is grouped by purpose, not by stage.
+//
+// CROSS-CUTTING MACHINERY layered on top of the straight pipe:
+//   - hazard_unit          : the stall chain (iwb->imem->ie->if_id) and the
+//                            flush chain; everything that freezes/squashes.
+//   - redirect_arbiter      : picks the next PC among sequential / BPU /
+//                            branch-recovery / trap / xret redirects.
+//   - interrupt_ctrl + csr_unit + trap_sequencer + wb_trap_unit : traps.
+//   - mmu_sv32 + pmp_checker: address translation and protection.
+//   - the load-in-flight tracker + producer back-pressure : the variable-
+//     memory-latency handling that the doc's latency notes keep returning to.
+// See microarch doc, especially "Fetch front-end" and the stage sections.
 import common_pkg::*;
 import debug_pkg::*;
 import core_pkg::*;
@@ -7,9 +36,9 @@ module core_top
 	input logic	clk_i,
 	input logic	reset_i,
 
-	//instruction port
+	//instruction port (fetch) — latency-tolerant mem_bus master
 	mem_bus.master imem_port,
-	//data port
+	//data port (load/store) — latency-tolerant mem_bus master
 	mem_bus.master dmem_port,
 
 	output onebit_sig_e resumeack_o,
@@ -125,12 +154,16 @@ logic [31:0] exec_result_iwb;
 logic [31:0] readdata_imem;
 logic [31:0] readdata_iwb;
 
+// Stall chain (driven by hazard_unit): a stall at a later stage backs up
+// to all earlier ones — iwb_stall -> imem_stall -> ie_stall -> if_id_stall.
 onebit_sig_e if_id_stall;
 onebit_sig_e consumer_can_take;
 onebit_sig_e ie_stall;
 onebit_sig_e imem_stall;
 onebit_sig_e iwb_stall;
 
+// Flush (squash) signals: turn a wrong-path instruction at a register wall
+// into a NOP on redirect/trap. One per wall.
 onebit_sig_e ie_flush;
 onebit_sig_e imem_flush;
 onebit_sig_e iwb_flush;
@@ -1736,6 +1769,11 @@ always_ff @(posedge clk_i or posedge reset_i) begin
     end
 end
 
+// Register-file write controls. Normal case: the IWB instruction writes its
+// rd unless a PMP data fault squashed it. Special case: the JAL/JALR-fault
+// path (jalr_fault_wr) instead forces rd = PC+4 from the ID stage so the
+// link register is written even though the faulting target never reached WB.
+// (The debug-access override is applied separately at the reg_file inputs.)
 wire        rf_wr_en   = jalr_fault_wr | (ctrl_bus_iwb.rd_int != NO_REG && !pmp_d_fault_iwb);
 wire [4:0]  rf_wr_addr = jalr_fault_wr ? ctrl_bus_if_id.rd_int[4:0] : ctrl_bus_iwb.rd_int[4:0];
 wire [31:0] rf_wr_data = jalr_fault_wr ? (pc_id + 32'd4)            : write_back_data;
