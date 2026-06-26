@@ -1887,14 +1887,11 @@ begin
 		default:rs3_forwarded_id = 0;
 	endcase
 end
-//stall unit
-stall_line stall_line_inst
-(
-    .ctrl_bus_if_id_i	(ctrl_bus_if_id),
-    .ctrl_bus_ie_i		(ctrl_bus_ie),
-    .ctrl_bus_imem_i	(ctrl_bus_imem),
-    .insert_bubble_o	(insert_bubble)
-);
+// stall unit removed: after the Phase 3 branch-in-IE move the stall_line
+// module produced a permanent no-op (insert_bubble == 0), so it has been
+// deleted. insert_bubble is tied to 0 here; the OR/guard use-sites that
+// read it (hazard_unit input, i_vaddr select, fetch_stall) collapse away.
+assign insert_bubble = onebit_sig_e'(1'b0);
 
 // ── Phase 3 (post branch-in-IE move): branch_comp and branch_target ─
 // are now instantiated DOWN at the IE stage (after the IE-stage

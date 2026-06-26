@@ -57,7 +57,6 @@
 ../../design/uncore/gpio/src/gpio_top.sv
 ../../design/uncore/uart/src/uart_top.sv
 ../../design/uncore/timer/src/timer_top.sv
-../../design/core/stall_unit/src/stall_line.sv
 ../../design/core/hazard_unit/src/hazard_unit.sv
 ../../design/core/privilege_unit/src/privilege_unit.sv
 ../../design/core/debug_ctrl/src/debug_ctrl.sv

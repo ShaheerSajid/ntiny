@@ -22,7 +22,6 @@ set RTL_PATH		\
 ../../../../design/core/imm_gen/src/ \
 ../../../../design/core/program_counter/src/ \
 ../../../../design/core/regfile/src/\
-../../../../design/core/stall_unit/src/ \
 ../../../../design/core/csr_unit/src/\
 ../../../../design/core/avalon_master/src/ \
 ../../../../design/core/c_ext/ \
@@ -105,13 +104,11 @@ forwarding_logic.sv \
 imm_gen.sv \
 program_counter.sv \
 reg_file.sv \
-stall_line.sv \
 csr_unit.sv \
 core2avl.sv \
 c_dec.sv \
 c_controller.sv \
 core_top.sv \
-avalon_interconnect.sv \
 gpio_top.sv \
 pkg_timer_decodes.sv \
 timer_top.sv \
