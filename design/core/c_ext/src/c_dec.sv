@@ -1,7 +1,15 @@
+// ── Compressed (RVC) decoder ─────────────────────────────────────────
+// Expands a 16-bit RVC instruction into the equivalent 32-bit instruction
+// ins_32, which then feeds the main decoder. Pure combinational. The case
+// key is {funct3, quadrant} = {ins_16[15:13], ins_16[1:0]}; the quadrant
+// (ins_16[1:0]) is 00=Q0, 01=Q1, 10=Q2. Compressed register fields name
+// x8..x15, so the 3-bit field is widened to a 5-bit address by prefixing
+// 2'b01 (e.g. {2'b01, ins_16[4:2]}). Immediates are unpacked and shuffled
+// into the destination format. See microarch doc: "Decode and execute".
 module c_dec
 			(
-                input[15:0] ins_16,
-			    output reg [31:0] ins_32
+                input[15:0] ins_16,           // raw 16-bit compressed instruction
+			    output reg [31:0] ins_32      // expanded 32-bit equivalent
 			);
 
 // RVC decoder uses top-of-block default (ins_32 = 0) and case branches
@@ -13,7 +21,7 @@ always_comb
 begin
 	ins_32 = 0;
 	case({ins_16[15:13],ins_16[1:0]})
-/////************************************************  Q1 *******************************//.				
+/////************************************************  Q0 *******************************//.
 	5'b000_00: begin	//C.addi4sp  checked
 				ins_32[6:0] = 7'b0010011; //opcode
 				ins_32[11:7] = {2'b01,ins_16[4:2]}; //rd

@@ -1,10 +1,21 @@
+// ── Instruction decoder ──────────────────────────────────────────────
+// Pure combinational decode of one 32-bit instruction (already expanded
+// from RVC by c_dec if it was compressed) into the packed control bus
+// ctrl_bus_o that the rest of the pipeline reads. The body has two parts:
+//   1. A big always_comb that decodes opcode/funct fields into local
+//      signals, using top-of-block defaults so any unmatched encoding
+//      leaves every control at its NO_* sentinel (-> illegal downstream).
+//   2. A flat list of assigns that packs those locals into ctrl_bus_o,
+//      plus the system-instruction tags (ecall/ebreak/mret/sret/...) and
+//      the additive WB-event trap tagging.
+// See microarch doc: "Decode and execute datapath" -> decoder.
 import common_pkg::*;
 import core_pkg::*;
 
 module decoder
 (
-    input logic [31:0] instruction_i,
-    output ctrl_bus_e ctrl_bus_o
+    input logic [31:0] instruction_i,  // instruction word (post-RVC-expand)
+    output ctrl_bus_e ctrl_bus_o       // packed control fields for the pipe
 );
 
 
@@ -439,6 +450,9 @@ begin
 end
 /* verilator lint_on CASEINCOMPLETE */
 
+// Pack the decoded locals into the output control struct. The fields below
+// are derived directly from csr_addr/csr_op or raw instruction bits because
+// they are simple constants rather than per-opcode decode.
 assign ctrl_bus_o.inst_type = opcode;
 assign ctrl_bus_o.br_cond = br_cond;
 assign ctrl_bus_o.load_store_width = load_store_width;
