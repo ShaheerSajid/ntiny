@@ -1,12 +1,22 @@
+// ── Load-use / hazard bubble detector (now a tied-off stub) ──────────
+// HISTORICALLY this raised insert_bubble_o for load-use and branch-source
+// hazards detected at the ID stage. After the Phase 3 "branch in IE" move,
+// all those cases are handled by the IE-stage forwarding network and the
+// load-use interlock in hazard_unit, so insert_bubble_o is now permanently
+// 0 (see the detailed note further down). The hazard-match logic below
+// (c*_ie / f*_ie / stall_condition_*) is computed but DEAD — kept only so
+// this can be deleted cleanly in a later cleanup without touching the
+// hazard_unit plumbing that still reads insert_bubble. Do not be misled by
+// it: this module gates nothing today.
 import common_pkg::*;
 import core_pkg::*;
 
 module stall_line
 (
-    input ctrl_bus_e ctrl_bus_if_id_i,
-    input ctrl_bus_e ctrl_bus_ie_i,
-    input ctrl_bus_e ctrl_bus_imem_i,
-    output onebit_sig_e insert_bubble_o
+    input ctrl_bus_e ctrl_bus_if_id_i, // instruction in ID (consumer)
+    input ctrl_bus_e ctrl_bus_ie_i,    // instruction in IE (potential producer)
+    input ctrl_bus_e ctrl_bus_imem_i,  // instruction in IMEM (potential producer)
+    output onebit_sig_e insert_bubble_o // tied to 0 (see header)
 );
 
 

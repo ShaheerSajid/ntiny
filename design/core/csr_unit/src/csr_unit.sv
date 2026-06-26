@@ -1,5 +1,14 @@
-
-
+// ── CSR file and privilege state ─────────────────────────────────────
+// Holds the control & status registers and the architectural privilege
+// machinery built on top of them. It does three jobs:
+//   1. CSR access: execute csrrw/csrrs/csrrc (csr_cmd_i / csr_addr_i) and
+//      return the old value, with M/S-mode permission and read-only checks.
+//   2. Trap entry: when trap_valid_i fires, save the cause/epc/tval into
+//      the M- or S-mode trap CSRs (per trap_to_s_i delegation) and update
+//      the interrupt-enable stack (mstatus MIE/MPIE/MPP, or S-mode twins).
+//   3. Trap return / counters: produce the xRET target and maintain the
+//      hardware performance/time counters (mcycle, minstret, time, ...).
+// See microarch doc: "Privileged architecture" -> CSRs & privilege, Traps.
 import common_pkg::*;
 import core_pkg::*;
 
