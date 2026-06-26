@@ -1,0 +1,134 @@
+\section{Decode and execute datapath}
+\textit{Sources: \texttt{design/core/c\_ext/src/c\_dec.sv},
+\texttt{design/core/control\_path/src/decoder.sv},
+\texttt{design/core/imm\_gen/src/imm\_gen.sv},
+\texttt{design/core/regfile/src/reg\_file.sv},
+\texttt{design/core/alu/src/alu.sv} (+ \texttt{divider.sv}, \texttt{clmul.sv},
+\texttt{zba\_zbb.sv}, \texttt{zbs.sv}).}
+
+\subsection{Purpose}
+This is the middle of the pipe: take a raw instruction word, turn it into control
+fields and operands, then compute a result. Decode is one combinational stage (the
+ID stage). Execute is the ALU in the IE stage. Most operations finish in the same
+cycle; only divide/remainder and the optional FPU take more than one cycle, and
+they are the only parts of this datapath that can stall the pipeline.
+
+\diagram{execute-decode}{Decode and execute datapath. The instruction word enters
+on the left, is expanded (if compressed) and decoded into \sig{ctrl\_bus\_o} plus
+an immediate, operands are read and forwarded, and the ALU produces
+\sig{result\_o}. Only the two FSM blocks (green)---the divider and the
+FPU---can raise \sig{alu\_stall\_o}.}{fig:exec}{1.0}
+
+\subsection{Decode}
+\textbf{\sig{c\_dec} (compressed expander).} A 16-bit RVC instruction is first
+expanded to its 32-bit equivalent. \sig{c\_dec} is pure combinational: it keys on
+\sig{\{ins\_16[15:13], ins\_16[1:0]\}} (the funct3 field plus the 2-bit quadrant)
+and builds the matching 32-bit word \sig{ins\_32}. Compressed register fields name
+\sig{x8}--\sig{x15}, so the 3-bit field is widened by prefixing \sig{2'b01}.
+Immediates are unpacked and re-shuffled into the I/B/J layout the base ISA uses. An
+unknown 16-bit pattern produces \sig{ins\_32}\,=\,\sig{0}, which the main decoder
+treats as illegal.
+
+\textbf{\sig{decoder}.} The 32-bit word (native, or expanded by \sig{c\_dec}) is
+decoded combinationally into one packed struct, \sig{ctrl\_bus\_o}
+(type \sig{ctrl\_bus\_e}). Every field is given a safe default at the top of the
+block, then overridden by the matching opcode case. The important fields:
+
+\begin{center}\small
+\begin{tabularx}{\textwidth}{l Y}
+\toprule
+\textbf{field} & \textbf{meaning}\\\midrule
+\sig{imm\_sel}         & immediate format for \sig{imm\_gen} (I/S/B/U/J/CSR)\\
+\sig{alu\_op}          & base integer op (ADD, SUB, SLL, SLT\dots, or \sig{NO\_ALU\_OP})\\
+\sig{mul\_op}          & M-extension op (MUL, MULH\dots, DIV, REM\dots, or \sig{NO\_MUL\_OP})\\
+\sig{bit\_op}          & Zba/Zbb/Zbs/Zbc op (or \sig{NO\_BIT\_OP})\\
+\sig{float\_op}        & FP op (or \sig{NO\_FP\_OP}); \sig{roundmode} = \sig{DYN} reads \sig{frm}\\
+\sig{operand\_a/b/c}   & operand source: \sig{REGISTER}, \sig{IMM}, \sig{PC}, \sig{NO\_OPERAND}\\
+\sig{rs1\_int / rs2\_int / rd\_int} & integer register addresses (plus float variants)\\
+\sig{mem\_op / load\_store\_width / mem\_unsigned} & memory op kind, size, signedness\\
+\sig{wb\_sel}          & write-back source: \sig{EXEC}, \sig{MEMORY}, \sig{PC\_WB}, \sig{NO\_WB}\\
+\sig{csr\_op / amo\_op} & CSR access kind / atomic op kind\\
+\sig{ecall, ebreak, mret, sret, sfence\_vma, fence\_i} & system-instruction tags\\
+\sig{wb\_event / wb\_cause / wb\_tval / instr\_word} & trap tagging (see Traps)\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The op-class fields are mutually exclusive by construction: a plain \sig{add} sets
+\sig{alu\_op}=\sig{ADD} and leaves \sig{mul\_op}/\sig{bit\_op}/\sig{float\_op} at
+their \sig{NO\_*} default. That ``exactly one class is active'' invariant is what
+the ALU result mux relies on. An opcode that matches no case keeps all defaults
+(all \sig{NO\_*}); the privilege unit turns that into an illegal-instruction trap.
+
+\textbf{\sig{imm\_gen}.} A small combinational mux selects on \sig{imm\_sel\_i} and
+sign-extends the right instruction bits into \sig{imm\_o}: I-, S-, B-, U-, J-format,
+plus a zero-extended 5-bit \sig{CSR\_imm}. U-format is the only one not
+sign-extended (it fills the low 12 bits with 0).
+
+\subsection{Operands and the register file}
+\textbf{\sig{reg\_file}.} 32 registers, combinational reads, one synchronous write.
+The integer file is parameterised \sig{ZERO\_REG}=1: a read of \sig{x0} returns 0
+and a write to \sig{x0} is suppressed. The write is gated by \sig{stall\_i} so a
+held instruction does not write twice. Two read ports (\sig{rddataa\_o},
+\sig{rddatab\_o}) feed rs1/rs2; the third port (\sig{rddatac\_o}) is used only by
+the FP file (\sig{ZERO\_REG}=0, no \sig{x0} special case) for the rs3 of fused
+multiply-add.
+
+Raw register data is not used directly. It first passes through the forwarding mux,
+which substitutes a younger in-flight result when a later stage is about to write a
+register this instruction reads. The selected \sig{operand\_a/b/c} (register, the
+immediate, or the PC, per the decoder) becomes \sig{a\_i}/\sig{b\_i}/\sig{c\_i} into
+the ALU. Forwarding and the load-use interlock are covered in their own section.
+
+\subsection{Execute (the ALU)}
+The ALU computes four kinds of result in parallel and selects one. The select is a
+priority mux on the same \sig{NO\_*} sentinels the decoder set
+(\texttt{alu.sv:330}):
+
+\begin{center}\small
+\begin{tabularx}{\textwidth}{l Y}
+\toprule
+\textbf{active field} & \textbf{result source}\\\midrule
+\sig{alu\_op}\,$\neq$\,\sig{NO\_ALU\_OP}   & \sig{int\_result} (add/sub/shift/compare/logic; \sig{PASS}=\sig{b\_i} for LUI/AUIPC)\\
+\sig{mul\_op}\,$\neq$\,\sig{NO\_MUL\_OP}   & \sig{mul\_result} (combinational MUL/MULH, or the divider output)\\
+\sig{bit\_op}\,$\neq$\,\sig{NO\_BIT\_OP}   & \sig{bit\_result} (Zba/Zbb/Zbs combinational, or \sig{clmul} for Zbc)\\
+\sig{float\_op}\,$\neq$\,\sig{NO\_FP\_OP}  & \sig{fpu\_result} (only when \texttt{FPU} is defined)\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Multiply (\sig{MUL}/\sig{MULH}/\sig{MULHU}/\sig{MULHSU}) is a single-cycle
+\texttt{\$signed} product, sliced \sig{[31:0]} or \sig{[63:32]}. The bit-manip units
+(\sig{zba\_zbb}, \sig{zbs}, \sig{clmul}) are all combinational; the ALU just routes
+their outputs through a mux on \sig{bit\_op\_i}.
+
+\textbf{Divider.} \sig{DIV}/\sig{REM}/\sig{DIVU}/\sig{REMU} assert
+\sig{div\_start}, which kicks the restoring divider (\sig{divider.sv}). It does one
+quotient bit per cycle. A leading-zero count sets the iteration count
+\sig{init\_n} to the number of significant dividend bits (minimum 3), so small
+operands finish fast. The special cases---divide-by-zero and signed overflow---are
+detected up front and forced to the RISC-V-defined results. \sig{valid\_o}
+(=\,\sig{n==0}) signals completion as \sig{div\_valid}.
+
+\textbf{FPU (optional, \texttt{ifdef FPU}).} A 3-state handshake FSM
+(\sig{FP\_IDLE}\,$\rightarrow$\,\sig{FP\_BUSY}\,$\rightarrow$\,\sig{FP\_IDLE}, with a
+\sig{FP\_DRAIN} state so a flushed-but-launched op still consumes its result) drives
+the external \sig{fp\_top} core. Bit-move ops (\sig{FMVXW}/\sig{FMVWX}) set
+\sig{fpu\_bypass} and skip the FSM entirely. 32-bit operands are NaN-boxed to 64
+bits on the way in.
+
+\subsection{Where the pipeline stall comes from}
+\latencynote{This datapath has exactly one stall output, and it is born here, not
+imported. \texttt{alu.sv:344}:
+\[\sig{alu\_stall\_o} = (\sig{div\_start} \,\&\, \lnot\sig{div\_valid})\;\lor\;\sig{fpu\_stall}.\]
+A divide holds the IE stage until \sig{div\_valid}; an FP op holds it until the FSM
+returns to \sig{FP\_IDLE}. In \sig{core\_top}, \sig{alu\_inst.stall\_i} is tied to
+\sig{1'b0}: the ALU's own latches are never frozen, because the divider \emph{is}
+the thing generating the stall and must keep iterating while the rest of the pipe
+waits on it. \sig{alu\_stall\_o} leaves as \sig{alu\_stall} and folds into
+\sig{ie\_stall} in the hazard unit; \sig{ie\_stall} then propagates up to
+\sig{if\_id\_stall}, freezing the front-end until the multi-cycle op retires. Unlike
+the load path, this multi-cycle behaviour was \emph{always} present---it is internal
+to the core and does not depend on memory latency---so it needed no change for the
+variable-latency work. The contrast is the point: the ALU was built to stall on its
+own long ops, while the load path originally assumed memory never stalled at all.}

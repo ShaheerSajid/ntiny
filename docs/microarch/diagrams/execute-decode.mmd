@@ -1,0 +1,53 @@
+%% Execute/decode datapath — minimal-text block diagram. Detail in src/execute-decode.tex.
+flowchart LR
+  classDef in   fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+  classDef out  fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+  classDef comb fill:#fef9c3,stroke:#a16207,color:#713f12;
+  classDef fsm  fill:#dcfce7,stroke:#15803d,color:#14532d;
+  classDef mux  fill:#e5e7eb,stroke:#374151,color:#111827;
+
+  subgraph ID[decode]
+    direction TB
+    INS[instruction_i]:::in
+    CDEC[c_dec<br/>16 to 32 bit]:::comb
+    DEC[decoder<br/>ctrl_bus_o]:::comb
+    IMM[imm_gen<br/>imm_o]:::comb
+  end
+
+  RF[reg_file<br/>rddataa/b/c_o]:::comb
+  FWD[forwarding mux]:::mux
+
+  subgraph EX[execute - alu]
+    direction TB
+    INT[int_result]:::comb
+    MUL[mul / mulh]:::comb
+    DIV([divider FSM<br/>div_valid]):::fsm
+    BIT[Zba/Zbb/Zbs/clmul<br/>bit_result]:::comb
+    FPU([fpu FSM<br/>IDLE/BUSY/DRAIN]):::fsm
+    RMUX{{result mux}}:::mux
+  end
+
+  subgraph OUT[out]
+    direction TB
+    RES[result_o]:::out
+    AST[alu_stall_o]:::out
+  end
+
+  INS --> CDEC --> DEC
+  INS --> IMM
+  DEC --> RF
+  RF --> FWD
+  IMM --> FWD
+  FWD -->|a_i b_i c_i| INT
+  FWD --> MUL
+  FWD --> DIV
+  FWD --> BIT
+  FWD --> FPU
+  INT --> RMUX
+  MUL --> RMUX
+  DIV --> RMUX
+  BIT --> RMUX
+  FPU --> RMUX
+  RMUX --> RES
+  DIV -. ~div_valid .-> AST
+  FPU -. fpu_stall .-> AST
