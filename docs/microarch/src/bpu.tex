@@ -1,0 +1,58 @@
+\section{Branch prediction (\texttt{bpu})}
+\textit{Sources: \texttt{design/core/bpu/src/\{bpu,bht,btb,ras\}.sv} and its
+wiring in \texttt{core\_top.sv}.}
+
+A branch is a problem for a pipeline. The core does not know if a branch is taken
+until the IE stage. Without help, it must wait. The branch prediction unit (BPU)
+guesses the branch early, so the pipeline can keep fetching. If the guess is
+wrong, the core fixes it later and throws away the wrong path.
+
+\diagram{bpu}{The BPU. It is read at the ID stage to guess the branch, and
+updated at the IE stage when the real result is known. Three tables work
+together: the BHT guesses taken or not-taken, the BTB holds the target, the RAS
+predicts returns.}{fig:bpu}{0.95}
+
+\subsection{The three tables}
+\textbf{BHT (branch history table).} This guesses the \emph{direction}: taken or
+not-taken. It has 1024 entries. Each entry is a 2-bit counter (strong/weak,
+taken/not-taken). It uses ``gshare'': the index is the PC mixed (XOR) with an
+8-bit record of the last 8 branch results. This lets the same branch get a
+different guess depending on recent history.
+
+\textbf{BTB (branch target buffer).} This holds the \emph{target} address. It has
+128 entries, direct-mapped, with a tag to confirm a hit. Each entry also says if
+the branch is unconditional (a jump, always taken) and if it is compressed
+(16-bit). A jump is predicted taken without asking the BHT.
+
+\textbf{RAS (return address stack).} This predicts function returns
+(\sig{jalr} back to the caller). It is an 8-deep stack. A call pushes the return
+address; a return would pop it.
+
+\subsection{When it runs}
+The BPU is \emph{read} at the ID stage using \sig{pc\_id}. If the BTB hits and
+the branch is predicted taken, the core redirects fetch to the target. The BPU is
+\emph{updated} at the IE stage, where the real branch result is known: the BHT
+counter moves toward the result, and the BTB learns the target.
+
+\subsection{Spotting a wrong guess}
+At the IE stage the core compares the real result with the guess. A guess is
+wrong if the direction is wrong, or if the direction was right but the target was
+wrong. On a wrong guess the core redirects to the correct PC and flushes the
+wrong-path instructions in IF/ID.
+
+\subsection{What is on and off today}
+Not every BPU path is enabled. The code keeps some off on purpose:
+\begin{center}\small
+\begin{tabularx}{\textwidth}{l l Y}
+\toprule
+\textbf{path} & \textbf{status} & \textbf{why} \\
+\midrule
+BHT + BTB at ID & \textbf{on}  & the main predictor; does most of the work \\
+RAS push        & \textbf{on}  & keeps the return stack correct; no redirect, so safe \\
+RAS pop redirect& \textbf{off} & it broke Linux boot: the pop-redirect disturbed ITLB/PTW state and made the kernel's first \sig{satp} write page-fault \\
+IF-stage predict& \textbf{off} & costs about 4\% on Dhrystone, but ID-stage prediction already gives most of the gain; kept off for simpler debug and Linux \\
+\bottomrule
+\end{tabularx}
+\end{center}
+The RAS still pushes and pops internally (so its state stays correct), it just
+does not drive a fetch redirect.

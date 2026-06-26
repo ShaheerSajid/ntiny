@@ -1,0 +1,12 @@
+%% Linux boot phases. Minimal text.
+flowchart TD
+  classDef m fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
+  classDef s fill:#dcfce7,stroke:#15803d,color:#14532d;
+  classDef u fill:#fef9c3,stroke:#a16207,color:#713f12;
+
+  R[reset<br/>M-mode  PC=0x80000000]:::m
+  SBI[OpenSBI  M-mode<br/>UART CLINT PLIC PMP<br/>menvcfg STCE+ADUE<br/>delegate to S]:::m
+  K[Linux kernel  S-mode<br/>head.S: satp = Sv32<br/>stvec, Sstc timer]:::s
+  U[userspace  U-mode<br/>/init  busybox]:::u
+
+  R --> SBI --> K --> U

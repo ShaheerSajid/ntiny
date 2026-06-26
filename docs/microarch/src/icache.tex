@@ -9,7 +9,7 @@ It is a \textbf{single-outstanding stalling slave}: it can hold the fetch unit
 off (\sig{cpu\_ready}=0) while it services a miss, and it tolerates RAM that
 takes an arbitrary number of cycles to answer.
 
-\diagram{icache.pdf}{\texttt{icache} datapath. Left: CPU/fetch and RAM inputs.
+\diagram{icache}{\texttt{icache} datapath. Left: CPU/fetch and RAM inputs.
 Right: CPU and RAM outputs. The FSM, the captured fill registers, and the
 \sig{mem\_outstanding} tracker are what make it latency-tolerant.}{fig:icache}{1.0}
 
@@ -23,7 +23,7 @@ Replacement is round-robin per set (\sig{repl\_ptr}).
 
 \subsection{Ports}
 \begin{center}\small
-\begin{tabular}{l l l}
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.9cm} l Y}
 \toprule
 \textbf{port} & \textbf{dir} & \textbf{meaning}\\\midrule
 \sig{cpu\_req\_i / cpu\_addr\_i} & in  & fetch request + word address\\
@@ -35,7 +35,7 @@ Replacement is round-robin per set (\sig{repl\_ptr}).
 \sig{mem\_rdata\_i / mem\_rvalid\_i} & in & RAM read response\\
 \sig{mem\_ready\_i}             & in  & RAM accepts a request this cycle\\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{center}
 
 \subsection{How a request is served}
@@ -85,12 +85,12 @@ clears in one cycle, so a miss simply costs one stall cycle---baseline behaviour
 is unchanged.}
 
 \subsection{Fill FSM}\label{sec:icache-fsm}
-\diagram{icache-fsm.pdf}{\texttt{icache} fill FSM. A hit is served from
+\diagram{icache-fsm}{\texttt{icache} fill FSM. A hit is served from
 \texttt{S\_IDLE} in one cycle; a miss enters \texttt{S\_FILL}, holds the master
 off, issues the captured RAM read, and waits for \texttt{mem\_rvalid}.}{fig:icache-fsm}{0.78}
 
 \begin{center}\small
-\begin{tabular}{l l p{7.5cm}}
+\begin{tabularx}{\textwidth}{l l Y}
 \toprule
 \textbf{from} & \textbf{to} & \textbf{when / action}\\\midrule
 \sig{S\_IDLE} & \sig{S\_IDLE} & accept\_hit: register \sig{resp\_valid\_q} for next cycle\\
@@ -99,5 +99,5 @@ off, issues the captured RAM read, and waits for \texttt{mem\_rvalid}.}{fig:icac
 \sig{S\_FILL} & \sig{S\_IDLE} & \sig{fill\_live}\,\&\,\sig{mem\_rvalid}: install word, pulse \sig{cpu\_rvalid}\\
 \sig{S\_FILL} & \sig{S\_IDLE} & \sig{flush\_i} abandons the fill; RAM read drained, no \sig{cpu\_rvalid} owed\\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{center}

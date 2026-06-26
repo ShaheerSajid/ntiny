@@ -1,0 +1,21 @@
+%% Fetch front-end. Minimal text, real signal names.
+flowchart LR
+  classDef reg  fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
+  classDef comb fill:#fef9c3,stroke:#a16207,color:#713f12;
+  classDef mem  fill:#ede9fe,stroke:#6d28d9,color:#4c1d95;
+  classDef out  fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+
+  PC[program_counter<br/>pc_out]:::reg
+  IVA[i_vaddr]:::comb
+  IC[(icache)]:::mem
+  FB[fetch_buffer<br/>head / next]:::reg
+  AL[compressed_aligner<br/>half_index_q]:::comb
+  DEC[to ID / decoder<br/>aligner_inst, pc_id]:::out
+  RA[redirect_arbiter<br/>debug>trap>branch>ret>BPU>PC+4]:::comb
+
+  PC --> IVA --> IC
+  IC -->|rvalid word| FB
+  FB --> AL --> DEC
+  RA -->|redirect_target -> pc_in| PC
+  RA -. flush .-> FB
+  RA -. reseat half .-> AL

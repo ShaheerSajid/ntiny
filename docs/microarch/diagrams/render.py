@@ -14,6 +14,7 @@ src = sys.argv[1]
 stem = os.path.splitext(os.path.basename(src))[0]
 out_svg = os.path.join(FIGS, stem + ".svg")
 out_png = os.path.join(FIGS, stem + ".png")
+out_pdf = os.path.join(FIGS, stem + ".pdf")
 code = open(src).read()
 
 
@@ -24,7 +25,7 @@ def via_mmdc():
     if not os.path.exists(cfg):
         open(cfg, "w").write('{"theme":"neutral","flowchart":'
                              '{"htmlLabels":true,"curve":"basis"}}')
-    for out in (out_svg, out_png):
+    for out in (out_svg, out_png, out_pdf):   # mmdc PDF is vector + has text
         subprocess.run(["mmdc", "-i", src, "-o", out, "-c", cfg, "-b", "white",
                         "--scale", "2"], check=True)
     return True

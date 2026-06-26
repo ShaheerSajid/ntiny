@@ -1,0 +1,30 @@
+%% Branch prediction unit. Minimal text.
+flowchart LR
+  classDef in   fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+  classDef out  fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+  classDef mem  fill:#ede9fe,stroke:#6d28d9,color:#4c1d95;
+  classDef comb fill:#fef9c3,stroke:#a16207,color:#713f12;
+
+  subgraph IN[in]
+    direction TB
+    PCID[pc_id  read]:::in
+    UPD[pc_ie + taken<br/>+ target  update]:::in
+  end
+
+  BHT[(BHT<br/>gshare 1024 x 2-bit)]:::mem
+  BTB[(BTB<br/>128 targets + flags)]:::mem
+  RAS[(RAS<br/>8-deep return stack)]:::mem
+  PRED[predict<br/>taken? target?]:::comb
+
+  subgraph OUT[out]
+    direction TB
+    RDIR[redirect at ID<br/>BHT/BTB only]:::out
+  end
+
+  PCID --> BHT --> PRED
+  PCID --> BTB --> PRED
+  RAS -. push only .-> PRED
+  PRED --> RDIR
+  UPD --> BHT
+  UPD --> BTB
+  UPD -. call .-> RAS

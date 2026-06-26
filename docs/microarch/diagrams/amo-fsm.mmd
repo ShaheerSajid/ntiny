@@ -1,0 +1,10 @@
+%% AMO unit FSM. Minimal text.
+stateDiagram-v2
+  [*] --> IDLE
+  IDLE --> AMO_READ : LR / AMO start
+  IDLE --> AMO_WRITE : SC, reservation ok
+  IDLE --> DONE : SC, reservation fail (result=1)
+  AMO_READ --> DONE : LR done (result = old value)
+  AMO_READ --> AMO_WRITE : AMO, got old value
+  AMO_WRITE --> DONE : write accepted
+  DONE --> IDLE : result captured by IE

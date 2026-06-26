@@ -45,7 +45,7 @@ Every diagram uses one consistent visual vocabulary so shapes always mean the
 same thing:
 
 \begin{center}
-\begin{tabular}{>{\raggedright}p{3.2cm} l}
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.2cm} Y}
 \toprule
 \textbf{shape / colour} & \textbf{meaning} \\
 \midrule
@@ -60,7 +60,7 @@ pale boxes (in/out)   & module ports, grouped left (inputs) / right (outputs) \\
 solid arrow           & data / datapath signal \\
 dotted arrow          & control / handshake / stall / freeze \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{center}
 
 Diagrams are deliberately \emph{sparse}: node labels are short signal or block

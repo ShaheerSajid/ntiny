@@ -1,0 +1,14 @@
+%% Sv32 page-table walker FSM. Minimal text.
+stateDiagram-v2
+  [*] --> IDLE
+  IDLE --> L1 : TLB miss - read root PTE
+  L1 --> FAULT : invalid PTE
+  L1 --> FILL : leaf (megapage)
+  L1 --> L0_WAIT : pointer
+  L0_WAIT --> L0 : drain stale rvalid
+  L0 --> FAULT : invalid PTE
+  L0 --> FILL : leaf PTE
+  FILL --> UPDATE_AD : A/D needed (Svadu)
+  FILL --> IDLE : perm ok - fill TLB
+  UPDATE_AD --> IDLE : write PTE - fill TLB
+  FAULT --> IDLE : raise page/access fault

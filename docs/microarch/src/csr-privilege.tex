@@ -1,0 +1,90 @@
+\section{CSRs and privilege}
+\textit{Sources: \texttt{design/core/csr\_unit/}, \texttt{privilege\_unit/}, and
+\texttt{core\_pkg.sv}.}
+
+ntiny implements three privilege levels---\textbf{M} (machine, \sig{2'b11}),
+\textbf{S} (supervisor, \sig{2'b01}), \textbf{U} (user, \sig{2'b00})---held in
+the \sig{priv\_level} register inside \sig{csr\_unit}. Reset enters M-mode. All
+architectural control state lives in the Control/Status Registers (CSRs); this
+section describes what is implemented and how privilege changes.
+
+\diagram{priv-modes}{Privilege transitions. A trap raises privilege (to M, or to
+S when delegated); a return (\sig{mret}/\sig{sret}) lowers it to the saved
+previous privilege (\sig{MPP}/\sig{SPP}). Reset starts in M.}{fig:priv-modes}{0.62}
+
+\subsection{Two units, two jobs}
+\sig{privilege\_unit} is a small \emph{combinational} checker at the ID stage: it
+decides whether an instruction is legal at the current privilege. It flags
+illegal CSR accesses (a CSR's address bits \sig{[9:8]} encode its minimum
+privilege; access is illegal when \sig{priv\_level} is lower), illegal
+\sig{mret} (needs M) / \sig{sret} (needs S), and---when \sig{mstatus.TVM=1} in
+S-mode---traps on \sig{satp} writes and \sig{sfence.vma}. \sig{csr\_unit} is the
+\emph{state}: it stores every CSR, performs reads/writes with WARL masking,
+applies the atomic trap-entry / \sig{xret} side effects, and drives
+\sig{priv\_level}, \sig{satp}, the delegation registers, and the interrupt
+pending/enable views out to the rest of the core.
+
+\subsection{Implemented CSRs (overview)}
+\begin{center}\small
+\begin{tabularx}{\textwidth}{l Y Y}
+\toprule
+\textbf{group} & \textbf{registers} & \textbf{notes} \\
+\midrule
+M trap setup   & \sig{mstatus(h)}, \sig{misa}, \sig{medeleg}, \sig{mideleg}, \sig{mie}, \sig{mtvec} & \sig{misa} reads RV32 + the implemented extensions; deleg selects M-vs-S \\
+M trap handling& \sig{mscratch}, \sig{mepc}, \sig{mcause}, \sig{mtval}, \sig{mip} & \sig{mepc/mcause/mtval} auto-written on an M-trap \\
+M counters     & \sig{mcycle(h)}, \sig{minstret(h)}, \sig{mcountinhibit}, \sig{mcounteren} & HPM counters 3--31 are WARL read-zero \\
+M env / Sstc   & \sig{menvcfg(h)} (STCE, ADUE), \sig{stimecmp(h)} & STCE enables the Sstc S-timer; ADUE enables HW A/D updates \\
+PMP            & \sig{pmpcfg0..3}, \sig{pmpaddr0..15} & 16 regions; locked entries (L bit) are write-protected \\
+S mode         & \sig{sstatus}, \sig{sie}, \sig{stvec}, \sig{scounteren}, \sig{sscratch}, \sig{sepc}, \sig{scause}, \sig{stval}, \sig{sip}, \sig{satp}, \sig{senvcfg} & \sig{sstatus}/\sig{sie}/\sig{sip} are filtered views of the M registers \\
+U mode         & \sig{fflags}, \sig{frm}, \sig{fcsr} (FPU), \sig{seed} (Zkr), \sig{cycle/time/instret(h)} & user counters are read-only, gated by \sig{[m/s]counteren} \\
+Debug          & \sig{tselect/tdata1..3/tinfo/tcontrol} & trigger module present but no real trigger slot (WARL) \\
+Hart info      & \sig{mhartid}=0, \sig{mvendorid/marchid/mimpid/mconfigptr}=0 & single hart \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{\texttt{mstatus} / \texttt{sstatus}}
+\sig{mstatus} holds the privileged mode/interrupt state. The live fields are:
+\sig{MIE}/\sig{SIE} (global interrupt enable per level), \sig{MPIE}/\sig{SPIE}
+(the pre-trap enable, restored on return), \sig{MPP[1:0]}/\sig{SPP} (the pre-trap
+privilege, restored on return---\sig{SPP} is a single bit since S can only have
+come from U or S), \sig{MPRV} (data accesses use \sig{MPP}'s privilege),
+\sig{SUM} (S may touch U pages), \sig{MXR} (loads may read execute-only pages),
+\sig{TVM}/\sig{TW}/\sig{TSR} (trap virtual-memory ops / WFI / \sig{sret} in
+S-mode), and \sig{FS[1:0]}/\sig{SD} for the FPU. \sig{sstatus} is the same
+register read and written through a mask that exposes only the S-visible bits
+(\sig{SIE}, \sig{SPIE}, \sig{SPP}, \sig{FS}, \sig{SUM}, \sig{MXR}, \sig{SD});
+writes to any other bit through \sig{sstatus} are dropped.
+
+\subsection{The CSR read/write datapath}
+CSR instructions execute at the IE stage. A read is a combinational mux over the
+CSR address, with WARL read-masks applied (e.g.\ \sig{sstatus} returns
+\sig{mstatus} \& read-mask; HPM and unimplemented CSRs return 0). A write
+(\sig{csrrw}), set (\sig{csrrs}), or clear (\sig{csrrc}) only changes the bits
+that the register's write-mask (WMASK) allows. Read-only and reserved bits never
+change. An access to an unimplemented
+(non-HPM) CSR raises illegal-instruction. Notable side effects: writing
+\sig{satp} re-points the MMU; writing \sig{mstatus}/\sig{mie}/\sig{mip} changes
+interrupt behaviour the same cycle; \sig{sie}/\sig{sip} only touch the
+S-delegated bits of the underlying \sig{mie}/\sig{mip}.
+
+\subsection{Interrupt-pending hardware vs.\ software bits}
+\sig{mip} mixes hardware-driven and software-driven bits. The machine bits
+\sig{MTIP}/\sig{MSIP}/\sig{MEIP} are refreshed every cycle from the uncore
+(\sig{interrupt\_src} from CLINT/PLIC) and are read-only to software. The
+supervisor bits \sig{STIP}/\sig{SSIP}/\sig{SEIP} are software-writable by M-mode
+(to inject S-interrupts), \emph{plus} a hardware contribution: \sig{SEIP} ORs in
+the PLIC S-context line, and \sig{STIP} is driven in hardware by Sstc when
+\sig{menvcfg.STCE=1} (\sig{mtime}\,$\ge$\,\sig{stimecmp}). When Sstc is enabled,
+software writes to \sig{STIP} are ignored---the timer is owned by the comparator.
+
+\subsection{Trap entry and return (CSR view)}
+On a trap, \sig{csr\_unit} latches \sig{[m/s]epc}, \sig{[m/s]cause},
+\sig{[m/s]tval}, updates \sig{mstatus} (push old privilege into \sig{xPP}, old
+enable into \sig{xPIE}, clear \sig{xIE}), and sets \sig{priv\_level}. The crucial
+sequencing detail---covered in \S\ref{sec:traps-carrier}---is that an in-flight
+\sig{csr} write on the trapped instruction is applied \emph{first}, then the
+trap-entry overrides layer on top, because the saved \sig{epc} points past that
+instruction. On \sig{mret}/\sig{sret} the inverse happens:
+\sig{xIE}$\leftarrow$\sig{xPIE}, \sig{xPIE}=1, \sig{xPP}=U, and \sig{priv\_level}
+is restored from \sig{xPP}; \sig{MPRV} is also cleared if returning below M.

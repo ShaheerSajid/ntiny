@@ -9,13 +9,13 @@ the right byte lanes). A naturally-aligned access is one bus beat; a half/word
 that straddles a 32-bit word boundary is split into two aligned beats by a small
 FSM.
 
-\diagram{core2avl.pdf}{\texttt{core2avl} datapath. Address/op enter on the left;
+\diagram{core2avl}{\texttt{core2avl} datapath. Address/op enter on the left;
 bus request signals and the formatted read result leave on the right. The IWB
 ctrl latch (blue) holds the formatting controls across a multi-cycle load.}{fig:core2avl}{1.0}
 
 \subsection{Ports}
 \begin{center}\small
-\begin{tabular}{l l l}
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{4.3cm} l Y}
 \toprule
 \textbf{port} & \textbf{dir} & \textbf{meaning}\\\midrule
 \sig{mem\_op / load\_store\_width / mem\_unsigned} & in & op kind, size, signedness\\
@@ -28,7 +28,7 @@ ctrl latch (blue) holds the formatting controls across a multi-cycle load.}{fig:
 \sig{data2read\_o}   & out & formatted load result (to IWB)\\
 \sig{misalign\_stall\_o} & out & 1 during the first beat of a crossing access\\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{center}
 
 \subsection{How it works}

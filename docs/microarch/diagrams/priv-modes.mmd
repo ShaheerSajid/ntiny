@@ -1,0 +1,11 @@
+%% Privilege-level transitions. Minimal text.
+stateDiagram-v2
+  [*] --> M : reset
+  M --> M : trap (M)
+  S --> M : trap to M
+  U --> M : trap to M
+  S --> S : trap (deleg)
+  U --> S : trap (deleg)
+  M --> S : mret MPP=S
+  M --> U : mret MPP=U
+  S --> U : sret SPP=U

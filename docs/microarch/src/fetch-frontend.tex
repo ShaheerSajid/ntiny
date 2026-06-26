@@ -1,0 +1,83 @@
+\section{Fetch front-end}
+\textit{Sources: \texttt{program\_counter.sv}, \texttt{redirect\_arbiter.sv},
+\texttt{fetch/} (\texttt{fetch\_buffer}), \texttt{c\_ext/}
+(\texttt{compressed\_aligner}), and the fetch wiring in \texttt{core\_top.sv}.}
+
+The job of the front-end is simple to say and hard to do: keep giving the decoder
+the next instruction. It must turn a stream of 32-bit memory words into aligned
+instructions (some are 16-bit compressed), it must redirect when a branch or trap
+changes the path, and it must wait when the icache is slow. Most of the
+stall-tolerance bugs in this project lived here.
+
+\diagram{fetch-frontend}{The fetch path. \sig{program\_counter} drives
+\sig{i\_vaddr} into the \sig{icache}; returned words go into the
+\sig{fetch\_buffer}; the \sig{compressed\_aligner} cuts them into instructions for
+the decoder. The \sig{redirect\_arbiter} picks the next PC and, on a redirect,
+flushes the buffer and reseats the aligner.}{fig:fetch-frontend}{1.0}
+
+\subsection{Program counter and the next-PC choice}
+\sig{program\_counter} holds the fetch address \sig{pc\_out}. Each cycle it loads
+\sig{pc\_in} unless \sig{stall\_i} is high. \sig{pc\_in} comes from the
+\sig{redirect\_arbiter}, which picks one source by priority:
+\begin{center}\small
+debug (\sig{dpc}) $>$ trap (\sig{handler\_addr}) $>$ branch
+(\sig{branch\_target}) $>$ \sig{mret}/\sig{sret} (\sig{mepc}/\sig{sepc}) $>$ BPU
+prediction $>$ else \sig{pc\_out + 4}.
+\end{center}
+The arbiter outputs \sig{arb\_redirect\_valid}, \sig{arb\_redirect\_target}, and
+\sig{arb\_redirect\_kind} (\sig{RDR\_DEBUG}/\sig{RDR\_TRAP}/\sig{RDR\_BRANCH}/
+\sig{RDR\_XRET}/\sig{RDR\_BPU}/\sig{RDR\_BPU\_IF}). A redirect bypasses normal
+stalls so the new path starts right away.
+
+\subsection{The fetch buffer}
+The address that the producer sends to the icache is \sig{i\_vaddr}. Normally it
+is \sig{pc\_out}; it is overridden in special cases (a deferred redirect waiting
+on the MMU uses \sig{pending\_target\_q}; the first fetch after reset is held by
+\sig{first\_fetch\_pending\_q}). When the icache returns a word
+(\sig{imem\_port.rvalid}), the front-end pushes it into the \sig{fetch\_buffer}.
+
+The buffer holds a few entries so a 32-bit instruction split across two words can
+be built from \sig{head} and \sig{next}. Each entry carries the word, its
+word-aligned \sig{vaddr}, a fault bit and cause (for instruction faults that ride
+with the word), and the BPU prediction captured at fetch time.
+
+\latencynote{The push is gated: \sig{fb\_push\_raw = imem\_port.rvalid \&
+inflight\_q \& !arb\_redirect\_flushing \& !xret\_drop\_push}. The
+\sig{inflight\_q} bit means ``a fetch we accepted is still waiting for its
+rvalid.'' Under variable icache latency a stale rvalid can arrive \emph{after} a
+redirect already changed the path; \sig{inflight\_q} is clear by then, so the
+stale word is dropped instead of pushed. There is also a \sig{last\_pushed\_vaddr\_q}
+check that drops a duplicate push when the producer re-issued the same address.}
+
+\subsection{The compressed aligner}
+\sig{compressed\_aligner} reads \sig{head}/\sig{next} and emits one instruction.
+It keeps \sig{half\_index\_q}: 0 means ``use the low 16 bits of head'', 1 means
+``use the high 16 bits''. It looks at the two opcode bits:
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt]
+\item bits \sig{== 11}: a full 32-bit instruction. If it sits in the high half it
+  straddles into \sig{next}, so the aligner stitches \sig{head[31:16]} with
+  \sig{next[15:0]}.
+\item bits \sig{!= 11}: a 16-bit compressed instruction. \sig{c\_dec} expands it
+  to its 32-bit form.
+\end{itemize}
+It outputs \sig{aligner\_inst} (the 32-bit instruction), \sig{pc\_id} (its
+address), \sig{aligner\_valid}, \sig{is\_compressed}, and any
+\sig{aligner\_fault}/\sig{aligner\_cause}. The decoder takes it when
+\sig{aligner\_valid \& !if\_id\_stall}.
+
+\subsection{Redirect handling}
+On a redirect the front-end: latches the new target into the PC, raises
+\sig{fetch\_flush} to clear the \sig{fetch\_buffer}, and reseats the aligner's
+\sig{half\_index\_q} to bit 1 of the target (so a jump to a 16-bit instruction in
+the high half starts in the right place). One redirect kind is special:
+\sig{RDR\_BPU\_IF} (the IF-stage prediction) does \emph{not} flush the buffer,
+because the branch's own word is still in flight; instead the aligner runs a
+small ``squash'' that drops the wrong-path tail of the current word until the
+predicted target word arrives.
+
+\latencynote{Two front-end stall ideas matter under variable latency.
+\sig{first\_fetch\_pending\_q} holds the reset PC on \sig{i\_vaddr} until the
+icache actually accepts it, so the very first instruction is never lost while the
+slave is not ready. \sig{redirect\_deferred}/\sig{pending\_target\_q} hold a
+redirect target when the icache is busy (or the MMU is walking), and replay it
+when the front-end is free, so a redirect issued during a stall is not dropped.}

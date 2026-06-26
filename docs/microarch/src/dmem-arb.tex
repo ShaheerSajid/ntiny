@@ -1,0 +1,44 @@
+\section{Data-bus arbiter (\texttt{dmem\_arb})}
+\textit{Source: \texttt{design/interconnect/src/dmem\_arb.sv}.}
+
+Three masters want the one data bus: the page-table walker (PTW), the atomic unit
+(AMO), and the normal load/store unit (\sig{core2avl}, called \sig{c2a} here).
+\sig{dmem\_arb} decides who gets the bus and routes the reply back to the right
+master.
+
+\subsection{Who wins}
+The priority is fixed: \textbf{PTW $>$ AMO $>$ c2a}. The grants are
+combinational:
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt]
+\item \sig{ptw\_grant\_o}: PTW wins whenever \sig{ptw\_active\_i} is set;
+\item \sig{amo\_grant\_o}: AMO wins when \sig{amo\_active\_i} is set, PTW is idle,
+  and \sig{suppress\_data} is low;
+\item \sig{c2a\_grant\_o}: c2a wins when neither PTW nor AMO is active and
+  \sig{suppress\_data} is low.
+\end{itemize}
+\sig{suppress\_data} is the OR of \sig{mmu\_d\_access\_fault\_i},
+\sig{mmu\_d\_fault\_i}, and \sig{d\_xlat\_pending\_i}. It blocks AMO and c2a (but
+not PTW) while the MMU is
+translating or a data fault is firing, so no access commits with a half-translated
+or faulting address. The chosen master drives the shared slave port \sig{bus}
+(\sig{bus.addr}, \sig{bus.we}, \sig{bus.be}, \sig{bus.wdata}, \sig{bus.req}). AMO
+and c2a share the MMU-translated address \sig{data\_paddr\_i}; PTW uses its own
+\sig{ptw\_addr\_i}.
+
+\subsection{Routing the reply}
+A read reply comes back later, so the arbiter must remember who asked.
+\sig{pending\_rd\_master\_q} (one of \sig{M\_NONE}/\sig{M\_PTW}/\sig{M\_AMO}/\sig{M\_C2A})
+records the owner of the outstanding read. It is set when a read is accepted
+(\sig{read\_accepted = bus.req \& \textasciitilde bus.we \& bus.ready}) and cleared when the
+reply arrives (\sig{bus.rvalid}). Then each master only sees its own reply:
+\sig{c2a\_rvalid\_o = (pending\_rd\_master\_q == M\_C2A) \& bus.rvalid}, and the
+same for PTW and AMO. \sig{*\_ready\_o = *\_grant\_o \& bus.ready}.
+
+\latencynote{This ownership flop is what makes the bus safe under variable
+latency. With single-cycle memory the reply came back the next cycle and could
+not be confused with anyone else's. With a slow slave several requests and
+replies overlap in time, so \sig{pending\_rd\_master\_q} is needed to send each
+reply to the master that actually asked. It assumes one outstanding read per
+master, which holds because each slave is blocking (it drops \sig{ready} during a
+miss). The core pairs this with \sig{c2a\_load\_pending\_q}, which tracks the
+same outstanding load on the CPU side.}

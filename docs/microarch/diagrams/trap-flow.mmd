@@ -1,0 +1,33 @@
+%% Trap/interrupt flow: detection across stages -> IWB atomic commit. Minimal text.
+flowchart TD
+  classDef comb fill:#fef9c3,stroke:#a16207,color:#713f12;
+  classDef reg  fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
+  classDef ext  fill:#eef2ff,stroke:#3730a3,color:#1e1b4b;
+  classDef act  fill:#dcfce7,stroke:#15803d,color:#14532d;
+
+  subgraph PIPE[pipeline: where exceptions are detected]
+    direction LR
+    IF[IF<br/>i-page / i-access fault]:::comb
+    ID[ID<br/>illegal / ecall / ebreak]:::comb
+    IE[IE<br/>load/store fault<br/>misalign / CSR illegal]:::comb
+    IWB[IWB<br/>commit point]:::reg
+  end
+
+  INT[interrupt sources<br/>CLINT / PLIC / Sstc]:::ext
+
+  IC[interrupt_ctrl<br/>priority, cause,<br/>epc select, deleg]:::comb
+  WB[wb_trap_unit<br/>atomic commit at IWB]:::act
+
+  CSR[csr_unit<br/>mepc/mcause/mtval<br/>mstatus, priv_level]:::reg
+  FL[hazard_unit<br/>flush IE/IMEM/IWB]:::comb
+  RD[redirect to<br/>mtvec / stvec]:::act
+
+  IF --> IC
+  ID --> IC
+  IE --> IC
+  INT --> IC
+  IC --> WB
+  IWB -. carrier .-> WB
+  WB --> CSR
+  WB --> FL
+  WB --> RD

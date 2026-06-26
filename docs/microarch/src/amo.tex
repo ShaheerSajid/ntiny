@@ -1,0 +1,43 @@
+\section{Atomic unit (\texttt{amo\_unit})}
+\textit{Source: \texttt{design/core/amo\_unit/src/}.}
+
+The atomic unit runs the RV32A instructions: \sig{lr.w} (load-reserved),
+\sig{sc.w} (store-conditional), and the \sig{amo*.w} read-modify-write
+operations (swap, add, and, or, xor, min, max). Each one needs more than one bus
+access, so the unit uses a small FSM and stalls the IE stage while it works.
+
+\diagram{amo-fsm}{The AMO FSM. A load-reserved or AMO reads first; an AMO then
+writes the modified value; a store-conditional writes only if its reservation is
+still valid. \sig{result\_o} returns the old value (LR/AMO) or success/fail
+(SC).}{fig:amo-fsm}{0.7}
+
+\subsection{Ports and state}
+Inputs from IE: \sig{amo\_op\_i} (which operation), \sig{addr\_i} (the address,
+from the ALU), \sig{rs2\_i} (the second operand), and \sig{flush\_i} (a trap is
+taken). Bus side: \sig{dbus\_read\_o}/\sig{dbus\_write\_o}/\sig{dbus\_addr\_o}/
+\sig{dbus\_writedata\_o} out, \sig{dbus\_readdata\_i}/\sig{dbus\_stall\_i} in.
+Outputs to the core: \sig{result\_o} (value for \sig{rd}), \sig{stall\_o} (stall
+IE), \sig{active\_o} (the unit is driving the bus), and \sig{pending\_o} (an AMO
+is waiting at IE but has not started yet).
+
+State: \sig{state} (\sig{IDLE}/\sig{AMO\_READ}/\sig{AMO\_WRITE}/\sig{DONE}),
+\sig{addr\_q}/\sig{rs2\_q}/\sig{op\_q} (latched request), \sig{read\_data\_q} (the
+value read), and the reservation \sig{resv\_valid}/\sig{resv\_addr} for LR/SC.
+
+\subsection{How it runs}
+On \sig{lr.w} or any \sig{amo*.w} the FSM goes to \sig{AMO\_READ} and reads the
+word. For \sig{lr.w} it returns the value and sets the reservation
+(\sig{resv\_valid}, \sig{resv\_addr}). For an \sig{amo*.w} it keeps the old value
+in \sig{read\_data\_q}, computes ``old OP \sig{rs2}'', and goes to
+\sig{AMO\_WRITE} to store it back; \sig{result\_o} is the old value. On \sig{sc.w}
+the FSM first checks the reservation: if \sig{resv\_valid} and \sig{resv\_addr ==
+addr\_i} it writes and returns 0 (success); otherwise it writes nothing and
+returns 1 (fail). Any \sig{sc.w} or \sig{flush\_i} clears the reservation.
+
+\latencynote{The FSM advances only when the bus is free: each step waits on
+\sig{\textasciitilde dbus\_stall\_i}. A slow slave just holds the unit in \sig{AMO\_READ} or
+\sig{AMO\_WRITE} longer. \sig{pending\_o} matters for traps: if an interrupt
+arrives while an AMO is still waiting at IE, the trap saves \sig{pc\_ie} so the
+AMO re-runs after \sig{sret} instead of being skipped. The unit also reads the
+bus reply through the per-master \sig{amo\_arb\_rvalid} from \sig{dmem\_arb}, so a
+PTW reply can never be mistaken for the AMO's own data.}

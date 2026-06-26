@@ -1,0 +1,42 @@
+\section{Operand forwarding and data hazards}
+\textit{Sources: \texttt{forwarding\_unit/} (\texttt{forwarding\_logic}), and the
+operand muxes + the \sig{branch\_taken\_valid} gate in \texttt{core\_top.sv}.}
+
+When one instruction writes a register and the next instruction reads it, the
+reader needs the new value before it has been written back. \emph{Forwarding}
+sends the result straight from a later stage to the reader, so the pipeline does
+not have to stall.
+
+\subsection{Where a value can come from}
+\sig{forwarding\_logic} compares the reader's source registers (\sig{rs1\_i},
+\sig{rs2\_i}, and \sig{rs3} for the FPU) against the destination registers of the
+two instructions ahead of it: the one in IMEM (\sig{rd\_mem\_i}) and the one in
+IWB (\sig{rd\_wb\_i}). It outputs one select per operand
+(\sig{forwarda\_id}/\sig{forwardb\_id}/\sig{forwardc\_id}):
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt]
+\item match in IMEM and it writes a register $\rightarrow$ \sig{FORWARD\_IMEM}
+  (use \sig{exec\_result\_imem}); this is the freshest value;
+\item else match in IWB $\rightarrow$ \sig{FORWARD\_IWB} (use \sig{exec\_result\_iwb});
+\item else \sig{NO\_FORWARD} (read the register file).
+\end{itemize}
+\sig{x0} never forwards (it is always zero). The IE stage uses these selects to
+build \sig{opA\_forwarded\_data}/\sig{opB\_forwarded\_data}/\sig{opC\_forwarded\_data}.
+
+\subsection{The load-use hazard}
+A load is special. Its value is not the ALU result; it comes back from memory as
+\sig{readdata\_imem}. So when the very next instruction needs a load's result,
+the data may not be ready yet. With single-cycle memory the load's data arrives
+exactly when the next instruction needs it, so a plain forward works. With
+variable latency it does not.
+
+\latencynote{This is the single most important hazard for stall-tolerance. When a
+\sig{jalr} or branch right after a load uses the load's value, it forwards
+\sig{readdata\_imem}. While the load is still waiting for its data, that value is
+stale, so the branch/jump would compute the wrong target and redirect to garbage.
+The fix is \sig{branch\_taken\_valid = bpu\_mispredict \& \textasciitilde iwb\_stall}: while
+\sig{iwb\_stall} is high (a CPU load is accepted but its \sig{rvalid} has not come
+back), the branch/JALR does not resolve. The IE stage is frozen anyway, so the
+redirect simply fires one cycle later, when the load data is valid. A real
+\sig{ecall}/\sig{pmp}/\sig{vm} test failure was exactly this: \sig{lw} then
+\sig{jalr} jumped to \sig{0x11111110} (a stale register) and the core ran off into
+memory.}

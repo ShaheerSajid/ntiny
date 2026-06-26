@@ -1,0 +1,68 @@
+\section{MMU (Sv32) and PMP}
+\textit{Sources: \texttt{design/core/mmu/src/mmu\_sv32.sv},
+\texttt{pmp\_checker.sv}, and the PTW arbitration in \texttt{core\_top.sv}.}
+
+When \sig{satp.MODE}=1 the core runs in \textbf{Sv32}: 32-bit virtual addresses
+translate through a two-level page table to (up to 34-bit) physical addresses,
+with 4\,KB pages and 4\,MB superpages. M-mode never translates; S/U-mode do
+(and data accesses may borrow \sig{MPP}'s privilege when \sig{MPRV}=1).
+Independent of translation, every physical access is checked by PMP.
+
+\subsection{TLBs and the page-table walker}
+Translation is cached in two 8-entry, fully-associative TLBs (one instruction,
+one data), tagged by VPN + ASID with a per-entry ``megapage'' flag and the PTE
+permission bits. A hit translates in zero extra cycles; a miss starts the
+page-table walker (PTW).
+
+\diagram{ptw-fsm}{Sv32 page-table walker. It reads the root PTE (\texttt{L1}),
+then---if that is a pointer---the leaf PTE (\texttt{L0}); a leaf with bad
+permissions or an invalid PTE faults; a leaf needing the A/D bits set is updated
+in place (Svadu) before the TLB is filled. \texttt{L0\_WAIT} drains a stale
+response between the two reads.}{fig:ptw-fsm}{0.72}
+
+The PTW is a \emph{master on the data bus}: it issues PTE reads (and Svadu A/D
+writeback writes) through \sig{dmem\_arb}, which arbitrates the PTW against the
+LSU and the AMO unit. While the PTW is active it asserts \sig{ptw\_active},
+which stalls both the instruction and data sides (\sig{mmu\_i\_stall} /
+\sig{mmu\_d\_stall}) so nothing consumes a half-translated address. A megapage is
+a leaf found at L1; its \sig{PPN[0]} must be zero (else it faults as
+misaligned), and the page's low VPN supplies the corresponding PA bits.
+
+\latencynote{The PTW is the original variable-latency master: a walk is two
+dependent memory reads whose timing the pipeline cannot predict. Its
+\sig{ptw\_active} stall, the \sig{L0\_WAIT} drain state, and the way it latches
+the initiating privilege/SUM/MXR at walk start are all there because the walk
+spans many cycles during which the rest of the machine keeps moving. This is the
+same ``a memory access is not single-cycle'' problem the cache and LSU sections
+describe, met first by the MMU.}
+
+\subsection{Permissions, SUM, MXR, A/D}
+A translation is permitted only if the leaf PTE's permission bits allow the
+access at the effective privilege. Key rules as implemented: instruction fetch
+requires \sig{X} and (for U pages from S-mode) is \emph{always} forbidden---even
+with \sig{SUM}; a load requires \sig{R}, or \sig{X} when \sig{MXR}=1; a store
+requires \sig{W} \emph{and} the \sig{D} (dirty) bit; S-mode access to a U page
+needs \sig{SUM}=1. The accessed (\sig{A}) and dirty (\sig{D}) bits must be set
+before use: if \sig{menvcfg.ADUE}=1 the PTW sets them in hardware (the
+\sig{UPDATE\_AD} state writes the PTE back), otherwise the missing bit raises a
+page fault for software to fix. \sig{sfence.vma} flushes both TLBs and aborts any
+in-flight walk (so a stale walk cannot re-fill a just-cleared entry).
+
+\subsection{Faults}
+A permission failure or invalid PTE becomes the matching page fault---cause 12
+(instruction), 13 (load), 15 (store). These are routed into the trap path exactly
+like other exceptions (\S2). The is-load-vs-store distinction is registered so it
+survives the cycle or two until the trap commits.
+
+\subsection{PMP}
+PMP guards physical addresses with 16 regions, each a config byte
+(\sig{R}/\sig{W}/\sig{X}, an address-match mode, and a lock bit \sig{L}) plus an
+address register. Match modes are \sig{OFF}, \sig{TOR} (top-of-range, vs.\ the
+previous entry's address), \sig{NA4} (one aligned word), and \sig{NAPOT} (a
+naturally-aligned power-of-two region encoded in the address bits). A priority
+encoder scans entries low-index-first; the first match decides. M-mode bypasses
+PMP unless a \emph{locked} entry explicitly denies it; for S/U the default (no
+match) is deny. A PMP violation becomes an access fault---cause 1 (instruction),
+5 (load), 7 (store). PMP is checked on the \emph{translated} physical address, so
+PTW reads are themselves PMP-checked at the privilege that started the walk; a
+PMP-denied PTW read turns the walk into a fault rather than a page fault.

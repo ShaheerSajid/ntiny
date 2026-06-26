@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
-"""build.py — render every Mermaid diagram to a PDF figure, then compile the
-LaTeX microarchitecture document.
+"""build.py — render every Mermaid diagram, then compile the LaTeX document.
 
-  diagrams/*.mmd --(render.py)--> figures/*.svg --(cairosvg)--> figures/*.pdf
+  diagrams/*.mmd --(render.py)--> figures/*.png  (always; text via Kroki/mmdc)
+                                  figures/*.pdf  (vector, only when mmdc present)
   microarch.tex  --(latexmk)--> microarch.pdf
 
-Usage: python3 build.py [--no-latex]
+LaTeX prefers figures/<name>.pdf when it exists, else <name>.png
+(\\DeclareGraphicsExtensions in microarch.tex), so installing mmdc upgrades all
+figures to crisp vector automatically.
+
+Usage: python3 build.py [--no-latex] [--force]
 """
 import os, sys, glob, subprocess
-import cairosvg
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIAG = os.path.join(HERE, "diagrams")
 FIGS = os.path.join(HERE, "figures")
+FORCE = "--force" in sys.argv
 
 
 def render_all():
     for mmd in sorted(glob.glob(os.path.join(DIAG, "*.mmd"))):
         stem = os.path.splitext(os.path.basename(mmd))[0]
-        svg = os.path.join(FIGS, stem + ".svg")
-        pdf = os.path.join(FIGS, stem + ".pdf")
-        if (not os.path.exists(svg)) or os.path.getmtime(mmd) > os.path.getmtime(svg):
+        png = os.path.join(FIGS, stem + ".png")
+        if FORCE or (not os.path.exists(png)) or \
+           os.path.getmtime(mmd) > os.path.getmtime(png):
             subprocess.run([sys.executable, os.path.join(DIAG, "render.py"), mmd],
                            check=True)
-        cairosvg.svg2pdf(url=svg, write_to=pdf)
-        print("figure:", os.path.basename(pdf))
+        print("figure:", stem)
 
 
 def compile_tex():

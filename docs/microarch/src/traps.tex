@@ -1,0 +1,176 @@
+\section{Traps, exceptions and interrupts}
+\textit{Sources: \texttt{design/core/interrupt/}, \texttt{trap\_sequencer/},
+\texttt{wb\_trap\_unit/}, \texttt{csr\_unit/}, and their wiring in
+\texttt{core\_top.sv}.}
+
+A \emph{trap} is any forced, non-sequential change of control flow into a
+handler: a synchronous \emph{exception} caused by the instruction itself
+(illegal opcode, \sig{ecall}, a page/access fault, a misaligned access), or an
+asynchronous \emph{interrupt} from outside the pipeline (timer, software, or
+external). This section explains how ntiny detects, prioritises, commits, and
+returns from traps.
+
+\diagram{trap-flow}{Trap flow. Exceptions are detected in the stage that can
+see them (top); interrupts arrive from CLINT/PLIC/Sstc. \texttt{interrupt\_ctrl}
+picks the winner, its cause, the saved PC (epc) and whether it delegates to
+S-mode; \texttt{wb\_trap\_unit} commits it atomically at writeback, which drives
+the CSR updates, the pipeline flush, and the redirect to the handler.}{fig:trap-flow}{0.78}
+
+\subsection{The big idea: traps commit at writeback (IWB)}
+ntiny resolves every trap, interrupt and return (\sig{mret}/\sig{sret}/\sig{dret})
+\textbf{atomically at the IWB stage} (\sig{wb\_trap\_unit}). An instruction is
+tagged during decode/execute with a \sig{wb\_event} (\sig{WB\_TRAP},
+\sig{WB\_XRET}, \sig{WB\_DRET}); when that tagged ``carrier'' reaches IWB, the
+trap fires. Committing at one fixed point---rather than wherever the fault was
+first noticed---is what makes the privileged state consistent: it removes the
+old races between an \sig{mret} and the \sig{csrrw mepc} just ahead of it, and
+between a page-table walk and the load that triggered it. When a trap fires,
+\sig{wb\_trap\_unit} asserts \sig{kill\_iwb}: the carrier does \emph{not} write
+its register or commit its store, and a four-stage flush (IE/IMEM/IWB plus the
+fetch redirect) kills every younger wrong-path instruction.
+
+\subsection{Exception sources}
+Each exception is detected in the earliest stage that has the information, then
+carried to the commit point. The saved PC (\sig{epc}) is the faulting
+instruction for exceptions (so the handler can fix up and retry), and
+\sig{mtval}/\sig{stval} carries the offending address or instruction word.
+
+\begin{center}\small
+\begin{tabularx}{\textwidth}{l c l Y}
+\toprule
+\textbf{exception} & \textbf{cause} & \textbf{detected in} & \textbf{tval} \\
+\midrule
+Instruction access fault (PMP) & 1  & IF (PMP / PTW) & faulting VA (or straddled half) \\
+Illegal instruction            & 2  & ID, or IE (bad CSR) & instruction word \\
+Breakpoint (\sig{ebreak})       & 3  & ID & 0 \\
+Load address misaligned        & 4  & IE & address \\
+Load access fault (PMP)        & 5  & IE & address \\
+Store/AMO misaligned           & 6  & IE & address \\
+Store/AMO access fault (PMP)   & 7  & IE & address \\
+ECALL from U / S / M           & 8/9/11 & ID & 0 \\
+Instruction page fault         & 12 & IF (ITLB / PTW) & faulting VA \\
+Load page fault                & 13 & IE (DTLB / PTW) & address \\
+Store/AMO page fault           & 15 & IE (DTLB / PTW) & address \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Two implementation details worth knowing. First, instruction-side faults
+(causes 1 and 12) take \emph{two} paths: a combinational one that rides through
+the \sig{fetch\_buffer} on the same entry as the faulting word (so it fires when
+that word reaches the buffer head), and a direct ``PTW-completion'' path for
+faults discovered by the page-table walker (which has no live fetch request to
+ride). Second, the data-side fault's \emph{is-store} flag is registered
+(\sig{trap\_sequencer}) because the trap can fire a cycle or two after the IE
+stage has already flushed and dropped the live store signal.
+
+\subsection{Interrupt sources}
+Three interrupt lines arrive from the uncore and become pending bits in
+\sig{mip}: machine timer (\sig{MTIP}, from the CLINT \sig{mtime}\,$\ge$\,\sig{mtimecmp}
+compare), machine software (\sig{MSIP}, CLINT), and machine external (\sig{MEIP},
+PLIC). Their S-mode counterparts (\sig{STIP}/\sig{SSIP}/\sig{SEIP}) are either
+injected by M-mode software via \sig{mip}, sourced from the PLIC's S-mode
+context, or---for the timer---generated in hardware by the \textbf{Sstc}
+extension (\sig{stimecmp} compared against \sig{mtime} when \sig{menvcfg.STCE=1}).
+An interrupt is \emph{taken} only when its pending bit and its enable bit
+(\sig{mie}/\sig{sie}) are both set \emph{and} the global enable for the current
+privilege allows it: in M-mode that is \sig{mstatus.MIE}; below M-mode, M
+interrupts are always enabled. Delegation (\sig{mideleg}) sends a delegated
+interrupt to S-mode instead of M-mode when not already in M-mode.
+
+\latencynote{Interrupts are held off until the pipeline actually has an
+in-flight instruction to pin them to (\sig{pc\_id} or \sig{pc\_ie} non-zero). If
+a timer fires into an empty/draining pipeline, naively using the fetch-stage PC
+as \sig{epc} would set the return address \emph{ahead} of instructions still in
+flight, double-executing or skipping them on \sig{sret}. Deferring the interrupt
+one cycle until the pipeline is populated avoids that.}
+
+\subsection{Priority}
+Synchronous exceptions outrank interrupts on the same instruction, and older
+(deeper-in-the-pipeline) exceptions outrank younger ones. The order, highest
+first: IE-stage data faults (PMP access, then page fault, then misalign, then
+illegal-CSR) $\rightarrow$ IF/ID-stage faults (instruction access, instruction
+page, illegal, \sig{ecall}, \sig{ebreak}) $\rightarrow$ interrupts (external,
+then software, then timer; M-mode before S-mode). At the IWB commit, a debug
+entry outranks everything, then an interrupt preempts the carrier, then a
+synchronous trap, then \sig{xret}.
+
+\subsection{Choosing the saved PC for an interrupt}
+The trickiest part of the trap logic---and historically the most bug-prone---is
+picking \sig{epc} for an \emph{asynchronous} interrupt, because the ``current''
+instruction depends on what the pipeline is doing that cycle. \sig{interrupt\_ctrl}
+selects \sig{pc\_for\_async} with a priority fallback:
+\begin{enumerate}[leftmargin=1.4em,itemsep=1pt]
+\item a branch/jump is committing this cycle $\rightarrow$ its architectural
+  next-PC (\sig{branch\_recovery\_target}), which collapses all
+  predicted$\times$actual direction cases into the correct resume point;
+\item an IE-stage op has not committed (AMO in progress, data MMU stall)
+  $\rightarrow$ \sig{pc\_ie} (re-execute it after \sig{sret});
+\item \sig{pc\_id} is non-zero $\rightarrow$ \sig{pc\_id} (the next instruction
+  to enter IE);
+\item \sig{pc\_ie} is non-zero $\rightarrow$ \sig{pc\_ie + insn\_len}
+  (length-aware: 2 for compressed, 4 otherwise);
+\item otherwise the fetch-stage PC (only when the pipeline is empty, e.g.
+  just after an \sig{xret}).
+\end{enumerate}
+Several past Linux-boot hangs were exactly a wrong choice here (e.g.\ a timer
+firing the same cycle as a taken-and-correctly-predicted branch, where the naive
+fall-through PC is the wrong resume target).
+
+\subsection{Trap entry: what hardware writes}
+When the trap commits, \sig{csr\_unit} performs, in one cycle, all of:
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt]
+\item \sig{mepc}/\sig{sepc} $\leftarrow$ the selected \sig{epc};
+\item \sig{mcause}/\sig{scause} $\leftarrow$ the cause (interrupt bit set for
+  asynchronous);
+\item \sig{mtval}/\sig{stval} $\leftarrow$ the trap value (0 for interrupts and
+  \sig{ebreak});
+\item \sig{mstatus}: for an M-trap, \sig{MPP}$\leftarrow$old privilege,
+  \sig{MPIE}$\leftarrow$\sig{MIE}, \sig{MIE}$\leftarrow$0 (the S-trap form uses
+  \sig{SPP}/\sig{SPIE}/\sig{SIE}, with \sig{SPP} a single bit);
+\item \sig{priv\_level} $\leftarrow$ M (\sig{2'b11}) or S (\sig{2'b01})
+  per delegation.
+\end{itemize}
+The handler address is \sig{mtvec}/\sig{stvec} with its low two bits stripped;
+in vectored mode (base[0]=1) an \emph{interrupt} targets base\,$+\,4\times$cause,
+while exceptions always go to the base.
+
+\subsection{The carrier still commits its CSR write}\label{sec:traps-carrier}
+\latencynote{Subtle but important: when an asynchronous interrupt preempts a CSR
+instruction (say \sig{csrsi sstatus,2} that sets \sig{SIE}), that CSR write must
+still take effect, because the chosen \sig{epc} points \emph{past} it---the
+architecture has logically retired it. \sig{csr\_unit} therefore computes the
+new \sig{mstatus} by first applying the in-flight CSR write and \emph{then}
+layering the trap-entry overrides (\sig{MPIE}$\leftarrow$post-write \sig{MIE},
+etc.) on top. A real Linux scheduler hang was caused by the earlier code
+suppressing the carrier's CSR write on a coincident trap: \sig{SIE} stayed 0, so
+the kernel resumed with interrupts disabled and warned in \texttt{do\_idle()}.}
+
+\subsection{Trap return: \texttt{mret} / \texttt{sret} / \texttt{dret}}
+A return is decoded, tagged \sig{WB\_XRET} (or \sig{WB\_DRET}), and commits at
+IWB. \sig{mret} restores \sig{MIE}$\leftarrow$\sig{MPIE}, sets \sig{MPIE}=1,
+\sig{MPP}=U, clears \sig{MPRV} if returning below M, and jumps to \sig{mepc};
+\sig{priv\_level}$\leftarrow$\sig{MPP}. \sig{sret} is the analogous S-mode form
+(\sig{SIE}$\leftarrow$\sig{SPIE}, \sig{SPIE}=1, \sig{SPP}=U, jump to \sig{sepc}).
+\sig{dret} restores \sig{dpc} and leaves debug mode without a privilege change.
+
+Because a return changes privilege, the fetch of the first handler-exit
+instruction must use the \emph{new} privilege for translation. A small fetch FSM
+(\sig{xret\_fetch\_ctrl}) drains speculative wrong-privilege fetches, waits one
+cycle for \sig{priv\_level} to settle, then re-fetches from the return target. A
+companion guard in \sig{trap\_sequencer} suppresses stale instruction faults from
+the \emph{old} privilege's in-flight fetch while the \sig{sret} CSR side effects
+land---otherwise a cold-ITLB page walk on the \sig{sret} target could, several
+cycles later, overwrite \sig{sepc}/\sig{scause} with a garbage fault.
+
+\subsection{Interaction with the stall chain}
+\latencynote{Traps share the pipeline with the variable-latency hazards from the
+rest of this document. Two cases matter. (1) An interrupt coincident with a
+\emph{stalled load} must save \sig{pc\_ie} (case 2 above) so the load
+re-executes after \sig{sret}; if its data happens to arrive the same cycle, the
+IE flush suppresses the (now wrong-path) register write, and the post-\sig{sret}
+re-execution re-reads memory correctly. (2) A speculative fetch past an
+unconditional jump can sit in a no-execute PMP region; its access fault must be
+\emph{squashed} when an older redirect (branch/\sig{xret}/debug) is firing, so a
+wrong-path fault never reaches the handler. Both are handled by gating the fault
+on the live redirect/flush signals rather than letting it fire blindly.}

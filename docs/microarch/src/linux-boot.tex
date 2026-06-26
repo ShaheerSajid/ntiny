@@ -1,0 +1,78 @@
+\section{Linux boot: software and hardware}
+\textit{Sources: \texttt{flows/simulation/run\_linux.sh},
+\texttt{software/linux/} (OpenSBI platform, kernel, device tree),
+\texttt{design/common/mem\_map.json}, \texttt{design/uncore/\{clint,plic,uart\}}.}
+
+This section follows a full Linux boot. It shows what the software does and what
+hardware the core must provide at each step. Linux uses the ``linux'' memory
+profile: 128\,MB of RAM at \sig{0x80000000}.
+
+\diagram{linux-boot}{The four boot phases. Privilege drops from M to S to U. Each
+box lists the main work of that phase.}{fig:linux-boot}{0.62}
+
+\subsection{Phase 1 --- reset (M-mode)}
+After reset the core is in M-mode. The PC starts at \sig{0x80000000}, the start
+of RAM. The single image (\sig{fw\_payload}) is already loaded there: it contains
+OpenSBI, the Linux kernel, and the device tree together. The first instructions
+run with no translation (M-mode does not translate).
+
+\emph{Hardware used:} reset to a known PC, instruction fetch from RAM.
+
+\subsection{Phase 2 --- OpenSBI (M-mode firmware)}
+OpenSBI is the M-mode firmware. It sets up the machine and then hands control to
+Linux in S-mode. Its main jobs:
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt]
+\item set up the UART (console) at \sig{0x10000000} for early printing;
+\item set up the CLINT timer/software interrupts at \sig{0x02000000} and the
+  PLIC external-interrupt controller at \sig{0x0C000000};
+\item set PMP regions so S-mode can access memory;
+\item set \sig{menvcfg}: turn on \textbf{STCE} (the Sstc S-mode timer) and
+  \textbf{ADUE} (hardware A/D bit updates in the page walker). Linux needs ADUE,
+  or the page walker would fault every time it has to set a dirty bit;
+\item delegate most traps and interrupts to S-mode, set \sig{mtvec}, then
+  \sig{mret} into the kernel in S-mode.
+\end{itemize}
+
+\emph{Hardware used:} M-mode traps, CLINT, PLIC, UART, PMP, \sig{menvcfg}.
+
+\subsection{Phase 3 --- Linux kernel (S-mode)}
+The kernel starts in \sig{head.S}. It turns on paging by writing \sig{satp} with
+Sv32 mode and the root page-table address. From now on every address is a virtual
+address and goes through the MMU. It sets \sig{stvec} (the S-mode trap vector) so
+the kernel can handle its own traps and page faults. It programs the timer with
+the Sstc \sig{stimecmp} CSR, so timer ticks come straight to S-mode. Then it
+brings up drivers and mounts the root filesystem.
+
+\emph{Hardware used:} S-mode traps, the Sv32 page walker and TLBs, page-fault
+traps (causes 12/13/15), the Sstc timer, atomic instructions (AMO: LR/SC for
+kernel locks), the PLIC S-mode context, and the UART.
+
+\subsection{Phase 4 --- userspace (U-mode)}
+The kernel starts \sig{/init} (busybox) in U-mode. User programs run with the
+lowest privilege. Any system call (\sig{ecall}) or page fault traps into the
+kernel in S-mode, which serves it and returns with \sig{sret}.
+
+\emph{Hardware used:} U-mode, \sig{ecall} traps, page faults, the full MMU.
+
+\subsection{Memory map (linux profile)}
+\begin{center}\small
+\begin{tabularx}{\textwidth}{l Y}
+\toprule
+\textbf{range} & \textbf{device} \\
+\midrule
+\sig{0x02000000} & CLINT (\sig{mtime}, \sig{mtimecmp}, \sig{msip}) \\
+\sig{0x0C000000} & PLIC (external-interrupt controller) \\
+\sig{0x10000000} & UART (console) \\
+\sig{0x10010000}\,+ & SPI, I2C, GPIO, PWM, CRC \\
+\sig{0x80000000} & RAM, 128\,MB (firmware + kernel + rootfs) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{CLINT and PLIC in short}
+The \textbf{CLINT} holds \sig{mtime} (a free-running counter) and
+\sig{mtimecmp}. It raises the timer interrupt when \sig{mtime}\,$\ge$\,\sig{mtimecmp},
+and raises a software interrupt when \sig{msip} is set. The \textbf{PLIC}
+collects external interrupts from the peripherals (UART, SPI, I2C, GPIO) and
+routes them to a ``context''. Context 0 is M-mode, context 1 is S-mode, so Linux
+takes external interrupts in S-mode directly.
