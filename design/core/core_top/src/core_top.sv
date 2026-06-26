@@ -493,6 +493,7 @@ hazard_unit hazard_unit_inst (
     // accept the request this cycle.
     .dmem_req_i         (c2a_read | c2a_write),
     .dmem_ready_i       (c2a_arb_ready),
+    .dmem_rdata_pending_i (c2a_load_pending_q & ~c2a_arb_rvalid),
     .insert_bubble_i    (insert_bubble),
     // Control flow
     .interrupt_valid_i  (interrupt_valid),
@@ -731,7 +732,23 @@ wire bpu_tgt_mismatch = (branch_taken == TRUE)
                      && (branch_target_address != predicted_target_ie);
 assign bpu_mispredict = onebit_sig_e'(bpu_dir_mismatch || bpu_tgt_mismatch);
 
-assign branch_taken_valid = bpu_mispredict;
+// Suppress branch/JALR resolution while a CPU load it forwards from is
+// still in flight. A JALR/branch resolves its target/direction at IE
+// from forwarded operands; when the immediately-preceding instruction is
+// a load (now at IMEM) whose data has not yet returned, the IE consumer
+// forwards from MEMORY (readdata_imem) — which is stale until the load's
+// rvalid lands — and the redirect would fire to a garbage target.
+// (Observed in ecall/pmp/vm under +RAM_RANDOM_DELAY: `lw x10,432(x2)`
+// then `jalr x0,x10,0` jumped to 0x11111110 — a stale x10 — and the core
+// slid through memory forever.) iwb_stall is exactly "an accepted CPU
+// load is awaiting its rvalid" (= c2a_load_pending_q & ~c2a_arb_rvalid,
+// pure flops — no combinational loop, unlike gating on the full
+// ie_stall). The front-end is frozen during iwb_stall, so deferring the
+// redirect until the load data is valid (iwb_stall drops the cycle
+// readdata_imem becomes valid) is the correct single-resolution
+// behaviour. Permanently 0 under always-ready RAM, so baseline is
+// unchanged on the common path.
+assign branch_taken_valid = onebit_sig_e'(bpu_mispredict & ~iwb_stall);
 
 // Recovery target:
 //   pred=T, actual=NT  -> predicted_pc_ie (fall-through)
@@ -869,6 +886,50 @@ wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
                             refetch_after_trap |
                             insert_bubble | fetch_stall;
 
+// ── Producer-side back-pressure for a stalling icache slave ──────────
+// icache_stall  = standard OBI back-pressure flag. While the master is
+//                 driving (req, addr) but the slave is not ready, hold
+//                 pc_out so cpu_addr_i stays stable across the wait.
+//                 Feeds into program_counter.stall_i below (lower
+//                 clause — interrupts/redirects still win).
+//
+//                 Today's RAM keeps ready hard-1 so icache_stall is
+//                 permanently 0 and this wire is effectively dead code
+//                 on the always-ready path. Under +define+RAM_RANDOM_DELAY
+//                 (or any future stalling cache / DRAM controller)
+//                 ready=0 cycles correctly hold the producer.
+//
+// first_fetch_pending_q  = closes the reset-cycle gap that exists when
+//                 ready=0 happens to be the first thing the master
+//                 sees out of reset. The producer's normal "one-ahead"
+//                 model uses i_vaddr=pc_in=pc_out+4 once reset_i drops,
+//                 which means a stalling-slave that rejected the very
+//                 first req (= reset_PC via the reset_i clause) would
+//                 permanently skip reset_PC — the master would move on
+//                 to reset_PC+4 the cycle reset deasserts.
+//                 The flag is set at reset and cleared on the FIRST
+//                 (req & ready) accept. While it's set:
+//                   - i_vaddr is overridden to pc_out (so the master
+//                     keeps re-issuing reset_PC until the slave takes
+//                     it),
+//                   - pc_out is held one extra cycle past the accept
+//                     posedge (so the very next cycle's pc_in =
+//                     pc_out + 4 = reset_PC + 4 lines up correctly
+//                     with the second fetch — no addr skip).
+//                 Under always-ready RAM the first req gets accepted
+//                 on T=20 anyway; this just shifts the first fb_push
+//                 by one cycle. Under random-delay RAM it's what makes
+//                 reset_PC reach the buffer at all.
+wire icache_stall = imem_port.req & ~imem_port.ready;
+
+logic first_fetch_pending_q;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i)
+        first_fetch_pending_q <= 1'b1;
+    else if (imem_port.req & imem_port.ready)
+        first_fetch_pending_q <= 1'b0;
+end
+
 // ── Pending fetch target (deferred-redirect register) ──────────────────
 //
 // When a redirect (branch / xRET / trap / debug) lands on a virtually-
@@ -911,7 +972,17 @@ wire fetch_producer_stall = ie_stall | mmu_i_stall | halted_o |
 // re-fills).
 logic [31:0] pending_target_q;
 logic        pending_target_v_q;
-wire         redirect_deferred = arb_redirect_valid & mmu_i_stall;
+// A redirect that fires WHILE the icache slave is back-pressuring
+// (icache_stall=1) has to be captured into pending_target_q just like
+// the existing mmu_i_stall case — otherwise the master, stuck holding
+// the pre-redirect (req, addr), never gets to issue the redirect
+// target and the target is permanently lost. Symptom under the
+// always-ready RAM: never (icache_stall is permanently 0). Symptom
+// under ram_dp_delayed: a JAL that fires arb_redirect_valid same
+// cycle as the slave drops ready falls through to PC+4, sending the
+// CPU into a wild fetch path (load-access-fault loop in the test
+// epilogue).
+wire         redirect_deferred = arb_redirect_valid & (mmu_i_stall | icache_stall);
 wire         pending_target_drained = pending_target_v_q && (pc_ie == pending_target_q);
 // Forward declaration: actual flop sits beside fb_push (after fetch_flush)
 logic        pending_first_push_done_q;
@@ -1074,8 +1145,12 @@ program_counter #(.DEFAULT(32'h80000000)) program_counter_inst
 	// bubble. That guard is dead and removed.)
 	// Phase 4.8: xret_hold_pc keeps pc_out parked at the xret target
 	// while the FSM waits for priv to settle and the fetch to complete.
+	// icache_stall + first_fetch_pending_q live in the lower clause
+	// so that a redirect / interrupt / xRET still wins and advances
+	// pc_out to the new target.
 	.stall_i	((interrupt_valid | ret_pulse | arb_redirect_valid) ? 1'b0 :
-	             (fetch_producer_stall | pending_holds_pc | xret_hold_pc | refetch_pending_q)),
+	             (fetch_producer_stall | pending_holds_pc | xret_hold_pc | refetch_pending_q |
+	              icache_stall | first_fetch_pending_q)),
 	.pc_in_i	(pc_in),
 	.pc_out_o	(pc_out)
 );
@@ -1110,7 +1185,12 @@ always_ff @(posedge clk_i or posedge reset_i) begin
 end
 wire refetch_extended = refetch_after_trap | refetch_pending_q;
 
-wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_extended) ? pc_out :
+// first_fetch_pending_q joins the existing pc_out clause: while the
+// flag is set the master keeps re-issuing the reset PC until the
+// slave accepts it, instead of advancing to pc_in = reset_PC + 4 the
+// moment reset_i drops (which would silently drop the reset_PC fetch
+// against a stalling slave).
+wire [31:0] i_vaddr = (reset_i | insert_bubble | refetch_extended | first_fetch_pending_q) ? pc_out :
                       xret_drive_va                                 ? xret_target_q :
                       pending_overrides_vaddr                       ? pending_target_q :
                                                                       pc_in;
@@ -1353,7 +1433,32 @@ end
 // Phase 4.8: xret_drop_push drops the stale rvalid from the wrong-priv
 // fetch that was issued on the wb_xret_fire cycle (before the FSM could
 // suppress it). The rdata is from PA=VA (untranslated) and is garbage.
-wire fb_push_raw = imem_port.rvalid && !arb_redirect_flushing && !xret_drop_push;
+// inflight_q gate: an rvalid arriving AFTER the master's accepted
+// fetch was killed by a redirect (random-RAM delay > 1 cycle) carries
+// the WRONG-PATH word but inflight_vaddr_q still points at the
+// pre-redirect addr. Without this gate the stale push leaks an
+// already-flushed instruction back into the buffer.
+//
+// Today's always-ready RAM emits rvalid exactly 1 cycle after the
+// (req&ready) accept, so the wrong-path window collapses into the
+// arb_redirect_flushing pulse the existing gate already blocks. Under
+// +define+RAM_RANDOM_DELAY the rvalid can arrive 2+ cycles after the
+// accept, opening a window where arb_redirect_flushing has already
+// dropped but inflight_q has been cleared by the redirect (case 2 in
+// inflight_q's set/clear priority) — perfect signal to identify the
+// stale response and drop it.
+//
+// Symptom this fixes (add-01 under random RAM): JAL at 0x800032fc
+// commits a correct mispredict to 0x8000331c, pc_out latches the
+// new target, but a stale rvalid for the JAL's PC+4 (0x80003300)
+// arrives the next cycle and pushes into the just-flushed buffer.
+// The aligner emits the wrong-path lw → uninitialised-sp load fault
+// → spin in the uninit mtvec. See project_pipeline_stall_tolerance_wip.md.
+//
+// Safe wrt reset PC: with first_fetch_pending_q (WIP patch Step 2),
+// the producer holds i_vaddr=reset_PC until the slave accepts, so
+// inflight_q is set before the reset-PC rvalid arrives.
+wire fb_push_raw = imem_port.rvalid && inflight_q && !arb_redirect_flushing && !xret_drop_push;
 
 fetch_pkg::fetch_buffer_entry_t fb_push_entry;
 assign fb_push_entry.word  = imem_port.rdata;
@@ -2085,6 +2190,7 @@ branch_target_address branch_target_address_inst
 	.target_o	(branch_target_address)
 );
 
+
 // ── BPU — IF-stage prediction (per-half, registered redirect) + ID fallback + RAS ──
 //
 // The BPU reads combinationally at i_vaddr and i_vaddr+2 (the fetch
@@ -2631,7 +2737,15 @@ core2avl core2avl_inst
 	// core side signals
 	.clk_i			    	(clk_i),
 	.reset_i		      (reset_i),
-	.stall_i			    (FALSE),
+	// Freeze the LSU's IWB formatting-control latch (be_iwb/mode_iwb/…)
+	// and the misalign FSM while the in-flight CPU load is still waiting
+	// on its rvalid. Without this, a following (non-load) instruction
+	// held at IE overwrites be_iwb to 0000 before the delayed read data
+	// arrives, so data2read_o formats the returned word as 0. Under the
+	// always-ready RAM rvalid coincides with c2a_load_pending_q so
+	// iwb_stall is permanently 0 here (no-op); only variable slave
+	// latency (+RAM_RANDOM_DELAY / write-back D$ miss) exposes the gap.
+	.stall_i			    (iwb_stall),
 	.load_store_width	(dbg_mem_override? load_store_width_e'(am_st_i) :  ctrl_bus_ie.load_store_width),
 	.mem_unsigned	  	(dbg_mem_override? FALSE : ctrl_bus_ie.mem_unsigned),
 	.mem_op				    (dbg_mem_override? mem_op_e'({1'b0,am_wr_i}) :
@@ -2721,6 +2835,32 @@ wire        ptw_grant,  amo_grant,  c2a_grant;
 wire        ptw_arb_ready, amo_arb_ready, c2a_arb_ready;
 wire        ptw_arb_rvalid, amo_arb_rvalid, c2a_arb_rvalid;
 wire [31:0] ptw_arb_rdata,  amo_arb_rdata,  c2a_arb_rdata;
+
+// ── CPU load in-flight tracker (variable-latency slave handling) ─────
+// hazard_unit's existing dmem_busy only stalls IE until c2a_arb_ready=1
+// (the request-acceptance edge). It does NOT wait for c2a_arb_rvalid
+// (the response). Under always-ready RAM that's fine — rvalid follows
+// accept by exactly 1 cycle and lines up with the IE→IMEM advance.
+// Under +define+RAM_RANDOM_DELAY rvalid can arrive N>1 cycles after
+// accept, so IMEM→IWB would capture readdata_imem while c2a_arb_rdata
+// is still stale/zero — the destination register silently gets 0.
+// (Symptom: pmpm_cfg_tor_check-01 reads its trap-handler-base pointer
+// as 0 → mtvec set to 0xfffffeac → first ECALL traps to garbage PC.)
+//
+// Mirrors the icache-side inflight_q (and amo_unit's dbus_stall_i =
+// ~amo_arb_rvalid pattern). Set when a c2a READ is accepted; held
+// until the matching rvalid arrives. Only tracks loads — stores
+// commit on ready alone, no rvalid wait needed.
+logic c2a_load_pending_q;
+always_ff @(posedge clk_i or posedge reset_i) begin
+    if (reset_i)
+        c2a_load_pending_q <= 1'b0;
+    else if (c2a_read & c2a_arb_ready)
+        c2a_load_pending_q <= 1'b1;     // accept-set wins over rvalid-clear,
+                                         // so back-to-back loads keep the flag high
+    else if (c2a_arb_rvalid)
+        c2a_load_pending_q <= 1'b0;
+end
 dmem_arb dmem_arb_inst (
     .clk_i                  (clk_i),
     .reset_i                (reset_i),
@@ -2785,6 +2925,26 @@ always_ff@(posedge clk_i or posedge reset_i)
 			exec_result_iwb <= exec_result_imem;
 			readdata_iwb <= readdata_imem;
 			stale_iwb <= stale_imem;
+		end
+		else begin
+			// iwb_stall holds the IMEM-stage load while it waits on its
+			// d-rvalid (variable slave latency). The instruction CURRENTLY
+			// in IWB has already committed on its first IWB cycle; the
+			// regfile write-enable + tracer retire are combinational on
+			// ctrl_bus_iwb, so simply HOLDING it would re-commit the same
+			// instruction every stall cycle (observed: a trap-handler
+			// `lw` retiring 6× in a row → state corruption / 2M-cycle loop
+			// in ecall/pmp/vm under +RAM_RANDOM_DELAY). Drain IWB to a
+			// bubble instead: the held instruction retires exactly once,
+			// then IWB is empty until the stalled load advances. Under
+			// always-ready RAM a dcache-miss can also raise iwb_stall, so
+			// this path runs at baseline too — but bubbling-after-one-
+			// commit is the correct single-retire semantics there as well.
+			ctrl_bus_iwb <= CTRL_BUS_NOP();
+			pc_iwb <= 0;
+			exec_result_iwb <= 0;
+			readdata_iwb <= 0;
+			stale_iwb <= 1'b1;
 		end
 	end
 // ============================================================

@@ -282,19 +282,47 @@ module soc_top
     );
 `endif
 
-    // ── D-port read data mux ────────────────────────────────
-    // Select read data from D-Cache or peripheral bridge
-    logic ram_sel_r;
+    // ── D-port read response routing ────────────────────────
+    // The CPU-side read response (rvalid/rdata) must be routed from the
+    // slave that owns the OUTSTANDING read — not from whatever the live
+    // bus address happens to select this cycle. The old `ram_sel_r`
+    // (registered ram_sel) mux only worked because the always-ready RAM
+    // returned rvalid exactly 1 cycle after the request, while ram_sel_r
+    // still mirrored the request address. Under variable slave latency
+    // (write-back D-cache miss, +RAM_RANDOM_DELAY, future AXI/DRAM) the
+    // CPU address moves off the RAM region the cycle after the request
+    // (the LSU drops addr to 0), so ram_sel deasserts and the later
+    // dc_cpu_rvalid was masked → the load response was silently dropped
+    // and the core stalled forever (see c2a_load_pending_q in core_top).
+    //
+    // Fix: latch the read target at request-accept and hold it until the
+    // matching rvalid returns. Single-outstanding (both the D-cache and
+    // the peripheral bridge are blocking — ready stays low during a miss
+    // so a second read can't be issued), so one target flop suffices.
+    // Mirrors dmem_arb's pending_rd_master_q ownership tracking.
+    logic rd_inflight_q;   // a read response is outstanding on the d-bus
+    logic rd_to_ram_q;     // outstanding read targets RAM (1) or periph (0)
+    wire  d_read_accept = dmem_bus.req & ~dmem_bus.we & dmem_bus.ready;
     always_ff @(posedge clk_i or posedge reset_i) begin
-        if (reset_i)
-            ram_sel_r <= 1'b0;
-        else
-            ram_sel_r <= ram_sel;
+        if (reset_i) begin
+            rd_inflight_q <= 1'b0;
+            rd_to_ram_q   <= 1'b0;
+        end else if (d_read_accept) begin
+            rd_inflight_q <= 1'b1;
+            rd_to_ram_q   <= ram_sel;
+        end else if (dmem_bus.rvalid) begin
+            rd_inflight_q <= 1'b0;
+        end
     end
 
-    assign dmem_bus.rdata  = ram_sel_r ? dc_cpu_rdata  : periph_rdata;
-    assign dmem_bus.rvalid = ram_sel_r ? dc_cpu_rvalid : periph_rvalid;
-    assign dmem_bus.ready  = ram_sel   ? dc_cpu_ready  : periph_ready;
+    // rdata follows the outstanding target; rvalid is gated on an
+    // outstanding read so a stray slave pulse can't leak through.
+    assign dmem_bus.rdata  = rd_to_ram_q ? dc_cpu_rdata : periph_rdata;
+    assign dmem_bus.rvalid = rd_inflight_q &
+                             (rd_to_ram_q ? dc_cpu_rvalid : periph_rvalid);
+    // ready is an accept-side signal: it must reflect the CURRENT
+    // request's target, so it stays keyed on live ram_sel.
+    assign dmem_bus.ready  = ram_sel ? dc_cpu_ready : periph_ready;
 
     // ── Debug signals ───────────────────────────────────────
     onebit_sig_e ar_en, ar_wr;

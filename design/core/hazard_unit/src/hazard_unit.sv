@@ -25,6 +25,16 @@ module hazard_unit (
     input  logic        d_page_fault_i,    // data page fault (stall IE 1 cycle for registered trap)
     input  logic        dmem_req_i,        // data-bus request pending
     input  logic        dmem_ready_i,      // data-bus ready
+    // Asserted while a CPU load has been accepted by the d-bus arb but
+    // its rvalid hasn't returned yet. Under always-ready RAM rvalid
+    // follows accept by exactly 1 cycle and the pipeline's natural
+    // IE→IMEM→IWB advance happens to land readdata sampling on the
+    // rvalid cycle, so this can stay 0 (the old behaviour). Under
+    // +define+RAM_RANDOM_DELAY (or any future variable-latency slave)
+    // rvalid can be N>1 cycles after accept; without this stall the
+    // IMEM→IWB transition captures `readdata_imem` while c2a_arb_rdata
+    // is still garbage, and the destination register gets zero/stale.
+    input  logic        dmem_rdata_pending_i,
     input  onebit_sig_e insert_bubble_i,   // structural hazard (stall_line)
 
     // ── Control-flow events ─────────────────────────────────────────────
@@ -92,7 +102,11 @@ module hazard_unit (
 // ═══════════════════════════════════════════════════════════════════════════
 wire dmem_busy = dmem_req_i & ~dmem_ready_i;
 
-assign iwb_stall_o  = onebit_sig_e'(1'b0);
+// iwb_stall holds the IMEM→IWB transition while the CPU load that's
+// currently in the IMEM stage is still waiting on its rvalid. Propagates
+// up the chain (iwb_stall → imem_stall → ie_stall) so the load stays
+// at IMEM with c2a_arb_rdata sampled on the same cycle rvalid arrives.
+assign iwb_stall_o  = onebit_sig_e'(dmem_rdata_pending_i);
 assign imem_stall_o = onebit_sig_e'(iwb_stall_o);
 assign ie_stall_o   = onebit_sig_e'(imem_stall_o | alu_stall_i | dmem_busy |
                                      amo_stall_i  | mmu_d_stall_i |

@@ -1,27 +1,31 @@
 // ── L1 Instruction Cache ─────────────────────────────────────────────
-// Phase 2b-ii of the bus revamp: cache hits now BYPASS the backing
-// store. mem_req is only issued on a miss; on a hit the cache returns
-// data from its internal arrays and the RAM access is skipped (real
-// bandwidth savings on hot loops + tight icache regions).
+// Phase 2b-iii: STALLING single-outstanding slave (variable RAM latency).
 //
-// Compared to Phase 2a (which forwarded every request to RAM and just
-// filled words on the side), 2b-ii is the first version where the cache
-// actually saves RAM port-A traffic.
+// Earlier (2b-ii) the cache was transparent: cpu_ready_o = mem_ready_i,
+// mem_addr_o = cpu_addr_i (combinational), and the hit/miss response was
+// derived from the LIVE cpu_addr_i. That silently assumes RAM returns
+// rvalid exactly 1 cycle after the request, with ready hard-1. Under
+// +RAM_RANDOM_DELAY (and any real AXI/DRAM slave) RAM port-A `ready`
+// drops and `rvalid` lags several cycles. During that window the master
+// has already advanced cpu_addr_i to the next fetch, so the transparent
+// cache returned the WRONG-OFFSET word (e.g. for a fetch of 0x..404 it
+// returned the word at 0x..408). That double-executed a branch target
+// and corrupted beq/bne/blt/cj signatures.
 //
-// Pipeline contract is UNCHANGED from 2a:
-//   - cpu_ready_o = mem_ready_i (always 1 here; never stalls).
-//   - cpu_rvalid_o asserts 1 cycle after acceptance, the same SRAM-
-//     style timing the fetch pipeline already expects.
-//
-// Why no stalling FSM / multi-beat fill in this commit: the producer
-// (`core_top.sv`) relies on the cache being able to accept a request
-// every cycle to drive the inflight_vaddr_q ↔ rdata alignment that
-// gives correct {word, vaddr} buffer entries for the very first fetch
-// at reset deassert. Real multi-beat fills with a stalling slave need
-// a producer-side "first fetch pending" register to keep the master
-// re-issuing the reset PC across the stall window — that lands later
-// (Phase 3 sub-step), together with the AXI burst master where the
-// burst geometry actually matters.
+// New contract (proper OBI-style single-outstanding slave):
+//   - cpu_ready_o is HIGH only when the cache can accept a NEW request
+//     this cycle (IDLE, not flushing, no RAM response still outstanding).
+//     While a miss fill is in flight cpu_ready_o is LOW so the master
+//     holds (addr, req) stable — the producer's inflight_vaddr_q latches
+//     on (req & ready) and so stays pinned to the in-flight fetch.
+//   - The fill address is CAPTURED (fill_{tag,index,word,addr}_q) at the
+//     accept-of-miss edge and used for the RAM request, the install slot,
+//     and the response — never the drifting live cpu_addr_i.
+//   - cpu_rvalid_o pulses exactly once per accepted request, carrying the
+//     data for THAT request: hit → 1-cycle registered cache word; miss →
+//     mem_rdata_i when the captured fill completes.
+// Under always-ready RAM (baseline) a miss simply takes 1 stall cycle;
+// hits are still accept-every-cycle, 1-cycle latency — same as 2b-ii.
 //
 // Geometry (unchanged from 2a):
 //   CACHE_BYTES    = 4096
@@ -116,58 +120,101 @@ always_comb begin
     end
 end
 
-// ── Memory-side req ──────────────────────────────────────────────────
-// 2b-ii change: skip the mem_req when this cycle's CPU request is a
-// hit AND the cache isn't being invalidated this cycle. The flush_i
-// guard MUST keep mem_req=1 during a FENCE.I cycle even if the cache
-// would have hit: hit_r is also gated to 0 by ~flush_i below, so
-// without forwarding to RAM the master would see neither hit_r nor
-// mem_rvalid_i — a silently dropped fetch. (That regression panicked
-// Linux init at flush_icache_pte during set_pte_range, mirroring
-// Phase 2a's "exitcode=0xb" race.)
-assign mem_req_o   = cpu_req_i & (~hit | flush_i);
-assign mem_addr_o  = cpu_addr_i;
-assign cpu_ready_o = mem_ready_i;
+// ── Stalling single-outstanding FSM ──────────────────────────────────
+typedef enum logic [0:0] { S_IDLE, S_FILL } state_e;
+state_e                    state_q;
 
-// ── Hit-side response (1-cycle pipeline matching SRAM timing) ────────
-// hit_r captures whether THIS request was a hit, so next cycle we know
-// to route cache data instead of mem data. cache_rdata_r samples the
-// hit-way data array unconditionally; it's only consumed on hit_r=1.
-logic                  hit_r;
-logic [DATA_WIDTH-1:0] cache_rdata_r;
+// Captured fill request (latched at accept-of-miss; used for the RAM
+// request, the install slot, and the response — never live cpu_addr_i).
+logic [TAG_BITS-1:0]       fill_tag_q;
+logic [INDEX_BITS-1:0]     fill_index_q;
+logic [WORD_OFF_BITS-1:0]  fill_word_q;
+logic [ADDR_WIDTH-1:0]     fill_addr_q;     // word-aligned RAM address
+logic                      fill_live_q;     // fill still wanted (cleared by FENCE.I)
 
-always_ff @(posedge clk_i) begin
-    hit_r         <= cpu_req_i & hit & ~flush_i;
-    cache_rdata_r <= data[hit_way_id][addr_index][addr_word_off];
-end
+// A RAM read has been accepted (mem_req & mem_ready) and its rvalid has
+// not yet arrived. Tracked across states so an abandoned (flushed) fill's
+// response is swallowed before a new fill can issue — keeps the RAM port
+// strictly single-outstanding.
+logic                      mem_outstanding_q;
 
-// Output: cache data on hit_r, RAM data on miss. cpu_rvalid_o is
-// hit_r OR mem_rvalid_i so the master sees a valid response in both
-// cases.
-assign cpu_rdata_o  = hit_r ? cache_rdata_r : mem_rdata_i;
-assign cpu_rvalid_o = hit_r | mem_rvalid_i;
+// Hit response register (1-cycle, matches the old SRAM timing).
+logic                      resp_valid_q;
+logic [DATA_WIDTH-1:0]     resp_data_q;
 
-// ── Miss fill pipeline (single-word, registered to align with RAM) ───
-// Unchanged from 2a: each miss response installs the responded word
-// into the picked way; the rest of the line stays invalid until those
-// words get touched. Multi-beat line fills are deferred to a later
-// phase where the AXI master path makes burst geometry meaningful.
-logic                      fill_pending_r;
-logic [TAG_BITS-1:0]       fill_tag_r;
-logic [INDEX_BITS-1:0]     fill_index_r;
-logic [WORD_OFF_BITS-1:0]  fill_word_r;
+// Accept a new CPU request only when idle, not flushing, and no RAM
+// response is still pending. While S_FILL the master is held (ready=0)
+// and must keep (addr, req) stable.
+assign cpu_ready_o = (state_q == S_IDLE) & ~flush_i & ~mem_outstanding_q;
+
+wire accept      = cpu_req_i & cpu_ready_o;
+wire accept_hit  = accept & hit;
+wire accept_miss = accept & ~hit;
+
+// Issue the RAM request on the accept-of-miss cycle (so always-ready RAM
+// keeps the same miss latency as 2b-ii) and keep re-driving it while the
+// fill is in flight until the slave accepts it. Never more than one RAM
+// read outstanding.
+assign mem_req_o  = (accept_miss | (state_q == S_FILL & fill_live_q))
+                    & ~mem_outstanding_q;
+assign mem_addr_o = (state_q == S_FILL) ? fill_addr_q
+                                        : {cpu_addr_i[ADDR_WIDTH-1:2], 2'b00};
+
+// The RAM accepted our read this cycle.
+wire mem_launch = mem_req_o & mem_ready_i;
+
+// Response: hit → registered cache word; miss → mem_rdata for the captured
+// fill. The two never collide because S_FILL holds cpu_ready=0, so no hit
+// can be accepted while a fill (and its rvalid) is in flight.
+assign cpu_rvalid_o = resp_valid_q | (state_q == S_FILL & fill_live_q & mem_rvalid_i);
+assign cpu_rdata_o  = resp_valid_q ? resp_data_q : mem_rdata_i;
 
 always_ff @(posedge clk_i or posedge reset_i) begin
     if (reset_i) begin
-        fill_pending_r <= 1'b0;
+        state_q           <= S_IDLE;
+        fill_live_q       <= 1'b0;
+        mem_outstanding_q <= 1'b0;
+        resp_valid_q      <= 1'b0;
     end else begin
-        // Track misses (where we actually issued mem_req). On hit we
-        // intentionally don't fill (the word is already cached) so
-        // fill_pending_r stays 0 and we don't double-install.
-        fill_pending_r <= cpu_req_i & ~hit & ~flush_i;
-        fill_tag_r     <= addr_tag;
-        fill_index_r   <= addr_index;
-        fill_word_r    <= addr_word_off;
+        resp_valid_q <= 1'b0;     // 1-cycle hit-response pulse default
+
+        // RAM single-outstanding tracking.
+        if (mem_launch)        mem_outstanding_q <= 1'b1;
+        else if (mem_rvalid_i) mem_outstanding_q <= 1'b0;
+
+        unique case (state_q)
+            S_IDLE: begin
+                if (accept_hit) begin
+                    resp_valid_q <= 1'b1;
+                    resp_data_q  <= data[hit_way_id][addr_index][addr_word_off];
+                end else if (accept_miss) begin
+                    state_q      <= S_FILL;
+                    fill_live_q  <= 1'b1;
+                    fill_tag_q   <= addr_tag;
+                    fill_index_q <= addr_index;
+                    fill_word_q  <= addr_word_off;
+                    fill_addr_q  <= {cpu_addr_i[ADDR_WIDTH-1:2], 2'b00};
+                end
+            end
+            S_FILL: begin
+                // FENCE.I abandons the in-flight fill; the core flushes +
+                // redirects on the same event, so its inflight_q is already
+                // cleared and no cpu_rvalid is owed. Any RAM read already
+                // launched is still drained via mem_outstanding_q below.
+                if (flush_i) fill_live_q <= 1'b0;
+
+                if (fill_live_q & ~flush_i & mem_rvalid_i) begin
+                    // Wanted response arrived → install (below) + return.
+                    state_q <= S_IDLE;
+                end else if (!(fill_live_q & ~flush_i)) begin
+                    // Abandoned fill: return to IDLE once the RAM port is
+                    // drained (rvalid for an already-launched read, or no
+                    // read launched at all this/last cycle).
+                    if (mem_rvalid_i || (~mem_outstanding_q & ~mem_launch))
+                        state_q <= S_IDLE;
+                end
+            end
+        endcase
     end
 end
 
@@ -182,7 +229,7 @@ always_comb begin
     install_tag_match     = 1'b0;
     install_tag_match_way = '0;
     for (int w = 0; w < WAYS; w++) begin
-        if (line_valid[w][fill_index_r] && tags[w][fill_index_r] == fill_tag_r) begin
+        if (line_valid[w][fill_index_q] && tags[w][fill_index_q] == fill_tag_q) begin
             install_tag_match     = 1'b1;
             install_tag_match_way = w[WAY_BITS-1:0];
         end
@@ -213,24 +260,24 @@ always_ff @(posedge clk_i or posedge reset_i) begin
                 end
             end
         end
-    end else if (fill_pending_r && mem_rvalid_i) begin
+    end else if (state_q == S_FILL && fill_live_q && mem_rvalid_i) begin
         automatic logic [WAY_BITS-1:0] install_way =
-            install_tag_match ? install_tag_match_way : repl_ptr[fill_index_r];
+            install_tag_match ? install_tag_match_way : repl_ptr[fill_index_q];
 
         if (!install_tag_match) begin
             // New tag in this set — evict the way picked by repl_ptr,
             // invalidate all its words, then install the requested one.
-            tags[install_way][fill_index_r] <= fill_tag_r;
+            tags[install_way][fill_index_q] <= fill_tag_q;
             for (int x = 0; x < WORDS_PER_LINE; x++) begin
-                word_valid[install_way][fill_index_r][x] <= 1'b0;
+                word_valid[install_way][fill_index_q][x] <= 1'b0;
             end
             // Bump round-robin pointer.
-            repl_ptr[fill_index_r] <= install_way + 1'b1;
+            repl_ptr[fill_index_q] <= install_way + 1'b1;
         end
 
-        line_valid[install_way][fill_index_r]                 <= 1'b1;
-        word_valid[install_way][fill_index_r][fill_word_r]    <= 1'b1;
-        data      [install_way][fill_index_r][fill_word_r]    <= mem_rdata_i;
+        line_valid[install_way][fill_index_q]                 <= 1'b1;
+        word_valid[install_way][fill_index_q][fill_word_q]    <= 1'b1;
+        data      [install_way][fill_index_q][fill_word_q]    <= mem_rdata_i;
     end
 end
 

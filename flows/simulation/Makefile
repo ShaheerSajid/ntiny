@@ -149,6 +149,7 @@ incisive_sim_gate:
 verilator_build:
 	verilator $(VERILATOR_COMMON) \
 	-DDV_TRACER \
+	$(VERILATOR_RISCOF_DEFINES) \
 	$(VERILATOR_INCDIRS) \
 	$(VERILATOR_SRCS)
 	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
@@ -163,6 +164,7 @@ verilator_build_random_ram:
 	verilator $(VERILATOR_COMMON) \
 	-DDV_TRACER \
 	+define+RAM_RANDOM_DELAY \
+	$(VERILATOR_RISCOF_DEFINES) \
 	$(VERILATOR_INCDIRS) \
 	$(VERILATOR_SRCS)
 	make -j4 -C obj_dir/ -f Vtb_soc_top.mk Vtb_soc_top
