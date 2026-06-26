@@ -1,3 +1,13 @@
+// ── ALU (execute stage) ──────────────────────────────────────────────
+// Computes the result of one instruction in the IE stage. Four result
+// classes are evaluated in parallel — base integer (int_result), the
+// M-extension (mul_result, includes the multi-cycle divider), the bit-
+// manipulation extensions Zba/Zbb/Zbs/Zbc (bit_result), and the optional
+// FPU (fpu_result) — and a priority mux at the bottom selects whichever
+// class the decoder activated. The decoder guarantees exactly one class is
+// active (the others sit at their NO_* sentinel), which is what the mux
+// keys on. Only the divider and the FPU take more than one cycle; they are
+// the sole source of alu_stall_o. See microarch doc: "Decode and execute".
 import common_pkg::*;
 import core_pkg::*;
 
@@ -5,19 +15,19 @@ module alu
 		(
 			input logic clk_i,
 			input logic	reset_i,
-			input logic	stall_i,
-      input logic flush_i,
-			input logic [31:0] a_i,
-			input logic [31:0] b_i,
-			input logic [31:0] c_i,
-			input alu_op_e alu_op_i,
-			input mul_op_e mul_op_i,
-			input bit_op_e bit_op_i,
-			input float_op_e float_op_i,
-			input roundmode_e roundmode_i,
-			output onebit_sig_e alu_stall_o,
-			output logic [31:0] result_o,
-			output float_status_e float_status_o
+			input logic	stall_i,            // freeze internal latches (tied 0 at top level)
+      input logic flush_i,                // squash an in-flight FP op on a pipeline flush
+			input logic [31:0] a_i,             // operand A (rs1, or PC)
+			input logic [31:0] b_i,             // operand B (rs2, or immediate)
+			input logic [31:0] c_i,             // operand C (rs3, FP fused multiply-add only)
+			input alu_op_e alu_op_i,            // base integer op   (NO_ALU_OP if not integer)
+			input mul_op_e mul_op_i,            // M-extension op    (NO_MUL_OP if not mul/div)
+			input bit_op_e bit_op_i,            // Zba/Zbb/Zbs/Zbc op (NO_BIT_OP if none)
+			input float_op_e float_op_i,        // FP op             (NO_FP_OP if not FP)
+			input roundmode_e roundmode_i,      // FP rounding mode (already resolved from DYN)
+			output onebit_sig_e alu_stall_o,    // hold the pipe while div/FPU is busy
+			output logic [31:0] result_o,       // selected result of this instruction
+			output float_status_e float_status_o // FP exception flags (to fflags CSR)
 		);
 
 	logic [31:0] int_result;
@@ -26,13 +36,14 @@ module alu
 	
 	//M-extension
 	wire logic [31:0] div_out, divu_out, rem_out, remu_out;
-	wire logic div_start;
-	wire logic div_valid;
-	wire logic div_sign;
+	wire logic div_start;   // a DIV/REM op is requested this cycle
+	wire logic div_valid;   // divider has finished (result ready)
+	wire logic div_sign;    // signed division (DIV/REM) vs unsigned (DIVU/REMU)
 	wire logic [31:0]mulh_res;
 	wire logic [31:0]mulhu_res;
 	wire logic [31:0]mulhsu_res;
-	
+
+	// Any of the four divide/remainder ops kicks the multi-cycle divider.
 	assign div_start = (mul_op_i == DIV) || (mul_op_i == REM) || (mul_op_i == DIVU) || (mul_op_i == REMU);
 	assign div_sign = (mul_op_i == DIV) || (mul_op_i == REM);
 
@@ -326,7 +337,9 @@ module alu
 	///////////////////////////////////////////////////////////////////////
 
 
-	//output mux
+	// Output mux: pick the active result class. The decoder leaves the
+	// unused class selectors at their NO_* sentinel, so at most one branch
+	// here is taken; the priority order is just a tidy way to express that.
 	always_comb
 	begin
 		if(alu_op_i != NO_ALU_OP)
@@ -341,6 +354,9 @@ module alu
 			result_o = 0;
 	end
 
+	// The ALU's only stall: a divide that has not finished, or a busy FPU.
+	// This folds into ie_stall in the hazard unit and freezes the front-end
+	// until the multi-cycle op retires. (Independent of memory latency.)
 	assign alu_stall_o = onebit_sig_e'((div_start & (~div_valid)) || fpu_stall);
 
 endmodule
